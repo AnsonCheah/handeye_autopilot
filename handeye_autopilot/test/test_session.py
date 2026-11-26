@@ -348,3 +348,18 @@ def test_measured_pose_outside_the_limits_stops_the_run(outcome):
     drifted = tf.make(np.eye(3), [0.0, 0.0, 0.2])           # ball now pokes out
     with pytest.raises(session._Abort, match='measured tool pose'):
         gen.send((outcome, None, drifted))
+
+
+def test_capture_pose_outside_the_limits_stops_the_run(monkeypatch):
+    """The motion reply said inside, the capture's TF says outside: the capture
+    is the freshest measurement and wins."""
+    s = _eih_box_session(box_size=(4.0, 4.0, 2 * 0.25), lever_max=0.05)
+    s._st.at_pose = np.eye(4)
+    outside = tf.make(np.eye(3), [0.0, 0.0, 0.2])
+    rec = session.CaptureRecord(0, 0.0, s.camera, np.zeros(0, np.int32), None, None,
+                                outside, None, None, None, False, codes.NO_BOARD, '')
+    monkeypatch.setattr(session, 'capture', lambda *a, **k: rec)
+    gen = s._capture('centring')
+    next(gen)
+    with pytest.raises(session._Abort, match='at capture'):
+        gen.send(([object()], None))

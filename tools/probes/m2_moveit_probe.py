@@ -197,7 +197,17 @@ def offset_tcp_path(cart, fk, link8, offset: float, degrees: float, dense: bool)
             'tcp_max_deviation_mm': round(worst * 1000, 3),
             # the trajectory really performs the rotation (not a stationary path)
             'tcp_rotation_deg': None if last is None else round(float(np.degrees(
-                Rotation.from_matrix(tcp0[:3, :3].T @ last[:3, :3]).magnitude())), 3)}
+                Rotation.from_matrix(tcp0[:3, :3].T @ last[:3, :3]).magnitude())), 3),
+            # and it is the requested rotation (axis included): angle to the goal
+            'tcp_goal_error_deg': None if last is None else round(float(np.degrees(
+                Rotation.from_matrix((tcp0 @ _rx(degrees))[:3, :3].T @ last[:3, :3])
+                .magnitude())), 3)}
+
+
+def _rx(deg: float) -> np.ndarray:
+    T = np.eye(4)
+    T[:3, :3] = Rotation.from_euler('x', deg, degrees=True).as_matrix()
+    return T
 
 
 def ik_call(node, client, pose, timeout: Duration) -> dict:
@@ -306,6 +316,8 @@ def main() -> None:
     if found['planning_failure'].get('status') == 4:
         missing.append('planning_failure.did_not_fail')
     # the not_started rule rests on these (01-architecture §3.2)
+    if found['planning_failure'].get('status') != 6:          # ABORTED, not CANCELED
+        missing.append('planning_failure.not_aborted')
     if found['planning_failure'].get('planned_points') != 0:
         missing.append('planning_failure.planned_points_not_zero')
     # ... and the arm did not move (the not_started evidence)
@@ -327,7 +339,8 @@ def main() -> None:
         if r.get('fraction') != 1.0 or r.get('error_code') != 1 or \
                 (r.get('points') or 0) < 2 or \
                 r.get('tcp_max_deviation_mm') is None or \
-                abs((r.get('tcp_rotation_deg') or 0.0) - 20.0) > 0.5:
+                abs((r.get('tcp_rotation_deg') or 0.0) - 20.0) > 0.5 or \
+                r.get('tcp_goal_error_deg') is None or r['tcp_goal_error_deg'] > 0.5:
             missing.append(k)
     # the evidence itself: dense waypoints keep the TCP on its path (sub-mm) and
     # clearly better than the end pose alone
