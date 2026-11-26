@@ -380,3 +380,21 @@ def test_newest_frame_pose_is_the_next_start(monkeypatch):
     with pytest.raises(StopIteration):
         gen.send(([Frame(img, 0.2, b), Frame(img, 0.1, a)], None))
     assert np.array_equal(s._st.at_pose, b)
+
+
+def test_seed_capture_frames_are_all_checked(monkeypatch):
+    """The consensus frame of the seed capture is inside the box, a newer frame is
+    outside: the seed is rejected and nothing moves."""
+    from handeye_autopilot.core.capture import Frame
+    from m1b_sim import BOARD, CAMERA
+    c = cfg(box_enabled=True, box_size=(1.0, 1.0, 1.0), envelope_radius=1.0)
+    s = session.Session('eye_to_hand', BOARD, CAMERA, FakeIK(0, 3), cfg=c)
+    good = run('eye_to_hand', session_cfg=cfg())[0].records[0]   # a real accepted seed
+    inside = tf.make(np.eye(3), [0.0, 0.0, 0.0])
+    outside = tf.make(np.eye(3), [0.6, 0.0, 0.0])
+    good.tool_pose = inside
+    monkeypatch.setattr(session, 'capture', lambda *a, **k: good)
+    img = np.zeros((2, 2), np.uint8)
+    s.on_capture([Frame(img, 0.0, inside), Frame(img, 0.1, outside)])
+    a = s.next_action()
+    assert isinstance(a, session.Finished) and a.result.failure == session.SEED_REJECTED

@@ -333,6 +333,10 @@ def main() -> None:
         missing.append('cancel_mid_motion.planned_points_missing')
     if found.get('cartesian_ok', {}).get('status') != 4:
         missing.append('cartesian_ok.not_succeeded')
+    j0 = found['back_to_ready'].get('joints_after')
+    j1 = found.get('cartesian_ok', {}).get('joints_after')
+    if j0 is None or j1 is None or max(abs(a - b) for a, b in zip(j0, j1, strict=True)) < 0.01:
+        missing.append('cartesian_ok.did_not_move')
     # an impossible Cartesian path must be refused before anything is sent
     ci = found.get('cartesian_impossible', {})
     if ci.get('submitted') is not False or 'reached only' not in str(ci.get('last_failure')):

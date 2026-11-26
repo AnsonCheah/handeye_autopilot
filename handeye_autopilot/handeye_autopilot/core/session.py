@@ -116,7 +116,8 @@ class _State:
     seed_tool: Mat | None = None
     skip_reasons: Counter[str] = field(default_factory=Counter)
     at_verified: bool = False           # robot is at the pose of the last accepted capture
-    at_pose: Mat | None = None          # tool pose the robot was last sent to (or the seed)
+    at_pose: Mat | None = None          # newest measured (or commanded) tool pose
+    frame_poses: list[Mat] = field(default_factory=list)   # last capture's measured poses
     X: Mat | None = None                # current estimate (after bootstrap)
     Z: Mat | None = None
 
@@ -182,8 +183,9 @@ class Session:
         # must be inside the limits, and the newest one is where the next move
         # starts (not only the frame consensus selected).
         measured = sorted((f for f in frames if f.tool_pose is not None), key=lambda f: f.stamp)
+        self._st.frame_poses = [np.asarray(f.tool_pose, dtype=float) for f in measured]
         if measured:
-            self._st.at_pose = np.asarray(measured[-1].tool_pose, dtype=float)
+            self._st.at_pose = self._st.frame_poses[-1]
             if self._st.seed_tool is not None:
                 for f in measured:
                     reason = self._limit_reason(np.asarray(f.tool_pose, dtype=float))
@@ -314,13 +316,17 @@ class Session:
             return
         seed_tool, seed_C = seed.tool_pose, seed.camera_T_board
         self._st.seed_tool = seed_tool
-        if self._limit_reason(seed_tool) is not None:     # e.g. outside the safety box
+        # the seed and every measured pose of the seed capture (the frames were
+        # taken before the seed was known, so _capture could not check them)
+        if any(self._limit_reason(G) is not None
+               for G in [seed_tool] + self._st.frame_poses):
             yield self._finish(SEED_REJECTED, 'the seed pose is outside the safety box'
                                + (' (with the carried object within L_max)'
                                   if cfg.box_check_moving_object else '')
                                + '; jog inside it or move/enlarge the box')
             return
-        self._st.at_pose = seed_tool
+        if self._st.at_pose is None:       # no TF in the frames (cannot happen when
+            self._st.at_pose = seed_tool   # accepted, kept for safety)
 
         # 2. bootstrap with incremental excitation (§B2)
         self.phase = BOOTSTRAP
@@ -506,7 +512,9 @@ class Session:
         for k in range(1, self.cfg.centring_steps + 1):
             p = start + (goal - start) * k / self.cfg.centring_steps
             G = handeye.tool_pose_for(self.mode, X, Z, tf.make(R, p - R @ centre))
-            if not bs.predicted_is_safe(self.mode, X, Z, good_tool, G, self.board,
+            # from where the robot is measured to be (the move starts there)
+            here = self._st.at_pose if self._st.at_pose is not None else good_tool
+            if not bs.predicted_is_safe(self.mode, X, Z, here, G, self.board,
                                         self.camera, margin):
                 return
             if not (yield from self._move(G, 'centring')):
