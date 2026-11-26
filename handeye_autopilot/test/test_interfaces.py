@@ -43,3 +43,10 @@ def test_quality_report_construct():
     report = QualityReport(gates=[gate], folds=5, fold_translation_max_m=0.001)
     assert report.gates[0].group == 'fold_sensitivity'
     assert report.folds == 5
+
+
+def test_core_rejection_codes_match_the_action():
+    from handeye_autopilot.core import codes
+    action = {getattr(Calibrate.Feedback, n) for n in dir(Calibrate.Feedback)
+              if n.startswith('REJECT_')}
+    assert action == set(codes.ALL)

@@ -13,9 +13,33 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install ruff mypy numpy
+      - run: pip install ruff mypy numpy==1.26.4 scipy==1.11.4 types-PyYAML
       - run: ruff check .
       - run: mypy
+
+  # The ROS-free core on OpenCV versions no ROS distro ships yet (4.12) and on
+  # 4.10 without ROS, so a detection change is checked on all three APIs fast.
+  core-opencv:
+    name: core on OpenCV ${{ matrix.opencv }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - opencv: '4.10.0.84'
+            numpy: '1.26.4'
+          - opencv: '4.12.0.88'
+            numpy: '2.2.6'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install opencv-python-headless==${{ matrix.opencv }} numpy==${{ matrix.numpy }} scipy pyyaml pytest
+      - working-directory: handeye_autopilot
+        run: >
+          PYTHONPATH=. python -m pytest -q test
+          --ignore=test/test_interfaces.py --ignore=test/test_pymoveit2_smoke.py
 
   build-and-test:
     name: ${{ matrix.ros_distribution }}
