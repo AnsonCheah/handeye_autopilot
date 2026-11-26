@@ -34,7 +34,7 @@ jobs:
           apt-get update
           apt-get install -y ros-${{ matrix.ros_distribution }}-moveit \
             ros-${{ matrix.ros_distribution }}-moveit-resources-panda-moveit-config \
-            ros-${{ matrix.ros_distribution }}-pymoveit2 python3-yaml \
+            ros-${{ matrix.ros_distribution }}-pymoveit2 python3-yaml python3-numpy python3-scipy \
             ros-${{ matrix.ros_distribution }}-joint-state-broadcaster \
             ros-${{ matrix.ros_distribution }}-joint-trajectory-controller
       - name: Run the probe

@@ -60,7 +60,9 @@ Solving uses OpenCV + SciPy. Interop (v1.1): export observations in
 | Visualisation | RViz2, `MarkerArray`, OpenCV drawing | Marker builders |
 | Run recording | `ros2 bag record` (launch option) | Observations YAML for offline re-solve (`core/observations.py`); result YAML (`core/results.py`); `resolve` CLI (`cli/resolve.py`) |
 | Start / cancel / progress | ROS 2 action | One action definition |
-| Manual capture trigger | `std_srvs/srv/Trigger` | Nothing |
+| Manual capture trigger, finish, clear fault | `std_srvs/srv/Trigger` | Nothing |
+| Node parameters and profiles | rclpy parameters; YAML profile files | A loader mapping parameters and profiles onto the `core` config dataclasses (§5a) |
+| Camera subtree and TF tree queries | `tf2_ros` Buffer (`all_frames_as_yaml`), a `/tf_static` subscription | Subtree walk + ownership checks (§9) |
 | Robots for demos and CI | UR (`ur_robot_driver` mock hardware), Panda (`moveit_resources_panda`) | Demo launch files |
 | Camera simulation | Gazebo + `ros_gz` (optional, realistic) | Lightweight homography renderer for deterministic CI (§10) |
 
@@ -232,7 +234,7 @@ one updates it):
 | Package | build / buildtool | exec | test |
 |---|---|---|---|
 | `handeye_autopilot_interfaces` | `ament_cmake`, `rosidl_default_generators`, `geometry_msgs`, `action_msgs`, `service_msgs` | `rosidl_default_runtime`, `geometry_msgs`, `action_msgs`, `service_msgs` | — |
-| `handeye_autopilot` | — | `python3-numpy`, `python3-scipy`, `python3-opencv`, `python3-yaml`, `rclpy`, `cv_bridge`, `image_geometry`, `tf2_ros`, `geometry_msgs`, `sensor_msgs`, `std_srvs`, `moveit_msgs`, `pymoveit2`, `handeye_autopilot_interfaces` | `python3-pytest` |
+| `handeye_autopilot` | — | `python3-numpy`, `python3-scipy`, `python3-opencv`, `python3-yaml`, `rclpy`, `cv_bridge`, `image_geometry`, `tf2_ros`, `geometry_msgs`, `sensor_msgs`, `std_srvs`, `moveit_msgs`, `pymoveit2`, `handeye_autopilot_interfaces`; M3: `std_msgs`, `builtin_interfaces`, `tf2_msgs`, `visualization_msgs`, `ament_index_python`, `launch`, `launch_ros`, `ros2bag` | `python3-pytest`; M3: `launch_testing`, `launch_testing_ros` |
 | `handeye_autopilot_demos` | — | `handeye_autopilot`, `handeye_autopilot_interfaces`, `launch`, `launch_ros`, `moveit_resources_panda_moveit_config`, `ur_moveit_config`, `ur_robot_driver` | `python3-pytest` |
 
 **Dependency gate (CI, every PR, every distro;
@@ -333,15 +335,76 @@ whose `passed` is false and unused), `value`, `limit`, `gated` (false for
 accuracy evidence), `passed`. See checkpoint 2 §F for what each group does and does not prove.
 
 Error codes and the `mode`/`execution` strings are constants in the action
-definition. Fields may still change until the interface freeze at the end of
-M3.
+definition. **Frozen at the end of M3** (exercised by the node and its
+tests, no changes were needed); a later change bumps the interface package
+version.
+
+## 5a. Node surface (M3)
+
+One node, `handeye_autopilot` (`ros2 run handeye_autopilot calibrate_node`).
+
+**Topics in:** `image` (`sensor_msgs/Image`, sensor-data QoS) and
+`camera_info` (§7), both relative names to remap; `/tf`, `/tf_static`;
+`/joint_states` (only for `~/clear_fault`).
+**Topics out:** `~/annotated_image` (detected corners, outline, rejection
+reason), `~/markers` (`MarkerArray`: board outline at the last accepted
+capture, in the optical frame).
+**Action:** `~/calibrate` (`Calibrate`). **Services:** `~/capture`,
+`~/finish`, `~/clear_fault` (`std_srvs/Trigger`).
+
+**Parameters** (defaults in `config/default.yaml`, all snapshotted at goal
+acceptance):
+- frames: `base_frame`, `tool_frame`, `board_frame`; the optical frame comes
+  from `CameraInfo.header.frame_id`; `camera_root_frame` (empty = the topmost
+  ancestor of the optical frame, §9);
+- `image_is_rectified` (§7); `output_dir` (each run writes
+  `<output_dir>/<UTC time>/result.yaml` and `observations.yaml`);
+- `board.*` = `BoardSpec` fields; `capture.*`, `solver.*`, `session.*` = the
+  fields of `CaptureConfig`, `SolverConfig`, `SessionConfig` (one parameter per
+  field, same name, generated from the dataclasses so they cannot drift);
+- `timing.*`: `settle_window`, `settle_translation`, `settle_rotation`,
+  `settle_timeout`, `tf_timeout`, `clock_tolerance`, `camera_info_timeout`,
+  `frame_timeout` *(tune)*;
+- `profiles_dir`: a profile `P` is the file `<profiles_dir>/P.yaml`, a
+  mapping with the same groups (`board`, `capture`, `solver`, `session`,
+  `timing`, frames) overriding the node parameters for one run. Unknown
+  profile (no file) = rejected at admission; a file that fails to parse or
+  validate = accepted, then `ABORTED` with `INVALID_GOAL`;
+- `testing.allow_fault_injection` (default false): adds `~/inject_fault`,
+  which sets the motion fault latch, so the latch's admission rule is testable
+  before M4 produces real motion faults. Never enabled by the shipped launch
+  files.
+
+**Manual mode run:** preflight (§7–8: `CameraInfo`, one image, clock domain,
+TF `base → tool`) → phase `manual_capture`: the operator jogs the robot and
+calls `~/capture` for each pose (settle, N frames, TF per frame, `core`
+capture gates; the outcome arrives in feedback) → the run solves when
+`session.target_captures` captures are accepted or the operator calls
+`~/finish` (refused below `solver.min_captures` accepted) → solve, verify,
+gates (`core.quality.calibrate`) → result YAML, observations YAML, action
+result. Phase strings as in `Calibrate.Feedback`.
+
+**Synthetic camera node** (`synthetic_camera`, tests and demos): publishes
+`image` + `camera_info` at a rate, rendering the board with `core.render` at
+the pose given by the true mounts (parameters, never published as TF) and the
+latest `base → tool` TF; publishes its own driver subtree
+`camera_link → camera_optical_frame` on `/tf_static`, like a real driver, so
+the subtree rule (§9) is exercised.
+
+**Launch files:** `calibrate.launch.py` (node + parameters, `record:=true`
+adds `ros2 bag record` of the camera, TF, joint-state and annotated-image
+topics into the run's output directory); `result.launch.py result_file:=…`
+(publishes `parent → camera_root` from a result YAML with
+`static_transform_publisher`, refusing a result whose ownership checks
+failed).
 
 ## 6. Concurrency and cancellation
 
 - `MultiThreadedExecutor`. Callback groups: a reentrant group for TF, image
   and camera-info subscriptions; a separate group for the action server and
-  capture service; the run itself executes as the action's async execute
-  callback and only awaits futures, never blocks on spin.
+  services; the run executes in the action's execute callback on an executor
+  worker thread and waits only on events, TF lookups and images, each with a
+  deadline; it never spins (as built in M3).
 - The action server installs a cancel callback that **accepts** cancellation
   (rclpy's default rejects it).
 - Cancel during motion: call pymoveit2's cancel on the active motion goal
@@ -378,10 +441,10 @@ M3.
 - Reject uncalibrated `CameraInfo` (`K` all zero). Reject non-default binning or
   ROI in v1 (`shortcut: binning/ROI unsupported, scale K when someone needs it`).
 - Images use sensor-data QoS. `CameraInfo` is **not** time-synchronised: the
-  node keeps the latest message (its subscription uses reliable,
-  transient-local QoS when the driver offers it, so a latched message arrives
-  late-joining) and the image callback uses it if `frame_id` and image size
-  match. A changed `CameraInfo` mid-run aborts the run (`NO_CAMERA_INFO` with a
+  node keeps the latest message and uses it if `frame_id` and image size
+  match. Its subscription is best-effort + volatile (as built in M3), which is
+  compatible with every publisher QoS; camera drivers re-send `CameraInfo`
+  with each image, so a latched copy is not needed. A changed `CameraInfo` mid-run aborts the run (`NO_CAMERA_INFO` with a
   message), since the intrinsics are fixed per run.
 
 ## 8. Capture timing
@@ -424,6 +487,10 @@ M3.
   - **cycle check:** `root` must not be an ancestor of `parent` (walk
     `parent`'s ancestors in the TF tree); otherwise refuse.
 - Parent = `base_frame` (eye-to-hand) or `tool_frame` (eye-in-hand).
+- The node runs the checks when the run finishes and writes the outcome to the
+  result YAML (`publish`: parent, root, transform; or `null` with the reason).
+  The result launch publishes only a result whose checks passed, so the
+  calibration itself is never lost to an ownership problem.
 - Depth and other driver frames follow automatically, as long as the driver's
   internal extrinsics are right (documented as an assumption).
 
