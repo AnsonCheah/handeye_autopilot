@@ -10,14 +10,13 @@ from pathlib import Path
 import sys
 
 import cv2
-import numpy as np
-import pytest
-import yaml
-
 from handeye_autopilot.core.boards import BoardSpec
 from handeye_autopilot.core.camera import CameraModel
 from handeye_autopilot.core.capture import Frame, process_frame
 from handeye_autopilot.core.config import CaptureConfig
+import numpy as np
+import pytest
+import yaml
 
 HERE = Path(__file__).resolve().parent
 DIR = HERE / 'fixtures' / 'real_opencv'
