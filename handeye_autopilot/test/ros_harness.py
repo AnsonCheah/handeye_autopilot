@@ -33,6 +33,7 @@ class FakeRobot(Node):
         self.freeze = False
         self.delay = 0.0
         self._queue: deque = deque()
+        self.history: deque = deque(maxlen=5000)      # (stamp_ns, G) as published
         self._lock = threading.Lock()
         self.pub = self.create_publisher(TFMessage, '/tf', 100)
         self.create_timer(1.0 / rate, self._tick)
@@ -46,6 +47,7 @@ class FakeRobot(Node):
         if not self.freeze:
             with self._lock:
                 msg = tf_tools.to_msg(self.G, self.base, self.tool, now.to_msg())
+                self.history.append((now.nanoseconds, self.G.copy()))
             self._queue.append((time.monotonic() + self.delay, msg))
         while self._queue and self._queue[0][0] <= time.monotonic():
             self.pub.publish(TFMessage(transforms=[self._queue.popleft()[1]]))

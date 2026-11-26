@@ -139,7 +139,7 @@ def run_captures(w, n, accepted_target=None):
 # -- timing and clock (§8) -----------------------------------------------------
 
 def test_delayed_tf_within_the_timeout_is_waited_for(world_factory):
-    w = world_factory()
+    w = world_factory(cam_over={'stamp_from_clock': True})
     w.robot.delay = 0.25                       # TF arrives 0.25 s late (< tf_timeout)
     time.sleep(0.5)
     assert w.driver.send().accepted
@@ -149,7 +149,7 @@ def test_delayed_tf_within_the_timeout_is_waited_for(world_factory):
 
 
 def test_tf_that_never_arrives_rejects_the_capture(world_factory):
-    w = world_factory()
+    w = world_factory(cam_over={'stamp_from_clock': True})
     h = w.driver.send()
     w.driver.wait_phase(FB.PHASE_MANUAL_CAPTURE)
     w.robot.delay = 2.0                        # later than tf_timeout: never substituted
@@ -341,4 +341,146 @@ def test_services_refuse_outside_their_phase(world_factory):
     assert not r.success and 'at least 8' in r.message
     d.wait(h.cancel_goal_async())
     w.result(h)
+
+
+# -- review fixes (M3 xhigh pass 1) -------------------------------------------------
+
+def test_each_frame_is_paired_with_the_pose_at_its_own_stamp(world_factory):
+    """The robot keeps moving in small steps, with a settle loose enough to pass:
+    every recorded tool pose must be exactly the pose published at the image's
+    stamp, never the latest one."""
+    w = world_factory(node_over={'timing.settle_translation': 1.0,
+                                 'timing.settle_rotation': 3.0,
+                                 'capture.consensus_max_translation_frac': 1.0,
+                                 'capture.consensus_max_rotation': 3.0})
+    d = w.driver
+    h = d.send()
+    d.wait_phase(FB.PHASE_MANUAL_CAPTURE)
+    stop = threading.Event()
+    base = w.poses[0]
+
+    def creep():
+        k = 0
+        while not stop.is_set():
+            k += 1
+            w.robot.move_to(base @ tf.make(np.eye(3), [0.0005 * (k % 40), 0, 0]))
+            time.sleep(0.02)
+    t = threading.Thread(target=creep, daemon=True)
+    t.start()
+    d.capture_and_wait()
+    stop.set()
+    d.wait(h.cancel_goal_async())
+    w.result(h)
+    recs = [r for r in w.node.last_run_records if r.tool_pose is not None]
+    assert recs, 'no record carried a tool pose'
+    hist = dict(w.robot.history)
+    for r in recs:
+        ns = round(r.stamp * 1e9)
+        match = min(hist, key=lambda s: abs(s - ns))
+        assert abs(match - ns) < 2000                  # the very TF message of that stamp
+        assert np.allclose(hist[match], r.tool_pose, atol=1e-9)
+
+
+def test_clock_jump_during_a_capture_aborts(world_factory):
+    w = world_factory(sim_time=True, node_over={'timing.settle_timeout': 30.0})
+    d = w.driver
+    h = d.send()
+    d.wait_phase(FB.PHASE_MANUAL_CAPTURE)
+    stop = threading.Event()
+
+    def wobble():
+        k = 0
+        while not stop.is_set():
+            k += 1
+            w.robot.move_to(w.poses[k % 2])
+            time.sleep(0.05)
+    threading.Thread(target=wobble, daemon=True).start()
+    assert d.call(d.capture).success
+    d.wait_phase(FB.PHASE_CAPTURING)
+    w.clock.jump(-100.0)
+    res = w.result(h).result
+    stop.set()
+    assert res.error_code in (R.TF_UNAVAILABLE,), res.message
+    assert 'jumped back' in res.message or 'clock' in res.message
+
+
+def test_camera_switch_mid_run_aborts(world_factory):
+    w = world_factory()
+    d = w.driver
+    h = d.send()
+    d.wait_phase(FB.PHASE_MANUAL_CAPTURE)
+    w.camera.optical = 'other_camera_optical_frame'    # images now from another frame
+    time.sleep(0.3)
+    d.call(d.capture)
+    res = w.result(h).result
+    assert res.error_code == R.NO_CAMERA_INFO
+
+
+def test_capture_refused_once_the_run_is_finishing(world_factory, tmp_path):
+    (tmp_path / 'tiny.yaml').write_text('session:\n  target_captures: 3\nsolver:\n'
+                                        '  min_captures: 3\n')
+    w = world_factory(node_over={'profiles_dir': str(tmp_path),
+                                 'timing.settle_window': 0.3})
+    d = w.driver
+    h = d.send(profile='tiny')
+    d.wait_phase(FB.PHASE_MANUAL_CAPTURE)
+    run_captures(w, len(w.poses), accepted_target=3)
+    r = d.call(d.capture)
+    assert not r.success
+    assert w.result(h).result.quality.captures_accepted == 3
+
+
+def test_profile_with_a_string_boolean_is_invalid(world_factory, tmp_path):
+    (tmp_path / 'strbool.yaml').write_text('image_is_rectified: "false"\n')
+    w = world_factory(node_over={'profiles_dir': str(tmp_path)})
+    res = w.result(w.driver.send(profile='strbool')).result
+    assert res.error_code == R.INVALID_GOAL and 'image_is_rectified' in res.message
+
+
+def test_replayed_joint_state_does_not_clear_the_fault(world_factory):
+    from sensor_msgs.msg import JointState
+    w = world_factory()
+    d = w.driver
+    assert d.call(d.inject_fault).success
+    pub = w.client.create_publisher(JointState, '/joint_states', 10)
+
+    def replay():
+        time.sleep(0.3)
+        m = JointState(name=['j1'], position=[0.1])
+        m.header.stamp.sec = 10                       # an old, replayed message
+        pub.publish(m)
+    threading.Thread(target=replay, daemon=True).start()
+    r = d.call(d.clear_fault)
+    assert not r.success
+
+
+def test_moving_camera_link_is_not_publishable(world_factory):
+    """camera_link -> optical also appears on /tf (a moving link): refused."""
+    from handeye_autopilot.ros import tf_tools
+    from tf2_msgs.msg import TFMessage
+    import yaml
+    w = world_factory()
+    pub = w.client.create_publisher(TFMessage, '/tf', 10)
+    stop = threading.Event()
+
+    def spam():
+        while not stop.is_set():
+            m = tf_tools.to_msg(w.camera.T_root_optical, 'camera_link',
+                                'camera_optical_frame', w.client.get_clock().now().to_msg())
+            pub.publish(TFMessage(transforms=[m]))
+            time.sleep(0.1)
+    threading.Thread(target=spam, daemon=True).start()
+    time.sleep(0.5)
+    res = _finish_run(w)
+    stop.set()
+    pub_doc = yaml.safe_load(open(res.result_file))['publish']
+    assert not pub_doc['ok'] and '/tf' in pub_doc['reason']
+
+
+def test_publish_result_rechecks_the_live_tree():
+    from handeye_autopilot.ros.publish_result import check
+    assert check({}, 'base_link', 'camera_link') == ''
+    assert 'already has a parent' in check({'camera_link': 'mount'}, 'base_link',
+                                           'camera_link')
+    assert 'cycle' in check({'base_link': 'camera_link'}, 'base_link', 'camera_link')
 

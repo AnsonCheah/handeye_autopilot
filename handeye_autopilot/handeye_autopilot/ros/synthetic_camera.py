@@ -7,9 +7,12 @@ the core homography renderer at the pose the TRUE mounts give (parameters,
 never published as TF: they are what the calibration must find) and the latest
 ``base -> tool`` TF. Like a real driver it publishes its own rigid subtree
 ``camera_root_frame -> optical_frame`` on /tf_static, so the subtree rule (§9)
-is exercised. ``stamp_offset`` (s) shifts image stamps to test the clock
-preflight. Limits of the renderer: no lens shading, no occlusion, no motion
-blur (02-features §H).
+is exercised. Each image is stamped with the TF stamp of the robot pose it
+was rendered at, so image time and robot pose correspond exactly.
+``stamp_from_clock`` stamps with the node clock instead (a camera whose time
+does not depend on TF, for delayed-TF tests); ``stamp_offset`` (s) shifts
+image stamps to test the clock preflight. Limits of the renderer: no lens
+shading, no occlusion, no motion blur (02-features §H).
 """
 
 from __future__ import annotations
@@ -72,6 +75,7 @@ class SyntheticCamera(Node):
         d('board.dictionary', 'DICT_5X5_100')
         d('noise_sigma', 2.0)
         d('stamp_offset', 0.0)
+        d('stamp_from_clock', False)   # stamp with the node clock, not the pose's TF stamp
         d('seed', 0)
 
         g = self.get_parameter
@@ -93,6 +97,7 @@ class SyntheticCamera(Node):
         self.T_root_optical = tf.make(Rotation.from_euler('xyz', OPTICAL_RPY), np.zeros(3))
         self.Z = pose(list(g('true_board_xyz_rpy').value))
         self.offset = float(g('stamp_offset').value)
+        self.stamp_from_clock = bool(g('stamp_from_clock').value)
         self.rng = np.random.default_rng(int(g('seed').value))
         tex, H = board_texture(self.board, 60, 30)
         self.texture, self.tex_H = tex, H
@@ -134,10 +139,13 @@ class SyntheticCamera(Node):
         got = tf_tools.latest(self.tf_buffer, self.base, self.tool)
         if got is None:
             return                                   # no robot yet: no image
-        C = self.board_in_camera(got[0])
+        G, tf_stamp = got
+        C = self.board_in_camera(G)
         img = self.renderer.render([PlanarObject(self.texture, self.tex_H, C)], self.rng)
-        now = self.get_clock().now().nanoseconds * 1e-9 + self.offset
-        stamp = tf_tools.stamp_to_time(now).to_msg()
+        # the image shows the robot at the pose's TF stamp: stamp it with that
+        # instant (an exposure at time t shows the robot at t), plus any offset
+        t = self.get_clock().now().nanoseconds * 1e-9 if self.stamp_from_clock else tf_stamp
+        stamp = tf_tools.stamp_to_time(t + self.offset).to_msg()
         msg = self.bridge.cv2_to_imgmsg(img, encoding='mono8')
         msg.header.stamp, msg.header.frame_id = stamp, self.optical
         self.pub_img.publish(msg)

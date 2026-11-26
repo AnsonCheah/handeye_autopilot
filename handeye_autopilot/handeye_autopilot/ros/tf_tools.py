@@ -56,13 +56,15 @@ def stamp_to_time(stamp: float) -> RclTime:
     return RclTime(seconds=sec, nanoseconds=int(round((stamp - sec) * 1e9)))
 
 
-def lookup_at(buffer: tf2_ros.Buffer, target: str, source: str, stamp: float,
+def lookup_at(buffer: tf2_ros.Buffer, target: str, source: str, stamp: float | int,
               timeout: float) -> Mat | None:
-    """``target_T_source`` at ``stamp`` (waits up to ``timeout``), or None. Never
-    substitutes the latest TF (§8): extrapolation or a missing stamp gives None."""
+    """``target_T_source`` at ``stamp`` (float s, or int ns for an exact message
+    stamp; waits up to ``timeout``), or None. Never substitutes the latest TF
+    (§8): extrapolation or a missing stamp gives None. The wait blocks the
+    calling worker thread; TF keeps arriving on the executor's other threads."""
+    when = RclTime(nanoseconds=stamp) if isinstance(stamp, int) else stamp_to_time(stamp)
     try:
-        t = buffer.lookup_transform(target, source, stamp_to_time(stamp),
-                                    timeout=Duration(seconds=timeout))
+        t = buffer.lookup_transform(target, source, when, timeout=Duration(seconds=timeout))
     except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
             tf2_ros.ExtrapolationException, tf2_ros.TransformException):
         return None
@@ -91,32 +93,35 @@ class Settled:
 def settle(buffer: tf2_ros.Buffer, base: str, tool: str, now: callable,  # type: ignore[valid-type]
            window: float, max_translation: float, max_rotation: float, timeout: float,
            cancelled: threading.Event | None = None, poll: float = 0.02) -> Settled:
-    """§8 settle: the tool pose is still over ``window`` s AND the robot's
-    measurement is fresh (the latest TF is newer than the settle start, which
-    catches frozen joint states). ``now()`` returns the node clock in s."""
+    """§8 settle: the robot's measurement is fresh (TF stamped after the settle
+    start, which catches frozen joint states) AND, among those fresh samples,
+    the tool pose stayed still over at least ``window`` s of stamps, with at
+    least three samples in it. ``now()`` returns the node clock in s."""
     start = now()
     deadline = time.monotonic() + timeout
-    samples: list[tuple[float, Mat]] = []
-    fresh = False
+    fresh: list[tuple[float, Mat]] = []
     while time.monotonic() < deadline:
         if cancelled is not None and cancelled.is_set():
             return Settled(False, reason='cancelled')
+        if now() < start - 0.5:
+            return Settled(False, reason='the node clock jumped back during the settle')
         got = latest(buffer, base, tool)
         if got is not None:
             T, stamp = got
-            fresh = fresh or stamp > start
-            if not samples or stamp > samples[-1][0]:
-                samples.append((stamp, T))
-            if fresh:
-                recent = [(s, P) for s, P in samples if s >= samples[-1][0] - window]
-                span = recent[-1][0] - recent[0][0]
-                if span >= window * 0.9:
-                    ref = recent[-1][1]
-                    still = all(np.linalg.norm(P[:3, 3] - ref[:3, 3]) <= max_translation and
-                                Rotation.from_matrix(P[:3, :3].T @ ref[:3, :3]).magnitude()
-                                <= max_rotation for _, P in recent)
-                    if still:
-                        return Settled(True, now(), ref)
+            if stamp > start and (not fresh or stamp > fresh[-1][0]):
+                fresh.append((stamp, T))
+            if fresh and fresh[-1][0] - fresh[0][0] >= window:
+                last = fresh[-1][0]
+                # the newest sample at or before (last - window) opens the window
+                i = max(k for k, (st, _) in enumerate(fresh) if st <= last - window)
+                recent = fresh[i:]
+                ref = recent[-1][1]
+                still = len(recent) >= 3 and all(
+                    np.linalg.norm(Pm[:3, 3] - ref[:3, 3]) <= max_translation and
+                    Rotation.from_matrix(Pm[:3, :3].T @ ref[:3, :3]).magnitude() <= max_rotation
+                    for _, Pm in recent)
+                if still:
+                    return Settled(True, now(), ref)
         time.sleep(poll)
     if not fresh:
         return Settled(False, reason=f'no TF {base} -> {tool} newer than the settle start '
@@ -129,7 +134,8 @@ def settle(buffer: tf2_ros.Buffer, base: str, tool: str, now: callable,  # type:
 # -- camera subtree and ownership (§9) -------------------------------------------
 
 class StaticLinks:
-    """Every (parent, child) seen on /tf_static (latched, so late joiners get all)."""
+    """Every (parent, child) seen on /tf_static (latched, so late joiners get all),
+    or, for the dynamic instance, on /tf."""
 
     def __init__(self) -> None:
         self.links: set[tuple[str, str]] = set()
@@ -168,7 +174,7 @@ class Subtree:
 
 
 def camera_subtree(tree: dict[str, str], static: StaticLinks, optical: str, parent: str,
-                   root_param: str) -> Subtree:
+                   root_param: str, dynamic: StaticLinks | None = None) -> Subtree:
     """§9: find the camera driver's subtree root and check it may be attached.
 
     - chain optical -> ... -> root, every link published on /tf_static;
@@ -194,6 +200,9 @@ def camera_subtree(tree: dict[str, str], static: StaticLinks, optical: str, pare
                        f'{parent} -> {root} would make a cycle; set camera_root_frame to the '
                        "camera driver's own root frame")
     for child, par in zip(chain, chain[1:], strict=False):
+        if dynamic is not None and dynamic.has(par, child):
+            return Subtree(root, chain, f'{par} -> {child} is also published on /tf (moving): '
+                           'the camera subtree must be static')
         if not static.has(par, child):
             return Subtree(root, chain, f'{par} -> {child} is not on /tf_static: the camera '
                            'subtree must be static (a moving link cannot be calibrated '

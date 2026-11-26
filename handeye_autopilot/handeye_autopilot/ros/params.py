@@ -159,6 +159,16 @@ def build(doc: dict[str, Any], profile: str = '') -> RunConfig:
     for k in ('base_frame', 'tool_frame', 'board_frame'):
         if not isinstance(doc.get(k), str) or not doc[k]:
             raise ValueError(f'{k} must be a non-empty frame name')
+    if not isinstance(doc.get('camera_root_frame', ''), str):
+        raise ValueError('camera_root_frame must be a string')
+    for k in ('image_is_rectified',):
+        if not isinstance(doc.get(k), bool):          # "false" (a string) must not pass
+            raise ValueError(f'{k} must be true or false, got {doc.get(k)!r}')
+    if not isinstance(doc.get('output_dir'), str):
+        raise ValueError('output_dir must be a string')
+    for group in ('board', 'capture', 'solver', 'session', 'timing'):
+        if not isinstance(doc.get(group), dict):
+            raise ValueError(f'{group} must be a mapping')
     if doc['base_frame'] == doc['tool_frame']:
         raise ValueError('base_frame and tool_frame must differ')
     board = BoardSpec.from_dict(dict(doc['board']))
@@ -169,16 +179,18 @@ def build(doc: dict[str, Any], profile: str = '') -> RunConfig:
         session=SessionConfig(**dict(doc['session'])),
         timing=Timing(**dict(doc['timing'])),
         frames={k: str(doc[k]) for k in FRAME_DEFAULTS},
-        image_is_rectified=bool(doc['image_is_rectified']),
-        output_dir=str(doc['output_dir']),
+        image_is_rectified=doc['image_is_rectified'],
+        output_dir=doc['output_dir'],
         profile=profile,
         snapshot=doc,
     )
 
 
-def load_run_config(node: Node, profile: str) -> RunConfig:
-    """Node parameters, overridden by the profile file if one is named."""
-    doc = node_values(node)
+def load_run_config(node: Node, profile: str, snapshot: dict[str, Any] | None = None
+                    ) -> RunConfig:
+    """Node parameters (``snapshot``: as taken at goal acceptance), overridden by
+    the profile file if one is named."""
+    doc = snapshot if snapshot is not None else node_values(node)
     if profile:
         path = profile_path(node, profile)
         if path is None:

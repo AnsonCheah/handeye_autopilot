@@ -9,6 +9,11 @@ code against the live processes
 
 import math
 import os
+
+import pytest
+
+pytest.importorskip('launch_testing')        # ROS-free CI jobs collect this file too
+
 import tempfile
 import threading
 import time
@@ -26,10 +31,10 @@ import launch_ros.actions
 import launch_testing
 import launch_testing.actions
 import numpy as np
-import pytest
 import rclpy
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+import rclpy.time
 from ros_harness import Driver, FakeRobot, camera_params, scripted_poses
 from scipy.spatial.transform import Rotation
 import yaml
@@ -113,5 +118,43 @@ class TestManualCalibration(unittest.TestCase):
         Rm = Rotation.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
         ang = Rotation.from_matrix(Rm.T @ X[:3, :3]).magnitude()
         self.assertLess(math.degrees(ang), 0.5)
+        self.assertTrue(res.passed, res.message)                    # quality gates
+        zt = res.target_transform.transform.translation
+        self.assertLess(np.linalg.norm(np.array([zt.x, zt.y, zt.z]) - Z[:3, 3]), 0.003)
+        self.assertEqual(res.target_transform.header.frame_id, 'tool0')
         doc = yaml.safe_load(open(res.result_file))
         self.assertTrue(doc['publish']['ok'], doc['publish'].get('reason'))
+
+        # the hand-off: result.launch.py publishes base_link -> camera_link (the
+        # driver's subtree root) and TF then gives the true camera mount
+        import subprocess
+
+        import tf2_ros
+        proc = subprocess.Popen(['ros2', 'launch', 'handeye_autopilot', 'result.launch.py',
+                                 f'result_file:={res.result_file}'],
+                                start_new_session=True)      # own process group
+        try:
+            buf = tf2_ros.Buffer()
+            tf2_ros.TransformListener(buf, self.client)
+            t0 = time.monotonic()
+            got = None
+            while time.monotonic() - t0 < 20 and got is None:
+                try:
+                    got = buf.lookup_transform('base_link', 'camera_link', rclpy.time.Time())
+                except tf2_ros.TransformException:
+                    time.sleep(0.2)
+            self.assertIsNotNone(got, 'result.launch.py published nothing')
+            p = got.transform.translation
+            true_root = pose(CAM['true_camera_xyz_rpy'])
+            self.assertLess(np.linalg.norm(np.array([p.x, p.y, p.z]) - true_root[:3, 3]),
+                            0.003)
+        finally:
+            # stop the launch AND its children (a surviving publisher would keep
+            # broadcasting this static transform into later tests)
+            import signal
+            os.killpg(proc.pid, signal.SIGINT)
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait(timeout=5)

@@ -27,5 +27,6 @@ setup(
         'resolve = handeye_autopilot.cli.resolve:main',
         'calibrate_node = handeye_autopilot.ros.node:main',
         'synthetic_camera = handeye_autopilot.ros.synthetic_camera:main',
+        'publish_result = handeye_autopilot.ros.publish_result:main',
     ]},
 )

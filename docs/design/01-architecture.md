@@ -50,13 +50,13 @@ Solving uses OpenCV + SciPy. Interop (v1.1): export observations in
 | Rotations | SciPy `Rotation`, OpenCV `Rodrigues` | `core/transforms.py`: 4×4 helpers (make, inverse, angle) over them |
 | Quasi-random sampling | SciPy `qmc.Halton` | Nothing |
 | Image + camera info | Image subscription; latest `CameraInfo` cached (§7) | Cache + consistency check |
-| Robot pose at a stamp | `tf2_ros` Buffer, async wait with deadline | Nothing |
+| Robot pose at a stamp | `tf2_ros` Buffer, `lookup_transform` with a timeout (waits on the run's worker thread while TF arrives on the executor's others) | Nothing |
 | Motion (plan + execute, cancel) | `pymoveit2` `MoveIt2` | Goal parameters, result checks |
 | Reachability + collision | `moveit_msgs/srv/GetPositionIK` on `compute_ik` | A direct client (~20 lines; pymoveit2's IK call sets `is_diff=false`, see §3.1) |
 | Collision scene (meshes, point clouds) | MoveIt planning scene, octomap | Docs and demo config only |
 | Exposure | Driver's own ROI auto-exposure, set via rclpy `AsyncParameterClient` | ROI update + driver parameter-name map (checkpoint 2 §L) |
 | Stray-marker rejection | OpenCV `solvePnPRansac` + ChArUco interpolation | Glue (checkpoint 2 §D4) |
-| Publish result | `tf2_ros static_transform_publisher` from a launch file | Launch file |
+| Publish result | `tf2_ros` `StaticTransformBroadcaster` | `publish_result`: a small node that re-checks ownership on the live TF tree, then broadcasts; `result.launch.py` runs it |
 | Visualisation | RViz2, `MarkerArray`, OpenCV drawing | Marker builders |
 | Run recording | `ros2 bag record` (launch option) | Observations YAML for offline re-solve (`core/observations.py`); result YAML (`core/results.py`); `resolve` CLI (`cli/resolve.py`) |
 | Start / cancel / progress | ROS 2 action | One action definition |
@@ -234,7 +234,7 @@ one updates it):
 | Package | build / buildtool | exec | test |
 |---|---|---|---|
 | `handeye_autopilot_interfaces` | `ament_cmake`, `rosidl_default_generators`, `geometry_msgs`, `action_msgs`, `service_msgs` | `rosidl_default_runtime`, `geometry_msgs`, `action_msgs`, `service_msgs` | — |
-| `handeye_autopilot` | — | `python3-numpy`, `python3-scipy`, `python3-opencv`, `python3-yaml`, `rclpy`, `cv_bridge`, `image_geometry`, `tf2_ros`, `geometry_msgs`, `sensor_msgs`, `std_srvs`, `moveit_msgs`, `pymoveit2`, `handeye_autopilot_interfaces`; M3: `std_msgs`, `builtin_interfaces`, `tf2_msgs`, `visualization_msgs`, `ament_index_python`, `launch`, `launch_ros`, `ros2bag` | `python3-pytest`; M3: `launch_testing`, `launch_testing_ros` |
+| `handeye_autopilot` | — | `python3-numpy`, `python3-scipy`, `python3-opencv`, `python3-yaml`, `rclpy`, `cv_bridge`, `image_geometry`, `tf2_ros`, `geometry_msgs`, `sensor_msgs`, `std_srvs`, `moveit_msgs`, `pymoveit2`, `handeye_autopilot_interfaces`; M3: `std_msgs`, `builtin_interfaces`, `tf2_msgs`, `visualization_msgs`, `ament_index_python`, `launch`, `launch_ros`, `ros2bag`, `tf2_ros_py` | `python3-pytest`; M3: `launch_testing`, `launch_testing_ros` |
 | `handeye_autopilot_demos` | — | `handeye_autopilot`, `handeye_autopilot_interfaces`, `launch`, `launch_ros`, `moveit_resources_panda_moveit_config`, `ur_moveit_config`, `ur_robot_driver` | `python3-pytest` |
 
 **Dependency gate (CI, every PR, every distro;
@@ -393,10 +393,20 @@ the subtree rule (§9) is exercised.
 
 **Launch files:** `calibrate.launch.py` (node + parameters, `record:=true`
 adds `ros2 bag record` of the camera, TF, joint-state and annotated-image
-topics into the run's output directory); `result.launch.py result_file:=…`
-(publishes `parent → camera_root` from a result YAML with
-`static_transform_publisher`, refusing a result whose ownership checks
-failed).
+topics into `bag_dir`, default the output directory; the bag spans the launch,
+not one run); `result.launch.py result_file:=…` runs `publish_result`, which
+refuses a result whose ownership checks failed, **re-checks the live TF tree**
+(the tree may have changed since the run) and then publishes
+`parent → camera_root` as a static transform.
+
+**Run timing details (as built):** an image counts for a capture when it
+*arrives* after the settle (so a camera on another clock is still seen and
+refused by the clock check, not silently filtered) and was *acquired* after
+it; the clock check compares each image's stamp with the node clock when it
+arrived; a backwards clock jump aborts the run and clears the TF and image
+history; a cancel or a clock jump during the solve still wins; parameters are
+snapshotted at admission; every capture's images must match the run's
+`CameraInfo` frame and size.
 
 ## 6. Concurrency and cancellation
 
@@ -480,7 +490,8 @@ failed).
   `static_transform_publisher`.
 - **Ownership checks before publishing:**
   - every link of the chain `root → optical` must be published on
-    `/tf_static` (checked by listening to `/tf_static` briefly), not on `/tf`;
+    `/tf_static` (checked by listening to `/tf_static` briefly) and never on
+    `/tf`;
   - `root` must have **no existing parent** in TF (from a URDF mounting joint,
     a driver, or a previous calibration). If it has one, refuse and tell the
     user which frame to drop or which `root` to use instead;
