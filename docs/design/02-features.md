@@ -264,12 +264,26 @@ methods), SciPy `least_squares`, `scipy.stats.median_abs_deviation`.
      σ, §E2) and `w_k = ρ'(z_k)` for the `soft_l1` loss (`w_k = 1/√(1+z_k)`).
      Rows: `J_k = √w_k · J_r,k / σ`. Columns: translation as is, rotation
      columns divided by `d` (median board depth), so every column is per
-     metre at the working distance. Reported value = smallest singular value
-     of that `J` (unit 1/m).
+     metre at the working distance. `d` is the median optical-axis `z` of the
+     predicted board origins (a range would over-scale off-axis views).
+     Reported value = smallest singular value of that `J` (unit 1/m).
    - **Where applied:** amplitude and spread before the first fit (on the
      accepted captures), again after outlier removal, and on each fold's
      training set; the singular value after the final fit and after each fold
      fit.
+5. **Failure reasons** (core), mapped by the node to `Calibrate` codes:
+   `too_few_captures` → `NOT_ENOUGH_SAMPLES`; `degenerate_rotation`,
+   `weak_information`, `no_initial_guess`, `refinement_failed` (SciPy did not
+   converge) → `SOLVE_FAILED`. A failed solve
+   returns no transform (`transform_valid = false`) and NaN metrics; it never
+   returns a confident wrong answer.
+6. **M1b measurements** (fast simulation, σ = 0.2 px, robot noise 0.2 mm /
+   0.02°, 20 captures, both modes): solver exact without noise; with noise,
+   camera transform within 1.1 mm / 0.26°, dominated by robot noise (camera
+   rotation about the board trades against translation, the PnP-like weak
+   direction). Through the renderer + M1a detection: ~1.3 mm / 0.2°. Fold
+   gates start at 3 mm / 0.5° (worst fold seen 1.1 mm / 0.18°) until M5 real
+   runs set them.
 
 ## F. Quality gates and honest naming
 
@@ -296,8 +310,11 @@ alongside.
 
 ## G. Verification (no leakage)
 
-1. **k-fold by capture:** captures are assigned to folds by index modulo `k`
-   in acquisition order (deterministic; each fold spans the whole run). For
+1. **k-fold by capture:** **all accepted** captures (not the all-data
+   inliers: that mask was decided with the held-out captures) are assigned to
+   folds by index modulo `k` in acquisition order (deterministic; each fold
+   spans the whole run). The all-data solution is used only as the reference
+   for fold sensitivity. For
    each fold, the full training pipeline (outlier rejection included) runs on
    the other folds only. Held-out captures are scored with the **predicted**
    board pose `Ĉ_i` (no per-capture PnP fit). Each training set must pass
@@ -329,7 +346,11 @@ Reference check (CAD) and live verify mode: v1.x, not v1.
   board square size, small systematic robot kinematic error, small intrinsic
   error. These runs are **expected to pass** the gates while the result is
   biased; the test asserts both, and records the size of the bias, so the docs
-  can state what the gates cannot see.
+  can state what the gates cannot see. Measured in M1b (20 captures): 1 %
+  print scale → camera transform off by 4–5 mm; 1 % focal length → 5–6 mm;
+  1 mm / 0.05° robot bias → below the noise (~0.6–1 mm). All pass the gates.
+  At 2 % print scale the eye-to-hand fold gate sometimes notices; that is not
+  a guarantee.
 - **Real-image fixtures:** a small set of real captures (from M5 hardware runs)
   is added to tests for detection gates and σ tuning. Simulation alone does not
   set thresholds.

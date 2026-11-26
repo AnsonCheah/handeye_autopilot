@@ -63,3 +63,72 @@ class CaptureConfig:
         if unknown:
             raise ValueError(f'unknown capture config keys: {sorted(unknown)}')
         return cls(**d)
+
+
+@dataclass(frozen=True)
+class SolverConfig:
+    """Solver, observability and quality-gate settings (02-features §E-G).
+
+    Gate limits are placeholders until the M1b simulation sweep and M5 real
+    runs set them (*(tune)* in the design). SI units; reprojection in px.
+    """
+
+    # refinement (§E2)
+    sigma_px: float = 0.3                  # pixel noise scale
+    f_scale_sigmas: float = 3.0            # soft_l1 f_scale = this * sigma
+    # outlier rejection (§E3)
+    outlier_k: float = 4.0                 # median + k * MAD (normal-scaled)
+    outlier_floor_px: float = 1.0
+    min_captures: int = 8
+    # observability (§E4)
+    min_pair_rotation: float = math.radians(5.0)   # pairs used for axis spread
+    min_rotation_amplitude: float = math.radians(20.0)
+    min_axis_spread: float = 0.2
+    min_scaled_singular_value: float = 50.0        # 1/m
+    # k-fold (§G)
+    folds: int = 5
+    # quality gates (§F)
+    max_reprojection_rms_px: float = 1.0
+    max_reprojection_px: float = 4.0
+    # first M1b sweep (sigma 0.2 px, robot 0.2 mm / 0.02 deg, 20 captures): worst
+    # fold 1.1 mm / 0.18 deg; limits leave margin until real runs (M5) set them
+    max_fold_translation: float = 0.003           # m
+    max_fold_rotation: float = math.radians(0.5)
+
+    def __post_init__(self) -> None:
+        for name in ('folds', 'min_captures'):
+            if not isinstance(getattr(self, name), int) or isinstance(getattr(self, name), bool):
+                raise ValueError(f'{name} must be an integer')
+        if self.folds < 2:
+            raise ValueError('folds must be >= 2')
+        if self.min_captures < 3:
+            raise ValueError('min_captures must be >= 3')
+        positive = ('sigma_px', 'f_scale_sigmas', 'outlier_k', 'min_pair_rotation',
+                    'max_reprojection_rms_px', 'max_reprojection_px', 'max_fold_translation',
+                    'max_fold_rotation')
+        non_negative = ('outlier_floor_px', 'min_rotation_amplitude', 'min_axis_spread',
+                        'min_scaled_singular_value')
+        for name in positive + non_negative:
+            v = getattr(self, name)
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+                raise ValueError(f'{name} must be a finite number')
+            if name in positive and v <= 0:
+                raise ValueError(f'{name} must be > 0')
+            if v < 0:
+                raise ValueError(f'{name} must be >= 0')
+        if self.min_axis_spread > 1:
+            raise ValueError('min_axis_spread is a ratio in [0, 1]')
+        loss_scale = self.sigma_px * self.f_scale_sigmas
+        if not math.isfinite(loss_scale) or loss_scale <= 1e-9:
+            raise ValueError('sigma_px * f_scale_sigmas must be a finite positive pixel scale')
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> SolverConfig:
+        known = {f.name for f in fields(cls)}
+        unknown = set(d) - known
+        if unknown:
+            raise ValueError(f'unknown solver config keys: {sorted(unknown)}')
+        return cls(**d)

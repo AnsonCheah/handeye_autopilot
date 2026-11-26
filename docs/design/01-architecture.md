@@ -58,7 +58,7 @@ Solving uses OpenCV + SciPy. Interop (v1.1): export observations in
 | Stray-marker rejection | OpenCV `solvePnPRansac` + ChArUco interpolation | Glue (checkpoint 2 §D4) |
 | Publish result | `tf2_ros static_transform_publisher` from a launch file | Launch file |
 | Visualisation | RViz2, `MarkerArray`, OpenCV drawing | Marker builders |
-| Run recording | `ros2 bag record` (launch option) | Observations YAML for offline re-solve |
+| Run recording | `ros2 bag record` (launch option) | Observations YAML for offline re-solve (`core/observations.py`); result YAML (`core/results.py`); `resolve` CLI (`cli/resolve.py`) |
 | Start / cancel / progress | ROS 2 action | One action definition |
 | Manual capture trigger | `std_srvs/srv/Trigger` | Nothing |
 | Robots for demos and CI | UR (`ur_robot_driver` mock hardware), Panda (`moveit_resources_panda`) | Demo launch files |
@@ -272,8 +272,9 @@ result YAML and docs show mm and degrees.
 `GateResult.msg` (added in M0: a list of gates needs an element type; one
 message with parallel arrays was rejected as error-prone): `name`, `group`
 (`sanity` / `fold_sensitivity` / `accuracy_evidence`), `unit`, `comparison`
-(`<=` or `>=`), `value`, `limit`, `gated` (false for accuracy evidence),
-`passed`. See checkpoint 2 §F for what each group does and does not prove.
+(`<=` or `>=`; empty for a measurement-only row, whose `limit` is NaN and
+whose `passed` is false and unused), `value`, `limit`, `gated` (false for
+accuracy evidence), `passed`. See checkpoint 2 §F for what each group does and does not prove.
 
 Error codes and the `mode`/`execution` strings are constants in the action
 definition. Fields may still change until the interface freeze at the end of

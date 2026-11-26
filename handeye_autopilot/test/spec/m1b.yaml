@@ -1,0 +1,50 @@
+# M1b test spec (03-milestones M1b "done when", committed). Angles in degrees
+# here; code converts. Observability definitions: 02-features §E4 (as committed
+# with this sweep).
+
+camera: {K: [[600, 0, 320], [0, 600, 240], [0, 0, 1]],
+         D: [-0.15, 0.05, 0.0005, -0.0005, 0.0], width: 640, height: 480,
+         distortion_model: plumb_bob}
+board: {kind: charuco, squares_x: 7, squares_y: 5, square_length: 0.04,
+        marker_length: 0.03, dictionary: DICT_5X5_100}
+
+# Ground truth per mode: [x, y, z] m and [roll, pitch, yaw] deg (extrinsic xyz).
+truth:
+  eye_to_hand:            # X = base_T_camera, Z = tool_T_board
+    X: {t: [1.1, 0.05, 0.6], rpy: [-120, 2, 95]}
+    Z: {t: [0.02, -0.03, 0.12], rpy: [3, -4, 88]}
+  eye_in_hand:            # X = tool_T_camera, Z = base_T_board
+    X: {t: [0.04, -0.06, 0.09], rpy: [2, -3, 91]}
+    Z: {t: [0.65, 0.1, 0.02], rpy: [178, 1, -2]}
+
+# Camera-relative board poses sampled per capture.
+poses:
+  distance: [0.45, 0.7]
+  tilt: [-30, 30]          # each of the two tilt axes
+  roll: [-45, 45]
+  offset: [-60, 60]        # px, each axis
+
+sweep:
+  seeds: [1, 2, 3, 4, 5]
+  captures: 20
+  pixel_noise_px: 0.2      # corner noise, fast path
+  robot_noise: {translation_m: 0.0002, rotation_deg: 0.02}
+  tolerance: {translation_m: 0.002, rotation_deg: 0.4}   # robot noise dominates (camera rotation is the weakest direction)
+
+expected_failures:
+  parallel_axes:           # every board pose rotates about the optical axis only
+    poses: {distance: [0.5, 0.6], tilt: [0, 0], roll: [-60, 60], offset: [-60, 60]}
+    reason: degenerate_rotation
+
+blind_spots:               # pass the gates while biased; bias is recorded
+  # 1 % print scale: biases X by ~4-5 mm and passes. (At 2 % the eye-to-hand fold
+  # sensitivity starts to notice; that is not a guarantee.)
+  square_size_1pct: {object_scale: 1.01}
+  robot_systematic: {translation_m: [0.001, 0, 0], rotation_deg: [0.05, 0, 0]}
+  intrinsics_1pct: {focal_scale: 1.01}
+
+render:                    # end-to-end through the renderer + M1a detection
+  captures: 15
+  seed: 21
+
+resolve_tolerance: 1.0e-9  # save -> reload -> re-solve, m and rad
