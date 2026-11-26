@@ -20,5 +20,6 @@ setup(
     extras_require={'test': ['pytest']},
     entry_points={'console_scripts': [
         'board_image = handeye_autopilot.cli.board_image:main',
+        'resolve = handeye_autopilot.cli.resolve:main',
     ]},
 )

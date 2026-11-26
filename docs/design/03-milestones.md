@@ -90,6 +90,8 @@ farm sync), which don't shrink with more effort. Re-estimate after M1a.
   gates, observations YAML, offline re-solve CLI.
 - Input: capture records (from the renderer + M1a detection, or loaded
   from an observations YAML). No bootstrap, TF or clocks here.
+- Test spec: `handeye_autopilot/test/spec/m1b.yaml` (truth per mode, pose
+  ranges, noise, tolerances 2 mm / 0.4°, expected failure, blind spots).
 - **Done when:** for the committed sweep, both modes recover ground truth
   within committed translation/rotation tolerances; the M1b-owned
   expected-failure case (parallel rotation axes) fails with its committed
