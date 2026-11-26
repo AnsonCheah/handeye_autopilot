@@ -20,6 +20,7 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from scipy.spatial.transform import Rotation
+from tf2_msgs.msg import TFMessage
 import tf2_ros
 import yaml
 
@@ -52,6 +53,8 @@ class ResultPublisher(Node):
         self.subtree = pub.get('subtree')          # root -> optical at calibration time
         self.buffer = tf2_ros.Buffer()
         self.listener = tf2_ros.TransformListener(self.buffer, self)
+        self.moving = tf_tools.StaticLinks()          # edges seen on /tf
+        self.create_subscription(TFMessage, '/tf', self.moving.add, 100)
         self.listen = listen
         self.static = tf2_ros.StaticTransformBroadcaster(self)
 
@@ -60,6 +63,13 @@ class ResultPublisher(Node):
         (a camera driver restarted with other extrinsics would move the optical
         frame by that difference)."""
         st = self.subtree
+        chain = tf_tools.ancestors(tf_tools.parents(self.buffer), st['child'])
+        for child, par in zip(chain, chain[1:], strict=False):
+            if self.moving.has(par, child):
+                return (f'{par} -> {child} is published on /tf (moving): the camera '
+                        'subtree must be static')
+            if par == st['parent']:
+                break
         got = tf_tools.latest(self.buffer, st['parent'], st['child'])
         if got is None:
             return (f'the camera subtree {st["parent"]} -> {st["child"]} is not in TF now: '

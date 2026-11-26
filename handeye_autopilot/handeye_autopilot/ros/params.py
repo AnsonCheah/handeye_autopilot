@@ -173,6 +173,8 @@ def check_types(group: str, cls: type, values: dict[str, Any]) -> None:
             ok = True
         if not ok:
             raise ValueError(f'{group}.{k} must be a {type(d).__name__}, got {v!r}')
+    if group == 'timing' and values.get('tf_timeout', 0) > 2.0:
+        raise ValueError('timing.tf_timeout must be <= 2 s')
 
 
 def build(doc: dict[str, Any], profile: str = '') -> RunConfig:
@@ -195,6 +197,14 @@ def build(doc: dict[str, Any], profile: str = '') -> RunConfig:
     for group, cls in (('capture', CaptureConfig), ('solver', SolverConfig),
                        ('session', SessionConfig), ('timing', Timing)):
         check_types(group, cls, doc[group])
+    for k, v in doc['board'].items():
+        d = BOARD_DEFAULTS.get(k)
+        if d is not None and not (
+                (isinstance(d, str) and isinstance(v, str)) or
+                (isinstance(d, int) and isinstance(v, int) and not isinstance(v, bool)) or
+                (isinstance(d, float) and isinstance(v, (int, float)) and
+                 not isinstance(v, bool))):
+            raise ValueError(f'board.{k} must be a {type(d).__name__}, got {v!r}')
     board = BoardSpec.from_dict(dict(doc['board']))
     return RunConfig(
         board=board,
@@ -216,11 +226,8 @@ def load_run_config(node: Node, profile: str, snapshot: dict[str, Any] | None = 
     the profile (``profile_text``: the file as read at acceptance)."""
     doc = snapshot if snapshot is not None else node_values(node)
     if profile:
-        if profile_text is None:
-            path = profile_path(node, profile)
-            if path is None:
-                raise ValueError(f'profile {profile!r} not found')
-            profile_text = path.read_text()
+        if profile_text is None:      # the node always passes the text read at admission
+            raise ValueError(f'profile {profile!r} was not read at admission')
         try:
             over = yaml.safe_load(profile_text)
         except yaml.YAMLError as e:

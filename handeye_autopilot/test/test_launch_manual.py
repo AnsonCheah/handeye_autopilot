@@ -122,6 +122,9 @@ class TestManualCalibration(unittest.TestCase):
         zt = res.target_transform.transform.translation
         self.assertLess(np.linalg.norm(np.array([zt.x, zt.y, zt.z]) - Z[:3, 3]), 0.003)
         self.assertEqual(res.target_transform.header.frame_id, 'tool0')
+        zq = res.target_transform.transform.rotation
+        Rz = Rotation.from_quat([zq.x, zq.y, zq.z, zq.w]).as_matrix()
+        self.assertLess(math.degrees(Rotation.from_matrix(Rz.T @ Z[:3, :3]).magnitude()), 0.5)
         doc = yaml.safe_load(open(res.result_file))
         self.assertTrue(doc['publish']['ok'], doc['publish'].get('reason'))
 

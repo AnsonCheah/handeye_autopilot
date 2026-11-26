@@ -26,7 +26,13 @@ def _record(context):
         try:
             with open(LaunchConfiguration('params_file').perform(context)) as f:
                 doc = yaml.safe_load(f) or {}
-            out = doc['handeye_autopilot']['ros__parameters']['output_dir']
+            for key in ('handeye_autopilot', '/handeye_autopilot', '/**'):
+                p = (doc.get(key) or {}).get('ros__parameters', {})
+                if 'output_dir' in p:
+                    out = p['output_dir']
+                    break
+            if not out:
+                raise KeyError('output_dir')
         except (OSError, KeyError, TypeError, yaml.YAMLError):
             out = '~/.ros/handeye_autopilot'
     out = os.path.expanduser(out)

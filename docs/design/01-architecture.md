@@ -51,7 +51,7 @@ Solving uses OpenCV + SciPy. Interop (v1.1): export observations in
 | Quasi-random sampling | SciPy `qmc.Halton` | Nothing |
 | Image + camera info | Image subscription; latest `CameraInfo` cached (§7) | Cache + consistency check |
 | Robot pose at a stamp | `tf2_ros` Buffer, `lookup_transform` with a timeout (waits on the run's worker thread while TF arrives on the executor's others) | Nothing |
-| Motion (plan + execute, cancel) | `pymoveit2` `MoveIt2` | Goal parameters, result checks |
+| Motion (plan + execute, cancel) | `pymoveit2` `MoveIt2` where its API is the same on every distro; rclpy action clients on `MoveGroup` / `ExecuteTrajectory` (`moveit_msgs`) for goal status, planned trajectory and cancel (the M2 probe found Lyrical's pymoveit2 lacks `get_goal_future`) | Goal parameters, result checks |
 | Reachability + collision | `moveit_msgs/srv/GetPositionIK` on `compute_ik` | A direct client (~20 lines; pymoveit2's IK call sets `is_diff=false`, see §3.1) |
 | Collision scene (meshes, point clouds) | MoveIt planning scene, octomap | Docs and demo config only |
 | Exposure | Driver's own ROI auto-exposure, set via rclpy `AsyncParameterClient` | ROI update + driver parameter-name map (checkpoint 2 §L) |

@@ -90,8 +90,10 @@ class StampedImage:
 class ImageBuffer:
     """The last few images, converted to grayscale, newest last. Thread-safe."""
 
-    def __init__(self, clock: Callable[[], float], size: int = 90) -> None:
+    def __init__(self, clock: Callable[[], float], size: int = 90,
+                 wall_clock: Callable[[], bool] = lambda: True) -> None:
         self._clock = clock
+        self._wall = wall_clock          # node clock is wall time (not sim time)?
         self._buf: deque[StampedImage] = deque(maxlen=size)
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)
@@ -103,7 +105,8 @@ class ImageBuffer:
         under load, so that lag is subtracted from the node-clock arrival time."""
         import time
         lag = 0.0
-        if msg_info and msg_info.get('received_timestamp'):
+        # the receive stamp is wall time: it can only correct a wall-time node clock
+        if self._wall() and msg_info and msg_info.get('received_timestamp'):
             lag = max(0.0, (time.time_ns() - int(msg_info['received_timestamp'])) * 1e-9)
         gray = self._bridge.imgmsg_to_cv2(msg, desired_encoding='mono8')
         ns = msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec

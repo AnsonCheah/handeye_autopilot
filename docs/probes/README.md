@@ -8,11 +8,11 @@ decisions point at observed behaviour (03-milestones, "probe ahead").
 Panda mock-hardware demo (`moveit_resources_panda_moveit_config demo.launch.py`)
 driven through pymoveit2 with the `MoveGroup` action.
 
-| Distro | MoveIt | pymoveit2 | Result |
+| Distro | MoveIt | Result | Verdict |
 |---|---|---|---|
-| Jazzy | 2.12.4 | 5.1.0 | [m2_moveit_jazzy.yaml](m2_moveit_jazzy.yaml) |
-| Lyrical | | | pending (`gh workflow run probe.yml` after merge) |
-| Rolling | | | pending |
+| Jazzy | 2.12.4 (pymoveit2 5.1.0) | [m2_moveit_jazzy.yaml](m2_moveit_jazzy.yaml) | conclusive (local) |
+| Rolling | apt, 2026-11-27 (CI) | [m2_moveit_rolling.yaml](m2_moveit_rolling.yaml) | conclusive, same outcomes as Jazzy |
+| Lyrical | apt, 2026-11-27 (CI) | [m2_moveit_lyrical.yaml](m2_moveit_lyrical.yaml) | partial: its pymoveit2 lacks `get_goal_future` (see 9) |
 
 `status` is the action's `GoalStatus` (4 SUCCEEDED, 5 CANCELED, 6 ABORTED);
 `error_code` is `MoveItErrorCodes.val`.
@@ -54,3 +54,14 @@ driven through pymoveit2 with the `MoveGroup` action.
    **4.52 mm** mid-path (the planner interpolates the link, cutting a chord).
    Dense waypoints (1° apart) converted from the TCP path: **0.014 mm**. This
    is why checked moves carry converted waypoints (01-architecture §3.2).
+9. **pymoveit2 differs between distros.** Lyrical's release has no
+   `get_goal_future()`, so goal acceptance, the action `GoalStatus` and the
+   planned trajectory cannot be read through pymoveit2 there. The MoveIt
+   error codes it does report match Jazzy and Rolling (SUCCESS 1, FAILURE
+   99999 for the in-collision goal, PREEMPTED −7 for the cancel, the same
+   Cartesian path-fraction refusal and IK results). **M4 consequence:** the
+   node talks to the `MoveGroup` / `ExecuteTrajectory` actions with its own
+   rclpy action clients (moveit_msgs, already a dependency) for status,
+   planned trajectory and cancel, rather than relying on pymoveit2's
+   lifecycle API (01-architecture §13 anticipated replacing pymoveit2 in one
+   module).

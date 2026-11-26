@@ -416,8 +416,10 @@ def test_clock_jump_during_a_capture_aborts(world_factory):
     assert d.call(d.capture).success
     d.wait_phase(FB.PHASE_CAPTURING)
     w.clock.jump(-100.0)
-    res = w.result(h).result
+    out = w.result(h)
+    res = out.result
     stop.set()
+    assert out.status == 6                               # ABORTED, never SUCCEEDED
     assert res.error_code in (R.TF_UNAVAILABLE,), res.message
     assert 'jumped back' in res.message or 'clock' in res.message
 
@@ -648,3 +650,109 @@ def test_publish_result_refuses_a_changed_camera_subtree(tmp_path):
     finally:
         node.destroy_node()
 
+
+# -- review fixes (M3 xhigh pass 3) -------------------------------------------------
+
+def test_cancel_is_honoured_even_if_writing_fails(world_factory, monkeypatch):
+    w = world_factory()
+    d = w.driver
+
+    def broken(*a, **k):
+        time.sleep(1.0)
+        raise OSError('disk full')
+    monkeypatch.setattr(w.node, '_write_results', broken)
+    h = d.send()
+    d.wait_phase(FB.PHASE_MANUAL_CAPTURE)
+    run_captures(w, len(w.poses), accepted_target=10)
+    d.wait_phase(FB.PHASE_VERIFYING)
+    d.wait(h.cancel_goal_async())
+    out = w.result(h)
+    assert out.status == 5 and out.result.error_code == R.CANCELED
+
+
+def test_clock_reset_while_writing_is_not_a_success(world_factory, monkeypatch):
+    w = world_factory(sim_time=True)
+    d = w.driver
+    real = w.node._write_results
+
+    def jump_then_write(*a, **k):
+        w.clock.jump(-0.05)                       # a 50 ms rollback after the last check
+        time.sleep(0.5)
+        return real(*a, **k)
+    monkeypatch.setattr(w.node, '_write_results', jump_then_write)
+    h = d.send()
+    d.wait_phase(FB.PHASE_MANUAL_CAPTURE)
+    run_captures(w, len(w.poses), accepted_target=10)
+    out = w.result(h)
+    assert out.status == 6 and out.result.error_code == R.TF_UNAVAILABLE
+
+
+def test_unreadable_profile_is_rejected_not_a_crash(world_factory, tmp_path):
+    import os
+    f = tmp_path / 'locked.yaml'
+    f.write_text('session:\n  target_captures: 3\n')
+    os.chmod(f, 0)
+    w = world_factory(node_over={'profiles_dir': str(tmp_path)})
+    try:
+        if os.access(f, os.R_OK):
+            pytest.skip('running as root: permissions do not apply')
+        assert not w.driver.send(profile='locked').accepted
+        assert w.driver.send().accepted                   # the node is still alive
+    finally:
+        os.chmod(f, 0o644)
+
+
+@pytest.mark.parametrize('text,key', [('board:\n  squares_x: 7.5\n', 'board.squares_x'),
+                                      ('timing:\n  tf_timeout: 5.0\n', 'tf_timeout')])
+def test_more_profile_types_are_checked(world_factory, tmp_path, text, key):
+    (tmp_path / 'bad.yaml').write_text(text)
+    w = world_factory(node_over={'profiles_dir': str(tmp_path)})
+    res = w.result(w.driver.send(profile='bad')).result
+    assert res.error_code == R.INVALID_GOAL and key in res.message
+
+
+def test_burst_then_replay_does_not_clear_the_fault(world_factory):
+    from sensor_msgs.msg import JointState
+    w = world_factory()
+    d = w.driver
+    assert d.call(d.inject_fault).success
+    pub = w.client.create_publisher(JointState, '/joint_states', 10)
+    stop = threading.Event()
+
+    def burst():
+        time.sleep(0.1)
+        last = None
+        for _ in range(5):                         # five stamps within ~40 ms
+            last = w.client.get_clock().now().to_msg()
+            pub.publish(JointState(header=JointState().header.__class__(stamp=last),
+                                   name=['j1'], position=[0.1], velocity=[0.0]))
+            time.sleep(0.008)
+        while not stop.is_set():                   # then replay the last one
+            pub.publish(JointState(header=JointState().header.__class__(stamp=last),
+                                   name=['j1'], position=[0.1], velocity=[0.0]))
+            time.sleep(0.05)
+    threading.Thread(target=burst, daemon=True).start()
+    r = d.call(d.clear_fault)
+    stop.set()
+    assert not r.success
+
+
+def test_publish_result_refuses_a_moving_subtree_link(tmp_path):
+    from handeye_autopilot.core.results import transform_dict
+    from handeye_autopilot.ros import tf_tools
+    from handeye_autopilot.ros.publish_result import ResultPublisher
+    from tf2_msgs.msg import TFMessage
+    import yaml
+    T = tf.make(np.eye(3), [0.0, 0.0, 0.1])
+    doc = {'publish': {'ok': True, 'transform': transform_dict(np.eye(4), 'base_link', 'cam'),
+                       'subtree': transform_dict(T, 'cam', 'cam_optical')}}
+    f = tmp_path / 'result.yaml'
+    f.write_text(yaml.safe_dump(doc))
+    node = ResultPublisher(str(f), listen=0.0)
+    try:
+        m = tf_tools.to_msg(T, 'cam', 'cam_optical')
+        node.buffer.set_transform(m, 'test')               # same pose, but on /tf
+        node.moving.add(TFMessage(transforms=[m]))
+        assert 'moving' in node.check_subtree()
+    finally:
+        node.destroy_node()
