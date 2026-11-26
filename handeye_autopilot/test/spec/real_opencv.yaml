@@ -1,0 +1,23 @@
+# Expected outcomes on the real OpenCV sample images (see fixtures/real_opencv/README.md).
+# Same expectations on OpenCV 4.6, 4.10 and 4.12. Codes as in core/codes.py;
+# `accepted` means every gate passed.
+boards:
+  checker: {kind: checkerboard, squares_x: 10, squares_y: 7, square_length: 0.025}
+  charuco: {kind: charuco, squares_x: 5, squares_y: 7, square_length: 0.04,
+            marker_length: 0.02, dictionary: DICT_6X6_250}
+max_reprojection_rms_px: 0.5     # PnP fit on accepted images
+images:
+  left01: {board: checker, intrinsics: left_intrinsics.yml, expect: accepted}
+  left02: {board: checker, intrinsics: left_intrinsics.yml, expect: accepted}
+  left03: {board: checker, intrinsics: left_intrinsics.yml, expect: near_border}
+  left04: {board: checker, intrinsics: left_intrinsics.yml, expect: accepted}
+  left05: {board: checker, intrinsics: left_intrinsics.yml, expect: no_board}
+  left06: {board: checker, intrinsics: left_intrinsics.yml, expect: accepted}
+  left07: {board: checker, intrinsics: left_intrinsics.yml, expect: accepted}
+  left08: {board: checker, intrinsics: left_intrinsics.yml, expect: near_border}
+  left09: {board: checker, intrinsics: left_intrinsics.yml, expect: accepted}
+  left11: {board: checker, intrinsics: left_intrinsics.yml, expect: near_border}
+  left12: {board: checker, intrinsics: left_intrinsics.yml, expect: accepted}
+  left13: {board: checker, intrinsics: left_intrinsics.yml, expect: accepted}
+  left14: {board: checker, intrinsics: left_intrinsics.yml, expect: accepted}
+  choriginal: {board: charuco, intrinsics: tutorial_camera_charuco.yml, expect: accepted}

@@ -64,7 +64,15 @@ farm sync), which don't shrink with more effort. Re-estimate after M1a.
   distortion and true-vs-reported poses, per-capture gates, consensus,
   stray-marker masking.
 - **Probe ahead:** record ~20 real board images with any camera (no robot
-  needed) into `test/fixtures/` for detection tests.
+  needed) into `test/fixtures/` for detection tests. Partly covered by 14
+  real photographs from OpenCV's own sample data (Apache-2.0; 13 checkerboard,
+  1 ChArUco, with intrinsics; `test/fixtures/real_opencv/`); they already
+  re-tuned the sharpness placeholder and the checkerboard pattern check.
+  Still wanted from the maintainer's camera (M5 at the latest): ChArUco
+  views at several poses, a stray marker, the boards actually used.
+- Test spec: `handeye_autopilot/test/spec/m1a.yaml`; synthetic fixture images
+  are generated from it once and committed, so both OpenCV versions read the
+  same pixels.
 - **Output:** the capture record (checkpoint 2 §D5), which M1b consumes.
 - **Done when (committed in a test spec file):** fixed seeds and pose ranges;
   detection fixture tests on 4.6 and 4.10 give **identical** corner IDs and
@@ -82,6 +90,8 @@ farm sync), which don't shrink with more effort. Re-estimate after M1a.
   gates, observations YAML, offline re-solve CLI.
 - Input: capture records (from the renderer + M1a detection, or loaded
   from an observations YAML). No bootstrap, TF or clocks here.
+- Test spec: `handeye_autopilot/test/spec/m1b.yaml` (truth per mode, pose
+  ranges, noise, tolerances 2 mm / 0.4°, expected failure, blind spots).
 - **Done when:** for the committed sweep, both modes recover ground truth
   within committed translation/rotation tolerances; the M1b-owned
   expected-failure case (parallel rotation axes) fails with its committed

@@ -40,14 +40,14 @@ Solving uses OpenCV + SciPy. Interop (v1.1): export observations in
 | Need | Use (exists) | We write |
 |---|---|---|
 | Image conversion | `cv_bridge` | Nothing |
-| Camera model, raw vs rectified | `image_geometry` `PinholeCameraModel` | Validation of `CameraInfo` (§7) |
-| Board detection | OpenCV `findChessboardCornersSB`, ArUco/ChArUco detectors | Compatibility shim for OpenCV 4.6 (24.04) and 4.10 (26.04) |
+| Camera model, raw vs rectified | `image_geometry` `PinholeCameraModel` (ROS layer); in `core`, K/D as NumPy with OpenCV `projectPoints`/`undistortPoints` (no ROS) | Validation of `CameraInfo` (§7); a small `CameraModel` holder in `core` |
+| Board detection | OpenCV `findChessboardCornersSB`, ArUco/ChArUco detectors, `cornerSubPix` | Compatibility shim for OpenCV 4.6 (24.04) and 4.10 (26.04); canonical checkerboard corner order; a final `cornerSubPix` on ChArUco corners (OpenCV's interpolation returns them ~0.5 px off on both versions, measured in M1a) |
 | Board pose per frame, both planar solutions | OpenCV `solvePnPGeneric` with `SOLVEPNP_IPPE` | Nothing |
-| Board printouts | OpenCV `CharucoBoard.generateImage` (ChArUco) | A short NumPy function for checkerboards |
+| Board printouts | OpenCV `CharucoBoard.generateImage` (ChArUco) | A short NumPy function for checkerboards; `cli/board_image.py` (exact scale, PNG `pHYs`) |
 | Intrinsics | `camera_calibration` (image_pipeline) | Nothing |
 | Initial hand-eye solve | OpenCV `calibrateHandEye`, `calibrateRobotWorldHandEye` | Nothing |
 | Refinement and uncertainty | SciPy `least_squares` (robust loss, Jacobian) | Residual function |
-| Rotations | SciPy `Rotation` | Nothing |
+| Rotations | SciPy `Rotation`, OpenCV `Rodrigues` | `core/transforms.py`: 4×4 helpers (make, inverse, angle) over them |
 | Quasi-random sampling | SciPy `qmc.Halton` | Nothing |
 | Image + camera info | Image subscription; latest `CameraInfo` cached (§7) | Cache + consistency check |
 | Robot pose at a stamp | `tf2_ros` Buffer, async wait with deadline | Nothing |
@@ -58,7 +58,7 @@ Solving uses OpenCV + SciPy. Interop (v1.1): export observations in
 | Stray-marker rejection | OpenCV `solvePnPRansac` + ChArUco interpolation | Glue (checkpoint 2 §D4) |
 | Publish result | `tf2_ros static_transform_publisher` from a launch file | Launch file |
 | Visualisation | RViz2, `MarkerArray`, OpenCV drawing | Marker builders |
-| Run recording | `ros2 bag record` (launch option) | Observations YAML for offline re-solve |
+| Run recording | `ros2 bag record` (launch option) | Observations YAML for offline re-solve (`core/observations.py`); result YAML (`core/results.py`); `resolve` CLI (`cli/resolve.py`) |
 | Start / cancel / progress | ROS 2 action | One action definition |
 | Manual capture trigger | `std_srvs/srv/Trigger` | Nothing |
 | Robots for demos and CI | UR (`ur_robot_driver` mock hardware), Panda (`moveit_resources_panda`) | Demo launch files |
@@ -271,8 +271,9 @@ result YAML and docs show mm and degrees.
 `GateResult.msg` (added in M0: a list of gates needs an element type; one
 message with parallel arrays was rejected as error-prone): `name`, `group`
 (`sanity` / `fold_sensitivity` / `accuracy_evidence`), `unit`, `comparison`
-(`<=` or `>=`), `value`, `limit`, `gated` (false for accuracy evidence),
-`passed`. See checkpoint 2 §F for what each group does and does not prove.
+(`<=` or `>=`; empty for a measurement-only row, whose `limit` is NaN and
+whose `passed` is false and unused), `value`, `limit`, `gated` (false for
+accuracy evidence), `passed`. See checkpoint 2 §F for what each group does and does not prove.
 
 Error codes and the `mode`/`execution` strings are constants in the action
 definition. Fields may still change until the interface freeze at the end of
@@ -409,6 +410,10 @@ M3.
   passed as `ref` to both); dependency gate (§4); `ruff`; `mypy --strict` on
   `handeye_autopilot.core`. The `pymoveit2` API smoke test runs (not skips) on
   every leg (`HANDEYE_AUTOPILOT_REQUIRE_DEPS=1`).
+- **Core on several OpenCV versions:** a pip-based job runs the ROS-free
+  tests on OpenCV 4.10 and 4.12 (4.12 ships in no distro yet), so detection
+  changes are checked against every API variant without waiting for ROS
+  images. Test-only; the released packages still use apt OpenCV.
 - **Downstream consumer (CI only):** `ci/interface_consumer/` is a minimal
   package outside the released set (an ignore marker keeps bloom and colcon
   away from `ci/`). After the main build, CI builds it in a separate workspace
