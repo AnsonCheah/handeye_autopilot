@@ -333,6 +333,14 @@ def main() -> None:
         missing.append('cancel_mid_motion.planned_points_missing')
     if found.get('cartesian_ok', {}).get('status') != 4:
         missing.append('cartesian_ok.not_succeeded')
+    # consistent evidence: SUCCEEDED goes with SUCCESS, a refused path leaves the arm still
+    for k, v in found.items():
+        if isinstance(v, dict) and v.get('status') == 4 and v.get('error_code') != 1:
+            missing.append(f'{k}.succeeded_without_success_code')
+    jb = found.get('cartesian_back', {}).get('joints_after')
+    ji = found.get('cartesian_impossible', {}).get('joints_after')
+    if jb is None or ji is None or max(abs(a - b) for a, b in zip(jb, ji, strict=True)) > 0.01:
+        missing.append('cartesian_impossible.arm_moved')
     j0 = found['back_to_ready'].get('joints_after')
     j1 = found.get('cartesian_ok', {}).get('joints_after')
     if j0 is None or j1 is None or max(abs(a - b) for a, b in zip(j0, j1, strict=True)) < 0.01:

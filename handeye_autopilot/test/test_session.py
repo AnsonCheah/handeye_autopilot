@@ -398,3 +398,19 @@ def test_seed_capture_frames_are_all_checked(monkeypatch):
     s.on_capture([Frame(img, 0.0, inside), Frame(img, 0.1, outside)])
     a = s.next_action()
     assert isinstance(a, session.Finished) and a.result.failure == session.SEED_REJECTED
+
+
+def test_seed_rejection_names_the_real_limit(monkeypatch):
+    from handeye_autopilot.core.capture import Frame
+    from m1b_sim import BOARD, CAMERA
+    c = cfg(envelope_radius=0.005)
+    s = session.Session('eye_to_hand', BOARD, CAMERA, FakeIK(0, 3), cfg=c)
+    good = run('eye_to_hand', session_cfg=cfg())[0].records[0]
+    good.tool_pose = np.eye(4)
+    monkeypatch.setattr(session, 'capture', lambda *a, **k: good)
+    img = np.zeros((2, 2), np.uint8)
+    s.on_capture([Frame(img, 0.0, np.eye(4)),
+                  Frame(img, 0.1, tf.make(np.eye(3), [0.006, 0, 0]))])
+    a = s.next_action()
+    assert a.result.failure == session.SEED_REJECTED
+    assert 'hold it still' in a.result.message and 'box' not in a.result.message

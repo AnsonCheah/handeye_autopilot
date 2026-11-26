@@ -456,3 +456,21 @@ def test_estimate_margin_applies_to_the_carried_object_not_the_tool():
     assert planning.limits(G, G, on, inner, box_margin=0.02)[0] is None
     assert planning.limits(G, G, on, inner + [0.1, 0, 0], box_margin=0.02)[0] == \
         planning.OUTSIDE_BOX                               # camera 10 mm inside < margin
+
+
+def test_step_checks_include_the_commanded_step(monkeypatch):
+    """Besides the sampled fractions of step x safety, the commanded step itself is
+    checked (it can fall between samples)."""
+    cfg = SessionConfig(step_safety=1.5)
+    C = board_pose()
+    shifts = []
+    real = bs._visible_all
+
+    def spy(moved, camera, margin):
+        shifts.append(float(np.linalg.norm(moved[0, 0] - tf.apply(
+            C, BOARD.outline_samples(12))[0])))
+        return real(moved, camera, margin)
+    monkeypatch.setattr(bs, '_visible_all', spy)
+    assert bs.translation_is_safe(C, BOARD, CAMERA, 0.01, cfg)
+    assert any(abs(s - 0.01) < 1e-9 for s in shifts)          # the commanded 10 mm
+    assert any(abs(s - 0.015) < 1e-9 for s in shifts)         # the inflated 15 mm

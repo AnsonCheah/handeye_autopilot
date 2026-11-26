@@ -94,7 +94,8 @@ def rotation_is_safe(mode: str, C: Mat, board: BoardSpec, camera: CameraModel,
     centre = tf.apply(C, np.array([[w / 2, h / 2, 0.0]]))[0]
     ref = reference_point(mode, C, board)
     pivots = np.vstack([ref, ref + np.sqrt(3) * cfg.lever_max * pivot_dirs])
-    for frac in fractions:
+    # sampled fractions of step x safety, plus the commanded step itself
+    for frac in sorted(set(fractions) | {1.0 / cfg.step_safety}):
         R = Rotation.from_rotvec(directions * angle * cfg.step_safety * frac).as_matrix()
         normals = R @ C[:3, 2]                                           # (A, 3)
         for pivot in pivots:
@@ -112,7 +113,8 @@ def translation_is_safe(C: Mat, board: BoardSpec, camera: CameraModel, length: f
     pts = tf.apply(C, board.outline_samples(12))
     w, h = board.size_m
     centre = tf.apply(C, np.array([[w / 2, h / 2, 0.0]]))[0]
-    for frac in fractions:
+    # sampled fractions of step x safety, plus the commanded step itself
+    for frac in sorted(set(fractions) | {1.0 / cfg.step_safety}):
         shift = directions * length * cfg.step_safety * frac              # (A, 3)
         moved = pts[None] + shift[:, None]
         if not _visible_all(moved, camera, cfg.image_margin_px):

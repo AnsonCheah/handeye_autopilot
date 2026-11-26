@@ -34,7 +34,16 @@ from .boards import BoardSpec
 from .camera import CameraModel
 from .capture import CaptureRecord, Frame, capture
 from .config import CaptureConfig, SessionConfig, SolverConfig
-from .planning import IKFunction, Plan, lever_ball_points, limits, plan
+from .planning import (
+    ORIENTATION_LIMIT,
+    OUTSIDE_BOX,
+    OUTSIDE_ENVELOPE,
+    IKFunction,
+    Plan,
+    lever_ball_points,
+    limits,
+    plan,
+)
 from .quality import Calibration, calibrate
 from .solver import Solution, SolveError, solve
 
@@ -318,12 +327,18 @@ class Session:
         self._st.seed_tool = seed_tool
         # the seed and every measured pose of the seed capture (the frames were
         # taken before the seed was known, so _capture could not check them)
-        if any(self._limit_reason(G) is not None
-               for G in [seed_tool] + self._st.frame_poses):
-            yield self._finish(SEED_REJECTED, 'the seed pose is outside the safety box'
-                               + (' (with the carried object within L_max)'
-                                  if cfg.box_check_moving_object else '')
-                               + '; jog inside it or move/enlarge the box')
+        bad = next((r for r in (self._limit_reason(G) for G in [seed_tool] +
+                                self._st.frame_poses) if r is not None), None)
+        if bad is not None:
+            advice = {OUTSIDE_BOX: 'the seed pose is outside the safety box'
+                      + (' (with the carried object within L_max)'
+                         if cfg.box_check_moving_object else '')
+                      + '; jog inside it or move/enlarge the box',
+                      OUTSIDE_ENVELOPE: 'the robot moved away from the seed during the seed '
+                      'capture (beyond the envelope radius); hold it still and retry',
+                      ORIENTATION_LIMIT: 'the robot rotated during the seed capture; hold it '
+                      'still and retry'}
+            yield self._finish(SEED_REJECTED, advice.get(bad, f'seed pose rejected ({bad})'))
             return
         if self._st.at_pose is None:       # no TF in the frames (cannot happen when
             self._st.at_pose = seed_tool   # accepted, kept for safety)
@@ -429,11 +444,12 @@ class Session:
                                 return bs.translation_is_safe(seed_C, self.board, self.camera,
                                                               v, cfg)
                             # with a rough estimate: predicted view along the whole move
-                            tgt = seed_tool @ bs.tool_step(kind, axis,
-                                                           sign * v * cfg.step_safety)
-                            return bs.predicted_is_safe(
-                                self.mode, est.X, est.Z, seed_tool, tgt, self.board,
+                            # the inflated step (sampled along) and the commanded one
+                            return all(bs.predicted_is_safe(
+                                self.mode, est.X, est.Z, seed_tool,
+                                seed_tool @ bs.tool_step(kind, axis, sign * v * f), self.board,
                                 self.camera, margin + 2.0 * est.reprojection_max_px)
+                                for f in (cfg.step_safety, 1.0))
                         v = bs.safe_step(check, step[kind], step[kind] / 8)
                         if v < step[kind]:
                             clean = False          # visibility already limits this step
