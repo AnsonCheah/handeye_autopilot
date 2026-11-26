@@ -1,0 +1,1 @@
+Run stopped by the Codex content filter (false "cybersecurity risk" flag) before writing a report. Its last note: the rotation cap held; it was about to check whether bootstrap could turn the printed side away from the camera, which was then added (commit 436db6c).

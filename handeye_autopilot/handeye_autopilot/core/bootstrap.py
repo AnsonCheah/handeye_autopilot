@@ -110,9 +110,16 @@ def translation_is_safe(C: Mat, board: BoardSpec, camera: CameraModel, length: f
                         cfg: SessionConfig, directions: Mat = DIRECTIONS,
                         fractions: tuple[float, ...] = FRACTIONS) -> bool:
     pts = tf.apply(C, board.outline_samples(12))
+    w, h = board.size_m
+    centre = tf.apply(C, np.array([[w / 2, h / 2, 0.0]]))[0]
     for frac in fractions:
-        moved = pts[None] + (directions * length * cfg.step_safety * frac)[:, None]
+        shift = directions * length * cfg.step_safety * frac              # (A, 3)
+        moved = pts[None] + shift[:, None]
         if not _visible_all(moved, camera, cfg.image_margin_px):
+            return False
+        # no rotation, but the line of sight changes: a steep board seen from
+        # the side can show its back after a lateral shift
+        if not _faces_camera(C[:3, 2], centre + shift):
             return False
     return True
 

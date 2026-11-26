@@ -165,18 +165,21 @@ def box_contains(points_base: Mat, cfg: SessionConfig, margin: float = 0.0) -> b
 def limits(G: Mat, seed_tool: Mat, cfg: SessionConfig,
            moving_points: Mat | None = None, box_margin: float = 0.0,
            orientation_margin: float = 0.0) -> tuple[str | None, str]:
-    """(margins: a point between two checked waypoints can bulge out of the box
-    by the arc sag, and its orientation from the seed exceed the endpoints' by
-    up to half the segment angle; the caller passes both.)"""
     """Safety box (toggle), envelope around the seed, orientation limit from the
     seed. The envelope and orientation limits always apply; the box adds a
-    user-placed volume on top (01-architecture §3.4)."""
+    user-placed volume on top (01-architecture §3.4).
+
+    Margins: ``box_margin`` applies to the carried object's points only (arc
+    sag between waypoints, estimate error); the tool origin moves on a straight
+    path and is exact, so it gets none. ``orientation_margin``: orientation
+    from the seed can exceed the endpoints' by half a segment angle."""
     p = G[:3, 3]
     if cfg.box_enabled:
-        pts = p[None] if moving_points is None or not cfg.box_check_moving_object else \
-            np.vstack([p[None], moving_points])
-        if not box_contains(pts, cfg, box_margin):
-            return OUTSIDE_BOX, 'outside the safety box'
+        if not box_contains(p[None], cfg):
+            return OUTSIDE_BOX, 'tool outside the safety box'
+        if moving_points is not None and cfg.box_check_moving_object and \
+                not box_contains(moving_points, cfg, box_margin):
+            return OUTSIDE_BOX, 'carried object outside the safety box (with margin)'
     d = float(np.linalg.norm(p - seed_tool[:3, 3]))
     if d > cfg.envelope_radius:
         return OUTSIDE_ENVELOPE, f'{d:.2f} m from the seed > {cfg.envelope_radius}'

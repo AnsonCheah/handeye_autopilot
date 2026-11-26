@@ -433,3 +433,25 @@ def test_rotation_check_refuses_turning_the_printed_side_away():
     C = board_pose(distance=0.6, tilt=(86, 0), roll=0)             # 4 deg from edge-on
     assert bs._faces_camera(C[:3, 2], tf.apply(C, np.array([[w / 2, h / 2, 0]]))[0])
     assert not bs.rotation_is_safe('eye_to_hand', C, BOARD, CAMERA, math.radians(4), cfg)
+
+
+def test_translation_check_refuses_showing_the_back_of_a_steep_board():
+    """A steeply tilted board shifted sideways (no rotation) can be seen from
+    behind; the outline may stay in the image."""
+    cfg = SessionConfig(image_margin_px=0.0)
+    C = board_pose(distance=0.45, tilt=(65, 0), roll=0)
+    v = bs.safe_step(lambda x: bs.translation_is_safe(C, BOARD, CAMERA, x, cfg), 0.25, 0.001)
+    w, h = BOARD.size_m
+    centre = tf.apply(C, np.array([[w / 2, h / 2, 0]]))[0]
+    for d in bs.DIRECTIONS:                       # every allowed shift keeps the front
+        assert bs._faces_camera(C[:3, 2], centre + d * v * cfg.step_safety)
+
+
+def test_estimate_margin_applies_to_the_carried_object_not_the_tool():
+    on = SessionConfig(box_enabled=True, box_check_moving_object=True, box_size=(1.0, 1.0, 1.0),
+                       envelope_radius=1.0)
+    G = tf.make(np.eye(3), [0.49, 0.0, 0.0])               # tool 10 mm inside
+    inner = np.array([[0.39, 0.0, 0.0]])                   # carried camera 110 mm inside
+    assert planning.limits(G, G, on, inner, box_margin=0.02)[0] is None
+    assert planning.limits(G, G, on, inner + [0.1, 0, 0], box_margin=0.02)[0] == \
+        planning.OUTSIDE_BOX                               # camera 10 mm inside < margin

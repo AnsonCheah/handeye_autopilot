@@ -313,7 +313,8 @@ def main() -> None:
         missing.append('cartesian_impossible.not_refused_for_path_fraction')
     for k in ('offset_tcp_endpoint_only', 'offset_tcp_dense_waypoints'):
         r = found.get(k, {})
-        if r.get('fraction') != 1.0 or not r.get('points') or \
+        if r.get('fraction') != 1.0 or r.get('error_code') != 1 or \
+                (r.get('points') or 0) < 2 or \
                 r.get('tcp_max_deviation_mm') is None:
             missing.append(k)
     # the evidence itself: dense waypoints keep the TCP on its path (sub-mm) and
