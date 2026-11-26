@@ -117,7 +117,8 @@ farm sync), which don't shrink with more effort. Re-estimate after M1a.
 - Test spec: `handeye_autopilot/test/spec/m2.yaml`; simulated world
   `test/m2_sim.py`. The probe script is `tools/probes/m2_moveit_probe.py`
   (needs MoveIt + the Panda config installed; run per distro, findings
-  committed as YAML).
+  committed as YAML under `docs/probes/` with a findings summary; Jazzy
+  done, Lyrical/Rolling via the `probe.yml` workflow).
 - **Done when:** full pure-Python sessions run against the renderer + fake IK
   in both modes within a test deadline and pass gates; probe halving, spares
   and "plan too weak" paths each have a test asserting their outcome; the

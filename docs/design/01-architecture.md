@@ -128,9 +128,17 @@ MoveIt brand implicitly.
 - If planning to the joint goal fails from the actual current state, the
   candidate is skipped and a spare is used.
 - Success requires: goal accepted, terminal status `SUCCEEDED`, MoveIt error
-  code `SUCCESS`, **and** the measured TF pose within tolerance of the target
-  after settling. A planning-only `move_group` can report success without
-  moving; the TF check catches that.
+  code `SUCCESS`, **and** the measured joints and TF pose within tolerance of
+  the target after settling. A planning-only `move_group` can report success
+  without moving, and an out-of-limit joint goal is clamped to the soft limit
+  and still reported `SUCCESS` (probe, `docs/probes/`); the end-state check
+  catches both.
+- `not_started` vs `failed` is decided from the measured joints, not the error
+  code: a planning failure comes back as `ABORTED` with the generic `FAILURE`
+  code (probe). Aborted with joints unchanged from the start (within
+  tolerance) = `not_started`; anything else, or joints unknown, = `failed`.
+- `MoveGroup` reports the goal as executing while it is still planning;
+  "executing" is not evidence of motion.
 - The safety box, if enabled, is also sent as a `path_constraints` position
   constraint so intermediate motion stays inside it (option; can make planning
   slower, default on when the box is on).
