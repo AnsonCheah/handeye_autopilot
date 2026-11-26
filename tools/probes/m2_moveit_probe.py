@@ -190,7 +190,7 @@ def offset_tcp_path(cart, fk, link8, offset: float, degrees: float, dense: bool)
             return {'done': False, 'fk_failed': True}
         tcp = _mat(r.pose_stamped[0].pose) @ off
         worst = max(worst, float(np.linalg.norm(tcp[:3, 3] - tcp0[:3, 3])))
-    return {'done': True, 'waypoints': len(steps), 'fraction': round(res.fraction, 4),
+    return {'done': True, 'waypoints': len(steps), 'fraction': float(res.fraction),
             'points': len(pts), 'error_code': int(res.error_code.val),
             'tcp_max_deviation_mm': round(worst * 1000, 3)}
 
@@ -316,6 +316,12 @@ def main() -> None:
         if r.get('fraction') != 1.0 or not r.get('points') or \
                 r.get('tcp_max_deviation_mm') is None:
             missing.append(k)
+    # the evidence itself: dense waypoints keep the TCP on its path (sub-mm) and
+    # clearly better than the end pose alone
+    d = found.get('offset_tcp_dense_waypoints', {}).get('tcp_max_deviation_mm')
+    e = found.get('offset_tcp_endpoint_only', {}).get('tcp_max_deviation_mm')
+    if d is None or e is None or not (d < 0.5 and d < e / 10):
+        missing.append('offset_tcp.dense_not_better')
     # the cancel must be accepted and end the goal as CANCELED (not some other abort)
     cm = found['cancel_mid_motion']
     if cm.get('cancel_request_returned') is not True or cm.get('status') != 5:

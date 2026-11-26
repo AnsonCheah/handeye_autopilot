@@ -1,11 +1,11 @@
 ros_distro: jazzy
-time: Fri Nov 27 02:35:26 2026
+time: Fri Nov 27 02:49:23 2026
 to_ready:
   submitted: true
-  left_requesting_s: 0.011
+  left_requesting_s: 0.014
   accepted: true
   wait_returned: true
-  seconds: 0.108
+  seconds: 0.105
   status: 4
   error_code: 1
   action: MoveGroup_Result
@@ -24,10 +24,10 @@ to_ready:
   state_after: MoveIt2State.IDLE
 success:
   submitted: true
-  left_requesting_s: 0.011
+  left_requesting_s: 0.012
   accepted: true
   wait_returned: true
-  seconds: 2.97
+  seconds: 2.985
   status: 4
   error_code: 1
   action: MoveGroup_Result
@@ -36,20 +36,20 @@ success:
   lifecycle_status: 4
   last_failure: null
   joints_after:
-  - 1.2002
-  - 0.2993
-  - -0.3991
-  - -1.5991
-  - 0.4991
-  - 2.201
-  - -0.2999
+  - 1.1992
+  - 0.2995
+  - -0.4
+  - -1.6001
+  - 0.5003
+  - 2.2008
+  - -0.2992
   state_after: MoveIt2State.IDLE
 planning_failure:
   submitted: true
-  left_requesting_s: 0.019
+  left_requesting_s: 0.011
   accepted: true
   wait_returned: false
-  seconds: 0.055
+  seconds: 0.053
   status: 6
   error_code: 99999
   action: MoveGroup_Result
@@ -59,20 +59,20 @@ planning_failure:
   last_failure: 'FAILURE: The request failed without a specific reason. Check the
     `move_group` log.'
   joints_after:
-  - 1.2002
-  - 0.2993
-  - -0.3991
-  - -1.5991
-  - 0.4991
-  - 2.201
-  - -0.2999
+  - 1.1992
+  - 0.2995
+  - -0.4
+  - -1.6001
+  - 0.5003
+  - 2.2008
+  - -0.2992
   state_after: MoveIt2State.IDLE
 out_of_bounds_goal:
   submitted: true
   left_requesting_s: 0.011
   accepted: true
   wait_returned: true
-  seconds: 3.358
+  seconds: 3.361
   status: 4
   error_code: 1
   action: MoveGroup_Result
@@ -81,20 +81,20 @@ out_of_bounds_goal:
   lifecycle_status: 4
   last_failure: null
   joints_after:
-  - -0.0007
-  - -0.7846
-  - -0.0009
+  - 0.0009
+  - -0.7856
+  - 0.0004
   - 0.0175
-  - -0.0
-  - 1.5708
-  - 0.7859
+  - -0.0003
+  - 1.5719
+  - 0.7845
   state_after: MoveIt2State.IDLE
 back_to_far:
   submitted: true
   left_requesting_s: 0.011
   accepted: true
   wait_returned: true
-  seconds: 3.358
+  seconds: 3.384
   status: 4
   error_code: 1
   action: MoveGroup_Result
@@ -103,13 +103,13 @@ back_to_far:
   lifecycle_status: 4
   last_failure: null
   joints_after:
-  - 1.1991
-  - 0.2997
-  - -0.3993
-  - -1.601
-  - 0.5008
-  - 2.2009
-  - -0.2994
+  - 1.2009
+  - 0.2998
+  - -0.4002
+  - -1.6001
+  - 0.4996
+  - 2.2001
+  - -0.299
   state_after: MoveIt2State.IDLE
 cancel_mid_motion:
   submitted: true
@@ -120,7 +120,7 @@ cancel_mid_motion:
   moved_at_cancel_rad: 0.021
   cancel_request_returned: true
   wait_returned: false
-  seconds: 0.33
+  seconds: 0.326
   cancel_to_terminal_s: 0.023
   status: 5
   error_code: -7
@@ -132,20 +132,20 @@ cancel_mid_motion:
   last_failure: 'PREEMPTED: The goal was cancelled, by `cancel_execution()` or by
     a newer goal.'
   joints_after:
-  - 1.1764
-  - 0.2792
-  - -0.3918
-  - -1.6153
-  - 0.4913
-  - 2.189
-  - -0.2789
+  - 1.1782
+  - 0.2793
+  - -0.3927
+  - -1.6144
+  - 0.4902
+  - 2.1882
+  - -0.2786
   state_after: MoveIt2State.IDLE
 back_to_ready:
   submitted: true
-  left_requesting_s: 0.011
+  left_requesting_s: 0.014
   accepted: true
   wait_returned: true
-  seconds: 2.958
+  seconds: 2.989
   status: 4
   error_code: 1
   action: MoveGroup_Result
@@ -154,20 +154,20 @@ back_to_ready:
   lifecycle_status: 4
   last_failure: null
   joints_after:
-  - -0.0009
-  - -0.7841
-  - 0.0005
-  - -2.3552
-  - -0.0003
-  - 1.5703
-  - 0.7843
+  - 0.0001
+  - -0.7858
+  - -0.0005
+  - -2.3554
+  - -0.0006
+  - 1.5706
+  - 0.7859
   state_after: MoveIt2State.IDLE
 cartesian_ok:
   submitted: true
   left_requesting_s: 0.013
   accepted: true
   wait_returned: true
-  seconds: 1.163
+  seconds: 1.137
   status: 4
   error_code: 1
   action: ExecuteTrajectory_Result
@@ -176,13 +176,13 @@ cartesian_ok:
   lifecycle_status: 4
   last_failure: null
   joints_after:
-  - -0.0009
-  - -0.6278
-  - 0.0006
-  - -2.2564
-  - -0.0004
-  - 1.6278
-  - 0.7844
+  - 0.0002
+  - -0.6295
+  - -0.0006
+  - -2.2568
+  - -0.0006
+  - 1.6283
+  - 0.7859
   state_after: MoveIt2State.IDLE
 cartesian_back:
   submitted: true
@@ -198,20 +198,20 @@ cartesian_back:
   lifecycle_status: 4
   last_failure: null
   joints_after:
-  - -0.0009
-  - -0.7841
-  - 0.0005
-  - -2.3552
-  - -0.0003
-  - 1.5703
-  - 0.7843
+  - 0.0001
+  - -0.7858
+  - -0.0005
+  - -2.3554
+  - -0.0006
+  - 1.5706
+  - 0.7859
   state_after: MoveIt2State.IDLE
 cartesian_impossible:
   submitted: false
-  left_requesting_s: 0.073
+  left_requesting_s: 0.077
   accepted: null
   wait_returned: false
-  seconds: 0.073
+  seconds: 0.077
   status: null
   error_code: null
   lifecycle_status: null
@@ -219,13 +219,13 @@ cartesian_impossible:
     short of the threshold 1.0; lower `cartesian_fraction_threshold`, or move the
     goal closer so a straight path exists.
   joints_after:
-  - -0.0009
-  - -0.7841
-  - 0.0005
-  - -2.3552
-  - -0.0003
-  - 1.5703
-  - 0.7843
+  - 0.0001
+  - -0.7858
+  - -0.0005
+  - -2.3554
+  - -0.0006
+  - 1.5706
+  - 0.7859
   state_after: MoveIt2State.IDLE
 offset_tcp_endpoint_only:
   done: true
@@ -233,7 +233,7 @@ offset_tcp_endpoint_only:
   fraction: 1.0
   points: 10
   error_code: 1
-  tcp_max_deviation_mm: 4.52
+  tcp_max_deviation_mm: 4.518
 offset_tcp_dense_waypoints:
   done: true
   waypoints: 20
@@ -246,33 +246,33 @@ ik_whole_seconds:
   seconds: 0.01
   error_code: 1
   joints:
-  - -0.0009
-  - -0.7841
-  - 0.0005
-  - -2.3552
-  - -0.0003
-  - 1.5703
-  - 0.7843
+  - 0.0001
+  - -0.7858
+  - -0.0005
+  - -2.3554
+  - -0.0006
+  - 1.5706
+  - 0.7859
 ik_nanosec_only:
   done: true
   seconds: 0.011
   error_code: 1
   joints:
-  - -0.0009
-  - -0.7841
-  - 0.0005
-  - -2.3552
-  - -0.0003
-  - 1.5703
-  - 0.7843
+  - 0.0001
+  - -0.7858
+  - -0.0005
+  - -2.3554
+  - -0.0006
+  - 1.5706
+  - 0.7859
 ik_unreachable:
   done: true
-  seconds: 1.012
+  seconds: 1.005
   error_code: -31
   joints: []
 ik_unreachable_nanosec_only:
   done: true
-  seconds: 0.083
+  seconds: 0.061
   error_code: -31
   joints: []
 inconclusive: []

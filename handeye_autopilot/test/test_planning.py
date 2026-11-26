@@ -265,7 +265,10 @@ def test_tiny_relative_rotation_is_not_zero():
                                  dict(box_size=(2.0,)), dict(box_xyz=(0.0, 0.0)),
                                  dict(coverage=(0.1, 0.2, 0.3)),
                                  dict(waypoint_max_angle=math.radians(25)),
-                                 dict(estimate_box_margin=-0.01)])
+                                 dict(estimate_box_margin=-0.01),
+                                 dict(max_rotation_step=math.radians(120), step_safety=3.0),
+                                 dict(max_rotation_step=math.radians(70)),
+                                 dict(max_orientation_change=math.pi)])
 def test_session_config_rejects_values_that_disable_a_guard(bad):
     with pytest.raises(ValueError):
         SessionConfig(**bad)

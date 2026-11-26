@@ -106,7 +106,9 @@ def _deadline(seconds):
     signal.alarm(int(seconds))
     # backstop: a native call can hold off the Python handler; kill the
     # process (with tracebacks) if it is still stuck well past the deadline
-    faulthandler.dump_traceback_later(seconds + 60, exit=True)
+    # (the alarm itself fires as soon as a native call returns; this catches a
+    # call that never returns)
+    faulthandler.dump_traceback_later(seconds + 5, exit=True)
     try:
         yield
     finally:

@@ -224,6 +224,12 @@ class SessionConfig:
                 raise ValueError(f'{name} must be > 0')
             if v < 0:
                 raise ValueError(f'{name} must be >= 0')
+        if self.max_rotation_step * self.step_safety > math.pi / 2:
+            # the checks interpolate rotation vectors: at a half-turn and beyond
+            # a step wraps (360 deg reads as no rotation); keep well below
+            raise ValueError('max_rotation_step x step_safety must be <= 90 deg')
+        if self.max_orientation_change >= math.pi:
+            raise ValueError('max_orientation_change must be < 180 deg')
         if self.waypoint_max_angle > math.radians(5.0):
             raise ValueError('waypoint_max_angle must be <= 5 deg (path sag between checks)')
         if self.step_safety < 1:
