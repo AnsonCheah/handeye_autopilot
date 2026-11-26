@@ -134,7 +134,10 @@ class CalibrationNode(Node):
         self.create_subscription(TFMessage, '/tf_static', self.static_links.add, static_qos,
                                  callback_group=self._sensors)
         self.dynamic_links = tf_tools.StaticLinks()          # edges seen on /tf
-        self.create_subscription(TFMessage, '/tf', self.dynamic_links.add, 100,
+        # best-effort is compatible with every publisher, so a best-effort bridge
+        # publishing a competing parent is seen too
+        self.create_subscription(TFMessage, '/tf', self.dynamic_links.add,
+                                 QoSProfile(depth=100, reliability=ReliabilityPolicy.BEST_EFFORT),
                                  callback_group=self._sensors)
         self._stopping = threading.Event()
         # backwards clock jumps (sim time reset): counted by rclpy's jump callback,
@@ -311,14 +314,27 @@ class CalibrationNode(Node):
                 if any(m.velocity and max(abs(v) for v in m.velocity) > vmax for m in msgs):
                     res.success, res.message = False, 'joints are still moving'
                     return res
-                series: dict[str, list[float]] = {}      # per joint NAME (several
-                for m in msgs:                            # publishers may share the topic)
+                series: dict[str, list[tuple[float, float]]] = {}  # per joint NAME (several
+                for m in msgs:                                       # publishers may share it)
+                    st = m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
                     for name, p in zip(m.name, m.position, strict=False):
-                        series.setdefault(name, []).append(p)
+                        series.setdefault(name, []).append((st, p))
                 if not series:
                     res.success, res.message = False, 'joint_states carry no positions'
                     return res
-                span = max(float(np.ptp(v)) for v in series.values())
+                # every joint the robot has reported recently (also before the
+                # call) needs its own fresh evidence: 5 samples spanning the window
+                with self._lock:
+                    known = {n for _, m in self._joints for n in m.name}
+                thin = [n for n in known | set(series) if n not in series or
+                        len(series[n]) < min_msgs or
+                        max(t for t, _ in series[n]) - min(t for t, _ in series[n]) < window]
+                if thin:
+                    res.success, res.message = False, (
+                        f'not enough fresh samples for joint(s) {", ".join(sorted(thin))}')
+                    return res
+                series = {n: [p for _, p in v] for n, v in series.items()}
+                span = max(float(np.ptp(v)) for v in series.values())  # type: ignore[arg-type]
                 if span > vmax * window:
                     res.success, res.message = False, 'joint positions are still changing'
                     return res

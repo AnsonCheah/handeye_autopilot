@@ -138,12 +138,24 @@ class StaticLinks:
 
     def __init__(self) -> None:
         self.links: set[tuple[str, str]] = set()
+        self.values: dict[tuple[str, str], list[Mat]] = {}   # distinct values per edge
         self._lock = threading.Lock()
 
     def add(self, msg: object) -> None:
         with self._lock:
             for t in msg.transforms:  # type: ignore[attr-defined]
-                self.links.add((t.header.frame_id, t.child_frame_id))
+                edge = (t.header.frame_id, t.child_frame_id)
+                self.links.add(edge)
+                T = to_matrix(t)
+                seen = self.values.setdefault(edge, [])
+                if not any(np.allclose(T, S, atol=1e-6) for S in seen):
+                    seen.append(T)
+
+    def conflicting(self, parent: str, child: str) -> bool:
+        """Two publishers announced different values for this static edge (a
+        driver and a URDF, say): listeners may end up with either."""
+        with self._lock:
+            return len(self.values.get((parent, child), [])) > 1
 
     def has(self, parent: str, child: str) -> bool:
         with self._lock:
@@ -208,6 +220,9 @@ def camera_subtree(tree: dict[str, str], static: StaticLinks, optical: str, pare
         if moving is not None:
             return Subtree(root, chain, f'{moving} -> {child} is published on /tf (moving or '
                            'a competing driver): the camera subtree must be static')
+        if static.conflicting(par, child):
+            return Subtree(root, chain, f'{par} -> {child} has conflicting values on '
+                           '/tf_static (two publishers disagree): remove one')
         if not static.has(par, child):
             return Subtree(root, chain, f'{par} -> {child} is not on /tf_static: the camera '
                            'subtree must be static (a moving link cannot be calibrated '

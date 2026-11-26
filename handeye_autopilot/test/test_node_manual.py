@@ -331,7 +331,7 @@ def test_clear_fault_needs_fresh_joint_states(world_factory):
 
 
 def test_profiles_override_and_validate(world_factory, tmp_path):
-    (tmp_path / 'small.yaml').write_text('session:\n  target_captures: 3\n'
+    (tmp_path / 'small.yaml').write_text('session:\n  target_captures: 4\n'
                                          'solver:\n  min_captures: 3\n')
     (tmp_path / 'broken.yaml').write_text('session:\n  step_safety: 0.0\n')
     (tmp_path / 'typo.yaml').write_text('sesion:\n  target_captures: 3\n')
@@ -343,9 +343,9 @@ def test_profiles_override_and_validate(world_factory, tmp_path):
     h = d.send(profile='small')
     assert h.accepted
     d.wait_phase(FB.PHASE_MANUAL_CAPTURE)
-    run_captures(w, len(w.poses), accepted_target=3)
-    res = w.result(h).result                       # solves after 3 (profile), not 10
-    assert res.quality.captures_accepted == 3
+    run_captures(w, len(w.poses), accepted_target=4)
+    res = w.result(h).result                       # solves after 4 (profile), not 10
+    assert res.quality.captures_accepted == 4
 
 
 def test_services_refuse_outside_their_phase(world_factory):
@@ -437,17 +437,17 @@ def test_camera_switch_mid_run_aborts(world_factory):
 
 
 def test_capture_refused_once_the_run_is_finishing(world_factory, tmp_path):
-    (tmp_path / 'tiny.yaml').write_text('session:\n  target_captures: 3\nsolver:\n'
+    (tmp_path / 'tiny.yaml').write_text('session:\n  target_captures: 4\nsolver:\n'
                                         '  min_captures: 3\n')
     w = world_factory(node_over={'profiles_dir': str(tmp_path),
                                  'timing.settle_window': 0.3})
     d = w.driver
     h = d.send(profile='tiny')
     d.wait_phase(FB.PHASE_MANUAL_CAPTURE)
-    run_captures(w, len(w.poses), accepted_target=3)
+    run_captures(w, len(w.poses), accepted_target=4)
     r = d.call(d.capture)
     assert not r.success
-    assert w.result(h).result.quality.captures_accepted == 3
+    assert w.result(h).result.quality.captures_accepted == 4
 
 
 def test_profile_with_a_string_boolean_is_invalid(world_factory, tmp_path):
@@ -562,7 +562,7 @@ def test_string_boolean_anywhere_in_a_profile_is_invalid(world_factory, tmp_path
 
 def test_profile_is_read_at_admission(world_factory, tmp_path):
     f = tmp_path / 'p.yaml'
-    f.write_text('session:\n  target_captures: 3\nsolver:\n  min_captures: 3\n')
+    f.write_text('session:\n  target_captures: 4\nsolver:\n  min_captures: 3\n')
     w = world_factory(node_over={'profiles_dir': str(tmp_path)})
     h = w.driver.send(profile='p')
     f.write_text('session:\n  step_safety: 0.0\n')       # edited after acceptance
@@ -873,3 +873,48 @@ def test_a_moving_joint_on_another_publisher_blocks_clearing(world_factory):
     r = d.call(d.clear_fault)
     stop.set()
     assert not r.success and 'changing' in r.message
+
+
+# -- review fixes (M3 xhigh pass 6) -------------------------------------------------
+
+def test_conflicting_static_values_are_refused():
+    from handeye_autopilot.ros import tf_tools
+    from tf2_msgs.msg import TFMessage
+    static = tf_tools.StaticLinks()
+    static.add(TFMessage(transforms=[tf_tools.to_msg(np.eye(4), 'cam', 'opt')]))
+    static.add(TFMessage(transforms=[tf_tools.to_msg(tf.make(np.eye(3), [0.25, 0, 0]),
+                                                     'cam', 'opt')]))   # a URDF disagrees
+    sub = tf_tools.camera_subtree({'opt': 'cam'}, static, 'opt', 'base_link', '')
+    assert sub.error and 'conflicting' in sub.error
+
+
+def test_target_must_leave_each_fold_enough_captures(world_factory, tmp_path):
+    (tmp_path / 'eight.yaml').write_text('session:\n  target_captures: 8\n')
+    w = world_factory(node_over={'profiles_dir': str(tmp_path)})
+    res = w.result(w.driver.send(profile='eight')).result
+    assert res.error_code == R.INVALID_GOAL and 'fold' in res.message
+
+
+def test_one_sample_of_a_moving_joint_is_not_enough(world_factory):
+    from sensor_msgs.msg import JointState
+    w = world_factory()
+    d = w.driver
+    assert d.call(d.inject_fault).success
+    pub = w.client.create_publisher(JointState, '/joint_states', 10)
+    stop = threading.Event()
+
+    def arm_and_one_rail_sample():
+        first = True
+        while not stop.is_set():
+            now = w.client.get_clock().now().to_msg()
+            pub.publish(JointState(header=JointState().header.__class__(stamp=now),
+                                   name=['a1'], position=[0.1]))
+            if first:
+                pub.publish(JointState(header=JointState().header.__class__(stamp=now),
+                                       name=['rail'], position=[0.5]))
+                first = False
+            time.sleep(0.02)
+    threading.Thread(target=arm_and_one_rail_sample, daemon=True).start()
+    r = d.call(d.clear_fault)
+    stop.set()
+    assert not r.success and 'rail' in r.message

@@ -20,6 +20,7 @@ import numpy as np
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from scipy.spatial.transform import Rotation
 from tf2_msgs.msg import TFMessage
 import tf2_ros
@@ -62,7 +63,13 @@ class ResultPublisher(Node):
         self.buffer = tf2_ros.Buffer()
         self.listener = tf2_ros.TransformListener(self.buffer, self)
         self.moving = tf_tools.StaticLinks()          # edges seen on /tf
-        self.create_subscription(TFMessage, '/tf', self.moving.add, 100)
+        self.create_subscription(TFMessage, '/tf', self.moving.add,
+                                 QoSProfile(depth=100, reliability=ReliabilityPolicy.BEST_EFFORT))
+        self.static_values = tf_tools.StaticLinks()   # conflicting static values
+        self.create_subscription(
+            TFMessage, '/tf_static', self.static_values.add,
+            QoSProfile(depth=100, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                       reliability=ReliabilityPolicy.RELIABLE))
         self.listen = listen
         self.static = tf2_ros.StaticTransformBroadcaster(self)
 
@@ -72,6 +79,12 @@ class ResultPublisher(Node):
         frame by that difference)."""
         st = self.subtree
         chain = tf_tools.ancestors(tf_tools.parents(self.buffer), st['child'])
+        for child, par in zip(chain, chain[1:], strict=False):
+            if self.static_values.conflicting(par, child):
+                return (f'{par} -> {child} has conflicting values on /tf_static (two '
+                        'publishers disagree): remove one')
+            if par == st['parent']:
+                break
         for child in chain:
             moving = self.moving.has_child(child)
             if moving is not None:

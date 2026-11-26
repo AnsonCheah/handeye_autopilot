@@ -208,9 +208,12 @@ def build(doc: dict[str, Any], profile: str = '') -> RunConfig:
                 (isinstance(d, float) and isinstance(v, (int, float)) and
                  not isinstance(v, bool))):
             raise ValueError(f'board.{k} must be a {type(d).__name__}, got {v!r}')
-    if doc['session']['target_captures'] < doc['solver']['min_captures']:
-        raise ValueError('session.target_captures must be >= solver.min_captures (manual '
-                         'mode solves when the target is reached)')
+    k, need = doc['solver']['folds'], doc['solver']['min_captures']
+    least = -(-need * k // (k - 1)) if isinstance(k, int) and k > 1 else need
+    if doc['session']['target_captures'] < least:
+        # every k-fold training split (target - target/k) must still reach min_captures
+        raise ValueError(f'session.target_captures must be >= {least} (solver.min_captures '
+                         f'{need} in each of {k} fold training sets)')
     if doc['session']['frames_per_capture'] < doc['capture']['consensus_min_frames']:
         raise ValueError('session.frames_per_capture must be >= '
                          'capture.consensus_min_frames (else every capture is rejected)')
