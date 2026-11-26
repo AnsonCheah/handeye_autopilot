@@ -52,16 +52,17 @@ def _joints(m: MoveIt2) -> list[float] | None:
     js = m.joint_state
     if js is None:
         return None
-    pos = dict(zip(js.name, js.position))
+    pos = dict(zip(js.name, js.position, strict=True))
     return [pos[j] for j in JOINTS] if all(j in pos for j in JOINTS) else None
 
 
 def _moved(m: MoveIt2, start: list[float]) -> float:
     now = _joints(m)
-    return 0.0 if now is None else max(abs(a - b) for a, b in zip(now, start))
+    return 0.0 if now is None else max(abs(a - b) for a, b in zip(now, start, strict=True))
 
 
-def motion(m: MoveIt2, goal: list[float], cancel: bool = False) -> dict:
+def motion(m: MoveIt2, goal: list[float] | None, cancel: bool = False,
+           submit=None) -> dict:
     """One joint-goal motion; records what MoveGroup itself reported.
 
     accepted: the action server accepted the goal (goal handle);
@@ -71,7 +72,8 @@ def motion(m: MoveIt2, goal: list[float], cancel: bool = False) -> dict:
     """
     start = _joints(m)
     t0 = time.time()
-    out_submit = m.move_to_configuration(goal, JOINTS, timeout_sec=10.0)
+    out_submit = submit() if submit is not None else \
+        m.move_to_configuration(goal, JOINTS, timeout_sec=10.0)
     out: dict = {'submitted': bool(out_submit)}
     left_requesting = _wait(lambda: str(m.query_state()) != 'MoveIt2State.REQUESTING', 10.0)
     out['left_requesting_s'] = round(time.time() - t0, 3) if left_requesting else None
@@ -101,6 +103,13 @@ def motion(m: MoveIt2, goal: list[float], cancel: bool = False) -> dict:
         res = rf.result()
         out['status'] = int(res.status)
         out['error_code'] = int(res.result.error_code.val)
+        # evidence of whether execution began (01-architecture §3.2 not_started rule)
+        # (MoveGroup results only; a Cartesian move runs ExecuteTrajectory, which has neither)
+        out['action'] = type(res.result).__name__
+        for key, field in (('planned_points', 'planned_trajectory'),
+                           ('executed_points', 'executed_trajectory')):
+            traj = getattr(res.result, field, None)
+            out[key] = None if traj is None else len(traj.joint_trajectory.points)
     else:
         out['status'] = None
         code = m.get_last_execution_error_code()
@@ -174,6 +183,23 @@ def main() -> None:
     found['back_to_far'] = motion(m, FAR)
     found['cancel_mid_motion'] = motion(m, READY, cancel=True)
     found['back_to_ready'] = motion(m, READY)
+    # Cartesian (straight tool path) moves, as used for checked short moves
+    # (01-architecture §3.2): a reachable 5 cm shift and an impossible 3 m one,
+    # both requiring the whole path (fraction threshold 1.0).
+    fk0 = m.compute_fk()
+    if fk0 is not None:
+        p0 = fk0[0] if isinstance(fk0, list) else fk0
+        q = p0.pose.orientation
+        quat = (q.x, q.y, q.z, q.w)
+
+        def cart(dx: float):
+            pos = (p0.pose.position.x + dx, p0.pose.position.y, p0.pose.position.z)
+            return lambda: m.move_to_pose(position=pos, quat_xyzw=quat, frame_id='panda_link0',
+                                          cartesian=True, cartesian_fraction_threshold=1.0,
+                                          timeout_sec=10.0)
+        found['cartesian_ok'] = motion(m, None, submit=cart(0.05))
+        found['cartesian_back'] = motion(m, None, submit=cart(0.0))
+        found['cartesian_impossible'] = motion(m, None, submit=cart(3.0))
     fk = m.compute_fk()
     if fk is not None and ik.wait_for_service(timeout_sec=5.0):
         pose = fk[0] if isinstance(fk, list) else fk
@@ -196,6 +222,20 @@ def main() -> None:
         missing.append('success.status_succeeded')
     if found['planning_failure'].get('status') == 4:
         missing.append('planning_failure.did_not_fail')
+    # the not_started rule rests on these (01-architecture §3.2)
+    if found['planning_failure'].get('planned_points') != 0:
+        missing.append('planning_failure.planned_points_not_zero')
+    if not found['cancel_mid_motion'].get('planned_points'):
+        missing.append('cancel_mid_motion.planned_points_missing')
+    if found.get('cartesian_ok', {}).get('status') != 4:
+        missing.append('cartesian_ok.not_succeeded')
+    if found.get('cartesian_impossible', {}).get('status') == 4:
+        missing.append('cartesian_impossible.succeeded')
+    if found['cancel_mid_motion'].get('status') == 4:
+        missing.append('cancel_mid_motion.ended_succeeded')
+    for k in ('ik_whole_seconds', 'ik_nanosec_only'):
+        if isinstance(found.get(k), dict) and found[k].get('error_code') != 1:
+            missing.append(f'{k}.reachable_pose_failed')
     if not found['cancel_mid_motion'].get('motion_seen'):
         missing.append('cancel_mid_motion.motion_seen')
     if not isinstance(found.get('ik_whole_seconds'), dict) or \

@@ -133,10 +133,25 @@ MoveIt brand implicitly.
   without moving, and an out-of-limit joint goal is clamped to the soft limit
   and still reported `SUCCESS` (probe, `docs/probes/`); the end-state check
   catches both.
-- `not_started` vs `failed` is decided from the measured joints, not the error
-  code: a planning failure comes back as `ABORTED` with the generic `FAILURE`
-  code (probe). Aborted with joints unchanged from the start (within
-  tolerance) = `not_started`; anything else, or joints unknown, = `failed`.
+- `not_started` vs `failed` is decided from evidence, not the error code: a
+  planning failure comes back as `ABORTED` with the generic `FAILURE` code
+  (probe). `not_started` needs all of: `ABORTED`, an **empty planned
+  trajectory** in the MoveGroup result (nothing existed to execute), and
+  measured joints unchanged from the start (within tolerance). Anything else,
+  or joints unknown, = `failed` (a motion that moved and came back must not
+  pass as a safe skip). The result's `executed_trajectory` is always empty on
+  Jazzy (probe), so it is not used.
+- **Checked short moves are Cartesian.** Bootstrap, centring and recovery moves
+  (`Move.cartesian`) are planned as a straight tool path (MoveIt Cartesian
+  path), so the executed path is the one the step check assumed. The driver
+  requires the whole path (pymoveit2 `cartesian_fraction_threshold=1.0`; a
+  shorter path is refused before anything is sent, which is the `not_started`
+  evidence for these moves; probe) and sets a joint-space jump threshold
+  (MoveIt's default 0 disables the check). The end check is the measured TF
+  tool pose against `tool_pose`; the planner may reach it on a different IK
+  branch than `Move.joints`, which is only a reference. Planned poses are
+  joint goals (only the end pose is captured; MoveIt's planning scene guards
+  the path).
 - `MoveGroup` reports the goal as executing while it is still planning;
   "executing" is not evidence of motion.
 - The safety box, if enabled, is also sent as a `path_constraints` position

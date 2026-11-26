@@ -143,3 +143,52 @@ def test_driver_protocol_is_enforced():
         session.Session('sideways', __import__('m1b_sim').BOARD,
                         __import__('m1b_sim').CAMERA, FakeIK(0, 2))
     assert np.isfinite(SessionConfig().lever_max)
+
+
+def test_only_planned_moves_are_free_joint_goals():
+    """Bootstrap, centring and recovery moves must follow the checked straight
+    tool path (Cartesian); planned poses are plain joint goals."""
+    log = []
+    r, *_ = run('eye_to_hand', lose={1}, log=log)
+    assert r.failure is None, r.message
+    moves = [a for a in log if isinstance(a, Move)]
+    assert {m.purpose for m in moves} >= {'plan', 'bootstrap', 'bootstrap: to the seed',
+                                          'centring'}
+    for m in moves:
+        assert m.cartesian == (m.purpose != 'plan'), m.purpose
+
+
+def test_centring_never_starts_from_a_view_the_robot_is_not_at():
+    """If the last bootstrap move did not happen, the robot is at the seed, not at
+    the last accepted view: centring works from the seed view (no redundant
+    return move, since the robot is already there)."""
+    log = []
+    run('eye_to_hand', log=log)
+    moves = [a for a in log if isinstance(a, Move)]
+    last_boot = max(i for i, m in enumerate(moves, 1) if m.purpose == 'bootstrap')
+
+    log2 = []
+    r, *_ = run('eye_to_hand', log=log2,
+                fail_move=lambda i, why: i == last_boot and why == 'bootstrap')
+    assert r.failure is None, r.message
+    moves2 = [a for a in log2 if isinstance(a, Move)]
+    k = next(i for i, m in enumerate(moves2) if m.purpose.startswith('centring'))
+    assert moves2[k].purpose == 'centring'          # no move to where it already is
+    seed_tool = r.records[0].tool_pose
+    boot = [rec for rec, why in zip(r.records, r.capture_purposes, strict=True)
+            if why == 'bootstrap' and rec.accepted][-1].tool_pose
+    first = moves2[k].tool_pose
+    # the first increment is a small step from the seed view, not from `boot`
+    assert tf.translation_distance(first, seed_tool) < tf.translation_distance(first, boot)
+    assert tf.rotation_angle(first, seed_tool) < tf.rotation_angle(first, boot)
+
+
+def test_no_recovery_move_to_where_the_robot_already_is():
+    """A skipped step leaves the robot at the seed: the next step's return to the
+    seed is not sent (a not_started reply to it would wrongly end the run)."""
+    log = []
+    r, *_ = run('eye_to_hand', log=log,
+                fail_move=lambda i, why: i == 1 and why == 'bootstrap')
+    assert r.failure is None, r.message
+    moves = [a for a in log if isinstance(a, Move)]
+    assert moves[0].purpose == 'bootstrap' and moves[1].purpose == 'bootstrap'

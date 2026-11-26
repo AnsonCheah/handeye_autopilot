@@ -79,12 +79,14 @@ def _visible_all(pts: Mat, camera: CameraModel, margin: float) -> bool:
 
 
 def rotation_is_safe(mode: str, C: Mat, board: BoardSpec, camera: CameraModel,
-                     angle: float, cfg: SessionConfig) -> bool:
+                     angle: float, cfg: SessionConfig, directions: Mat = DIRECTIONS,
+                     pivot_dirs: Mat = PIVOT_DIRS,
+                     fractions: tuple[float, ...] = FRACTIONS) -> bool:
     pts = tf.apply(C, board.outline_samples(12))                     # (P, 3)
     ref = reference_point(mode, C, board)
-    pivots = np.vstack([ref, ref + np.sqrt(3) * cfg.lever_max * PIVOT_DIRS])
-    for frac in FRACTIONS:
-        R = Rotation.from_rotvec(DIRECTIONS * angle * cfg.step_safety * frac).as_matrix()
+    pivots = np.vstack([ref, ref + np.sqrt(3) * cfg.lever_max * pivot_dirs])
+    for frac in fractions:
+        R = Rotation.from_rotvec(directions * angle * cfg.step_safety * frac).as_matrix()
         for pivot in pivots:
             moved = np.einsum('aij,pj->api', R, pts - pivot) + pivot   # (A, P, 3)
             if not _visible_all(moved, camera, cfg.image_margin_px):
@@ -93,10 +95,11 @@ def rotation_is_safe(mode: str, C: Mat, board: BoardSpec, camera: CameraModel,
 
 
 def translation_is_safe(C: Mat, board: BoardSpec, camera: CameraModel, length: float,
-                        cfg: SessionConfig) -> bool:
+                        cfg: SessionConfig, directions: Mat = DIRECTIONS,
+                        fractions: tuple[float, ...] = FRACTIONS) -> bool:
     pts = tf.apply(C, board.outline_samples(12))
-    for frac in FRACTIONS:
-        moved = pts[None] + (DIRECTIONS * length * cfg.step_safety * frac)[:, None]
+    for frac in fractions:
+        moved = pts[None] + (directions * length * cfg.step_safety * frac)[:, None]
         if not _visible_all(moved, camera, cfg.image_margin_px):
             return False
     return True

@@ -22,9 +22,11 @@ driven through pymoveit2 with the `MoveGroup` action.
 1. **Success:** SUCCEEDED / `SUCCESS` (1), end joints at the goal.
 2. **Planning failure** (goal in self-collision): ABORTED / `FAILURE` (99999),
    the generic code, not `GOAL_IN_COLLISION`; the robot did not move. The error
-   code cannot tell a planning failure from an execution failure, so the
-   driver classifies `not_started` vs `failed` from the measured joints
-   (unchanged from the start = `not_started`).
+   code cannot tell a planning failure from an execution failure. The
+   result's `planned_trajectory` is empty only when planning failed (0 points
+   here, 30+ for every planned motion), while `executed_trajectory` is empty
+   even after successful motions. So `not_started` = aborted + no planned
+   trajectory + joints unchanged (01-architecture §3.2).
 3. **Out-of-limit joint goal** (joint 4 = +1.0, limit 0.0873): SUCCEEDED /
    `SUCCESS`, but the arm stopped at the soft limit 0.0175. **Success does not
    mean the goal was reached**: compare measured end joints with the goal.
@@ -40,3 +42,9 @@ driven through pymoveit2 with the `MoveGroup` action.
 6. **`compute_ik` timeout:** whole seconds honoured (unreachable pose: 1.00 s,
    `NO_IK_SOLUTION` −31); a nanosec-only 0.5 s timeout is dropped (0.05 s).
    Confirms 01-architecture §3.1.
+7. **Cartesian moves** (pymoveit2 `move_to_pose(cartesian=True)`, fraction
+   threshold 1.0) run as `compute_cartesian_path` + the `ExecuteTrajectory`
+   action. A reachable 5 cm shift: SUCCEEDED / `SUCCESS`. An impossible 3 m
+   shift: the planner covered 13 % of the path and pymoveit2 refused it
+   **before sending anything** (`submitted: false`, robot unmoved). MoveIt
+   logs jump threshold 0 (jump check disabled) unless the caller sets one.

@@ -224,3 +224,136 @@ def test_ik_failures_are_recorded():
     p = planning.plan('eye_to_hand', X, Z, CAMERA, BOARD, seed_tool, None, [],
                       lambda G: planning.IKResult(None, 'NO_IK_SOLUTION'), CFG, SolverConfig())
     assert p.poses == [] and p.weak and p.rejections[planning.IK_FAILED] > 0
+
+
+def _old_average_module(C, b):
+    """The previous estimate (shortest marker edge / cells), kept as a reference."""
+    from handeye_autopilot.core import cv_compat
+    bits = cv_compat.marker_bits(cv_compat.get_dictionary(b.dictionary)) + 2
+    _, obj = cv_compat.marker_object_points(b.opencv_board)
+    px = CAMERA.project_object(C, obj.reshape(-1, 3)).reshape(-1, 4, 2)
+    return float(np.linalg.norm(px - np.roll(px, 1, axis=1), axis=2).min() / bits)
+
+
+def test_marker_module_face_on_matches_pinhole():
+    from handeye_autopilot.core.boards import BoardSpec
+    b = BoardSpec('charuco', 5, 4, 0.04, 0.03, 'DICT_5X5_100')
+    w, h = b.size_m
+    C = tf.make(np.eye(3), [-w / 2, -h / 2, 0.6])          # face-on, centred, 0.6 m
+    expected = CAMERA.K[0, 0] * 0.03 / 7 / 0.6               # f x cell / depth
+    assert planning.marker_module_px(C, CAMERA, b) == pytest.approx(expected, rel=0.03)
+
+
+def test_marker_module_catches_foreshortened_cells():
+    """Steep tilt: the smallest cell is on the far side of the far marker, smaller
+    than any per-marker average."""
+    from handeye_autopilot.core.boards import BoardSpec
+    b = BoardSpec('charuco', 5, 4, 0.04, 0.03, 'DICT_5X5_100')
+    C = board_pose(distance=0.35, tilt=(60, 0), roll=0)
+    exact = planning.marker_module_px(C, CAMERA, b)
+    assert exact < _old_average_module(C, b)
+    assert exact > 0
+
+
+def _plan_with(cfg, ik=None):
+    X, Z = truth('eye_to_hand')
+    seed_tool = X @ board_pose() @ tf.inv(Z)
+
+    def full_ik(G):
+        return planning.IKResult(np.r_[G[:3, 3], Rotation.from_matrix(G[:3, :3]).as_rotvec()])
+    return planning.plan('eye_to_hand', X, Z, CAMERA, BOARD, seed_tool, None, [],
+                         ik or full_ik, cfg, SolverConfig())
+
+
+def test_information_top_up_is_capped_and_weak_plan_has_advice_up_front():
+    # an unreachable information threshold: the top-up must stop at the cap
+    cfg = SessionConfig(min_plan_singular_value=1e12)
+    p = _plan_with(cfg)
+    max_target = math.ceil(cfg.target_captures * cfg.reserve_factor)
+    assert p.weak and p.target == max_target
+    assert len(p.poses) <= math.ceil(max_target * cfg.reserve_factor)
+    assert p.advice.startswith('plan is weak')
+
+
+def test_weak_advice_names_the_main_rejection():
+    cfg = SessionConfig(max_orientation_change=math.radians(4))
+    p = _plan_with(cfg)
+    assert p.weak
+    assert 'orientation_limit' in p.advice and 'raise the orientation limit' in p.advice
+
+
+def test_strong_plan_has_no_advice():
+    p = _plan_with(CFG)
+    assert not p.weak and p.advice == ''
+
+
+def test_lever_ball_box_check_before_an_estimate():
+    """No estimate: the carried object may be anywhere within sqrt(3) L_max of the
+    tool; the box check must then hold for that whole ball (posed box)."""
+    on = SessionConfig(box_enabled=True, box_check_moving_object=True, box_xyz=(0.5, 0, 0.4),
+                       box_rpy=(0, 0, math.radians(30)), box_size=(1.2, 1.2, 1.2),
+                       lever_max=0.1, envelope_radius=1.0)
+    r = math.sqrt(3) * 0.1
+    B = Rotation.from_euler('xyz', on.box_rpy).as_matrix()
+    centre = np.array(on.box_xyz)
+    ok = tf.make(np.eye(3), centre)
+    near_face = tf.make(np.eye(3), centre + B[:, 0] * (0.6 - r + 0.01))   # ball pokes out
+    fits = tf.make(np.eye(3), centre + B[:, 0] * (0.6 - r - 0.01))
+    def ball(G, c):
+        return planning.lever_ball_points('eye_in_hand', G, c, BOARD)
+    for G, expect in ((ok, None), (fits, None), (near_face, planning.OUTSIDE_BOX)):
+        assert planning.limits(G, ok, on, ball(G, on))[0] == expect
+    off = SessionConfig(**{**on.to_dict(), 'box_check_moving_object': False})
+    assert planning.limits(near_face, ok, off, ball(near_face, off))[0] is None
+
+
+DENSE_DIRS, DENSE_PIVOTS = bs.fibonacci_sphere(512), bs.fibonacci_sphere(128)
+DENSE_FRACS = tuple(np.linspace(1 / 8, 1, 8))
+
+
+def _largest(check, hi=0.2, iters=12):
+    lo = 0.0
+    for _ in range(iters):
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if check(mid) else (lo, mid)
+    return lo
+
+
+@pytest.mark.parametrize('mode', ['eye_to_hand', 'eye_in_hand'])
+@pytest.mark.parametrize('pose', [(0.5, (25, 10), 20, (60, -40)),
+                                  (0.65, (-20, 25), -30, (-80, 50)),
+                                  (0.45, (10, -30), 60, (90, 60))])
+def test_sampled_worst_case_is_within_ten_percent_of_dense(mode, pose):
+    """Sampling-error bound for §B2: the default 64 x 33 x 4 sampling never allows
+    more than ~5 % beyond a dense 512 x 129 x 8 check (measured); assert < 10 %,
+    which the 1.5 step safety factor covers several times over."""
+    cfg = SessionConfig(step_safety=1.0)
+    C = board_pose(*pose)
+    a = _largest(lambda v: bs.rotation_is_safe(mode, C, BOARD, CAMERA, v, cfg))
+    t = _largest(lambda v: bs.translation_is_safe(C, BOARD, CAMERA, v, cfg))
+    assert a > 0 and t > 0
+    assert bs.rotation_is_safe(mode, C, BOARD, CAMERA, 0.9 * a, cfg,
+                               DENSE_DIRS, DENSE_PIVOTS, DENSE_FRACS)
+    assert bs.translation_is_safe(C, BOARD, CAMERA, 0.9 * t, cfg, DENSE_DIRS, DENSE_FRACS)
+
+
+def test_lever_ball_includes_board_corners_for_eye_to_hand():
+    """eye_to_hand: L_max bounds the board centre; its corners reach half a
+    diagonal further, so a pose the camera-origin ball fits can still fail."""
+    on = SessionConfig(box_enabled=True, box_check_moving_object=True, box_xyz=(0.5, 0, 0.4),
+                       box_size=(1.2, 1.2, 1.2), lever_max=0.1, envelope_radius=1.0)
+    r = math.sqrt(3) * 0.1
+    half_diag = 0.5 * math.hypot(*BOARD.size_m)
+    centre = np.array(on.box_xyz)
+    G = tf.make(np.eye(3), centre + [0.6 - r - 0.5 * half_diag, 0, 0])
+    assert planning.limits(G, G, on, planning.lever_ball_points('eye_in_hand', G, on,
+                                                                BOARD))[0] is None
+    assert planning.limits(G, G, on, planning.lever_ball_points('eye_to_hand', G, on,
+                                                                BOARD))[0] == planning.OUTSIDE_BOX
+
+
+def test_move_budget_has_a_single_rounding():
+    cfg = SessionConfig(target_captures=3, reserve_factor=1.5, min_plan_singular_value=1e12)
+    p = _plan_with(cfg)
+    assert p.weak and p.target == math.ceil(3 * 1.5)
+    assert len(p.poses) <= math.ceil(3 * 1.5 ** 2)

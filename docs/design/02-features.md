@@ -68,6 +68,13 @@ Intrinsics are fixed (from `CameraInfo`), not refined.
      the camera and inside the image with the margin. `shortcut:` sampled, not
      exact; tighten if a real run loses the board after a passed step. A
      property test checks it against random true geometry in both modes.
+     Sampling error, measured against a dense 512 × 129 × 8 check: the default
+     allows at most ~5 % more rotation and ~1 % more translation (a test
+     asserts < 10 %); the safety factor covers that several times over.
+   - **Box before an estimate:** when the box also checks the carried object,
+     its reference point (board centre / camera origin) can be anywhere
+     within √3·`L_max` of the tool origin, plus half the board diagonal for
+     the board corners in eye-to-hand; that whole ball must lie inside the box.
    - **With a rough estimate**, a step is checked against the board position
      the estimate predicts along the move (step × safety, margin plus the
      uncertainty term).
@@ -93,7 +100,9 @@ Intrinsics are fixed (from `CameraInfo`), not refined.
    usable estimate in 3–4 rounds.
 3. **Bounded centring.** Bring the board toward image centre at nominal depth in
    checked increments (each one detected before the next), not one jump.
-   Starts from the latest verified view; each increment is checked against
+   Starts from the latest verified view the robot is actually at (if the
+   last bootstrap move was skipped or its capture rejected, the robot first
+   returns to the seed and centring starts from the seed view); each increment is checked against
    the estimate's predicted view before it is sent; a rejected capture sends
    the robot back to the last verified pose and ends centring.
 4. **Candidate generation** (§C), **execution**, **final solve** (§E),
@@ -103,12 +112,15 @@ The state machine is one plain class in `handeye_autopilot.core`; the node drive
 It does no I/O: the driver asks `next_action()` and gets `Move(tool_pose,
 joints, purpose)`, `Capture(frames, purpose)` or `Finished(result)`, and
 reports back with `on_motion(outcome, joints)` / `on_capture(frames, joints)`.
-Motion outcomes: `ok`; `not_started` (planning failed, the robot did not move:
-a safe skip, a spare is used); `failed` (execution failed or its end state is
+Motion outcomes: `ok`; `not_started` (planning failed, nothing was executed
+and the robot did not move, evidence per checkpoint 1 §3.2: a safe skip, a
+spare is used); `failed` (execution failed or its end state is
 unknown: the run stops with `motion_failed`). An empty capture reply (camera
 or TF timeout) is a recorded rejection. Every move passes the robot-agnostic
-limits and IK before it is sent. Moves carry the IK joint
-solution (sent as a joint goal, checkpoint 1 §3.2). Phases use the
+limits and IK before it is sent. Planned moves carry the IK joint solution
+and are sent as joint goals; checked short moves (`cartesian`: bootstrap,
+centring, recovery) are sent as a Cartesian path to `tool_pose`, with the
+joints only as a reference (checkpoint 1 §3.2). Phases use the
 `Calibrate.Feedback` `PHASE_*` strings. Session failure reasons:
 `seed_rejected` (with what to fix), `board_lost` (names `L_max`),
 `bootstrap_failed`, `not_enough_samples`, or a solver reason (§E5).
@@ -128,9 +140,10 @@ solution (sent as a joint goal, checkpoint 1 §3.2). Phases use the
    uncertainty** (a base term plus twice the bootstrap estimate's worst
    reprojection; `shortcut:` no covariance, revisit with real runs); coverage
    band (area of the sampled, distorted outline); minimum projected spacing of
-   features and, for ChArUco, minimum projected marker-module width (each
-   marker's shortest projected edge over its cells, bits read from the OpenCV
-   dictionary).
+   features and, for ChArUco, minimum projected marker-module width (every
+   marker's cell grid, bits + 2 border cells from the OpenCV dictionary, is
+   projected and the shortest cell edge on the board counts, so foreshortened
+   cells are caught).
 3. **Convert** to tool poses through the mode adapter.
 4. **Robot-agnostic limits:** safety box, envelope, orientation limit from the
    seed.
@@ -144,14 +157,19 @@ solution (sent as a joint goal, checkpoint 1 §3.2). Phases use the
    solver's rotation checks (§E4 amplitude, axis spread) counts as zero
    information: in M2 a bootstrap-only set scored well on the singular value
    while its rotations were too small to solve. A weak plan is reported
-   (`plan_weak`, with advice) and still executed; the final gates decide.
+   (`plan_weak`, with advice built from the commonest candidate rejections)
+   **before execution** and still executed; the final gates decide.
    Selection score: smallest SO(3) angle to anything chosen or captured ×
    (1 + axis novelty), novelty = 1 − max |cos| between the new relative
    rotation axis and the axes already used.
 7. **Spares:** the plan's target is the number of informative poses it
    relies on (at least the configured target, more if the information check
-   needed more); execution collects that many accepted captures; spares are
-   target × (reserve factor − 1) on top.
+   needed more, **at most** target × reserve factor; past that the plan is
+   weak); execution collects that many accepted captures; spares are
+   target × (reserve factor − 1) on top, within ⌈configured target ×
+   reserve factor²⌉ moves in all. A spare that replaces a skipped
+   pose is not re-scored (`shortcut:`; the solver's observability gate on the
+   real captures decides; re-plan from the captured set if runs end weak).
 8. **Ordering:** greedy tour by **joint-space distance** between the IK
    solutions. At execution time MoveIt plans from the actual current state, so
    a pose that fails then is skipped and a spare used.

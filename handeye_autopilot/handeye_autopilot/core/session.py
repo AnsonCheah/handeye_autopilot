@@ -33,7 +33,7 @@ from .boards import BoardSpec
 from .camera import CameraModel
 from .capture import CaptureRecord, Frame, capture
 from .config import CaptureConfig, SessionConfig, SolverConfig
-from .planning import IKFunction, Plan, limits, moving_points_base, plan
+from .planning import IKFunction, Plan, lever_ball_points, limits, moving_points_base, plan
 from .quality import Calibration, calibrate
 from .solver import Solution, SolveError, solve
 
@@ -63,6 +63,10 @@ class Move:
     tool_pose: Mat            # base_T_tool target
     joints: Mat               # the IK solution to send as a joint goal (01-architecture §3.2)
     purpose: str
+    # True: a short, checked move (bootstrap, centring, recovery) whose path
+    # must be the straight tool motion the check assumed: the driver plans it as
+    # a Cartesian path and reports MOTION_NOT_STARTED if MoveIt cannot plan all of it.
+    cartesian: bool = False
 
 
 @dataclass
@@ -105,6 +109,8 @@ class _State:
     joints: Mat | None = None
     skipped: int = 0
     seed_tool: Mat | None = None
+    at_verified: bool = False           # robot is at the pose of the last accepted capture
+    at_pose: Mat | None = None          # tool pose the robot was last sent to (or the seed)
     X: Mat | None = None                # current estimate (after bootstrap)
     Z: Mat | None = None
 
@@ -165,17 +171,20 @@ class Session:
             rec = capture(cid, frames, self.board, self.camera, self.capture_cfg)
         self._st.records.append(rec)
         self._st.purposes.append(purpose)
+        self._st.at_verified = bool(rec.accepted)
         return rec
 
     def _move(self, target: Mat, purpose: str, joints: Mat | None = None,
-              check_limits: bool = True) -> Generator[Action, object, bool]:
+              check_limits: bool = True, cartesian: bool = True
+              ) -> Generator[Action, object, bool]:
         """Limits, then IK, then the motion. True only if the robot reached it.
         Raises _Abort on MOTION_FAILED (unknown robot state)."""
         st = self._st
         if check_limits and st.seed_tool is not None:
-            pts = None
             if st.X is not None and st.Z is not None:
                 pts = moving_points_base(self.mode, target, st.X, st.Z, self.board)
+            else:          # no estimate yet: anywhere within the lever bound (§B2)
+                pts = lever_ball_points(self.mode, target, self.cfg, self.board)
             reason, _ = limits(target, st.seed_tool, self.cfg, pts)
             if reason is not None:
                 st.skipped += 1
@@ -186,7 +195,7 @@ class Session:
                 st.skipped += 1
                 return False
             joints = np.asarray(res.joints, dtype=float)
-        reply = yield Move(target, joints, purpose)
+        reply = yield Move(target, joints, purpose, cartesian)
         outcome: str = reply[0]  # type: ignore[index]
         measured: Mat | None = reply[1]  # type: ignore[index]
         if outcome == MOTION_FAILED:
@@ -194,11 +203,17 @@ class Session:
         if outcome == MOTION_NOT_STARTED:
             st.skipped += 1
             return False
+        st.at_verified = False
+        st.at_pose = target
         st.joints = np.asarray(measured if measured is not None else joints, dtype=np.float64)
         return True
 
     def _recover(self, target: Mat, purpose: str) -> Generator[Action, object, None]:
         # the target is a verified pose that already passed the limits (or the seed)
+        at = self._st.at_pose
+        if at is not None and tf.translation_distance(at, target) < 1e-9 and \
+                tf.rotation_angle(at, target) < 1e-9:
+            return                     # already there (the last move was skipped)
         if not (yield from self._move(target, purpose)):
             raise _Abort(RECOVERY_FAILED, f'could not return to the last verified pose '
                          f'({purpose}); stopping')
@@ -236,6 +251,7 @@ class Session:
             return
         seed_tool, seed_C = seed.tool_pose, seed.camera_T_board
         self._st.seed_tool = seed_tool
+        self._st.at_pose = seed_tool
 
         # 2. bootstrap with incremental excitation (§B2)
         self.phase = BOOTSTRAP
@@ -258,13 +274,17 @@ class Session:
         p = plan(self.mode, X, Z, self.camera, self.board, seed_tool, self._st.joints,
                  captured, self.ik, cfg, self.solver_cfg, self.seed,  # type: ignore[arg-type]
                  uncertainty_px=uncertainty)
-        self.plan = p           # the node reports a weak plan in feedback right away
+        self.plan = p           # the node reports a weak plan (p.advice) in feedback now,
+        # before execution; the plan still runs and the final gates decide (§C6).
+        # shortcut: a spare replacing a skipped pose is not re-scored for
+        # information; the solver's observability gate on the real captures
+        # decides. Re-plan from the captured set if this ever leaves runs weak.
         got = 0
         for cand in p.poses:
             if got >= p.target:
                 break
             self.phase = MOVING
-            if not (yield from self._move(cand.tool_pose, 'plan', cand.joints)):
+            if not (yield from self._move(cand.tool_pose, 'plan', cand.joints, cartesian=False)):
                 continue                       # a spare takes its place
             self.phase = CAPTURING
             rec = yield from self._capture('plan')
@@ -273,8 +293,7 @@ class Session:
         # 5. solve, verify, gate (§E-G)
         self.phase = SOLVING
         accepted = sum(r.accepted for r in self._st.records)
-        weak_msg = ('plan was weak: not enough informative poses were reachable; widen the '
-                    'envelope, the orientation limit or the box') if p.weak else ''
+        weak_msg = p.advice
         if accepted < self.solver_cfg.min_captures:
             yield self._finish(NOT_ENOUGH_SAMPLES, f'{accepted} accepted captures. {weak_msg}',
                                plan=p, bootstrap_rounds=rounds, plan_weak=p.weak)
@@ -384,7 +403,16 @@ class Session:
     def _centre(self, X: Mat, Z: Mat, uncertainty: float) -> Generator[Action, object, None]:
         """Move the board toward the image centre at nominal depth, from the latest
         verified view, one predicted-safe increment at a time (§B3)."""
-        last = next(r for r in reversed(self._st.records) if r.accepted)
+        if not self._st.at_verified:
+            # the robot ended bootstrap at a pose whose capture was rejected (or
+            # unknown): go back to the seed (the reverse of a checked step) and
+            # centre from the seed view, never from an older view it is not at
+            assert self._st.seed_tool is not None
+            yield from self._recover(self._st.seed_tool, 'centring: back to the seed')
+            last = next(r for r, why in zip(self._st.records, self._st.purposes, strict=True)
+                        if why == 'seed')
+        else:
+            last = next(r for r in reversed(self._st.records) if r.accepted)
         assert last.camera_T_board is not None and last.tool_pose is not None
         good_tool, C0 = last.tool_pose, last.camera_T_board
         w, h = self.board.size_m

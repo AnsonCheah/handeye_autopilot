@@ -47,3 +47,32 @@
 - **SHOULD-FIX** [.github/workflows/probe.yml:45](/home/anson/workspaces/handeye_autopilot/.github/workflows/probe.yml:45) The job can pass with missing terminal results or a failed IK call. Validate the required observations and exit nonzero for an incomplete or inconclusive probe while preserving the YAML and logs.
 - **SHOULD-FIX** [planning.py:214](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/core/planning.py:214) A 180° relative rotation returns a zero axis and receives maximum novelty even about a previously used axis. Extract axes from SciPy rotation vectors and add a half-turn regression.
 - **NIT** [02-features.md:57](/home/anson/workspaces/handeye_autopilot/docs/design/02-features.md:57) §B2 specifies cube-corner sampling and recovery to the last good pose, then gives different rules in the as-built paragraph. Consolidate §B2 into one specification.
+## Second and third verification passes (2026-11-27)
+
+After the Jazzy probe run and the follow-up fixes. Status of the earlier
+PARTIAL items:
+
+| Finding | Status |
+|---|---|
+| Bootstrap worst-case visibility | Accepted shortcut with a measured bound: default sampling allows ≤ ~5 % more rotation / ~1 % more translation than a dense 512 × 129 × 8 check; a test asserts < 10 %, inside the 1.5 safety factor (02-features §B2). |
+| Centring and recovery | RESOLVED. Recovery applies limits; `at_verified` makes centring start from a view the robot is at (return to the seed otherwise); a recovery to the pose the robot is already at is not sent. |
+| Planner certifies uncaptured poses | Top-up capped at target × reserve, budget ⌈target × reserve²⌉, weak advice on `Plan` before execution. Spare substitution is not re-scored: documented `shortcut:`, the solver's observability gate decides. |
+| ChArUco marker sizing | RESOLVED. Every projected marker cell edge; foreshortening test. |
+| MoveIt probe outcomes | Jazzy RESOLVED (`docs/probes/`); Lyrical/Rolling run via `probe.yml` after merge. |
+| Bootstrap round growth | RESOLVED. |
+| Candidate filters and selection | RESOLVED. Pre-estimate box check uses the lever ball (+ half board diagonal for eye-to-hand corners). |
+| Probe validation | RESOLVED. Exits nonzero on missing outcomes, a failed reachable IK, a cancel that succeeded, or missing trajectory evidence. |
+| Half-turn axis, §B2 consolidation | RESOLVED. |
+
+Third-pass findings and fixes:
+
+- Box radius ignored eye-to-hand board corners → half diagonal added, test.
+- Centring could start from a view the robot was not at → `at_verified`, test.
+- Joint goals vs the checked straight path → `Move.cartesian` for bootstrap,
+  centring, recovery; driver plans a full Cartesian path (fraction 1.0,
+  refused before sending otherwise; probe), sets a jump threshold, checks the
+  TF end pose (01-architecture §3.2). PARTIAL until M3 implements the driver.
+- `not_started` evidence → ABORTED + empty planned trajectory + unchanged
+  joints (probe: `executed_trajectory` is always empty on Jazzy).
+- Redundant recovery could abort a run; double rounding of the move budget;
+  probe checks for the trajectory evidence → fixed with tests.

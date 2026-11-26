@@ -64,6 +64,7 @@ class Plan:
     information: float                     # scaled smallest singular value of the plan
     weak: bool                             # information below the threshold
     rejections: Counter[str] = field(default_factory=Counter)
+    advice: str = ''                       # what to change when weak (shown before execution)
 
 
 # -- 1. sampling ----------------------------------------------------------
@@ -128,16 +129,25 @@ def visibility(C: Mat, camera: CameraModel, board: BoardSpec, cfg: SessionConfig
 
 
 def marker_module_px(C: Mat, camera: CameraModel, board: BoardSpec) -> float:
-    """Smallest projected marker bit (px): each marker's shortest projected edge
-    divided by its cells (inner bits from the OpenCV dictionary + 2 border).
-    shortcut: the average cell along an edge, not the smallest foreshortened
-    cell; fine while markers are small against the viewing distance."""
+    """Smallest projected marker cell (px) over the whole board.
+
+    Each marker is a square of ``bits + 2`` cells per side (inner bits from the
+    OpenCV dictionary plus the black border). The cell grid is built in the
+    board frame (bilinear in the marker corners, exact for a planar square),
+    every grid point is projected with the full camera model, and the
+    shortest cell edge anywhere wins, so foreshortened cells count.
+    """
     from . import cv_compat
-    bits = cv_compat.marker_bits(cv_compat.get_dictionary(board.dictionary)) + 2
+    n = cv_compat.marker_bits(cv_compat.get_dictionary(board.dictionary)) + 2
     _, obj = cv_compat.marker_object_points(board.opencv_board)            # (M, 4, 3)
-    px = camera.project_object(C, obj.reshape(-1, 3)).reshape(-1, 4, 2)
-    edges = np.linalg.norm(px - np.roll(px, 1, axis=1), axis=2)
-    return float(edges.min() / bits)
+    s = np.linspace(0.0, 1.0, n + 1)
+    S, T = np.meshgrid(s, s, indexing='xy')                                # (n+1, n+1)
+    w = np.stack([(1 - S) * (1 - T), S * (1 - T), S * T, (1 - S) * T], axis=-1)
+    grid = np.einsum('rck,mkd->mrcd', w, obj)                              # (M, n+1, n+1, 3)
+    px = camera.project_object(C, grid.reshape(-1, 3)).reshape(grid.shape[:3] + (2,))
+    along_r = np.linalg.norm(np.diff(px, axis=1), axis=-1)
+    along_c = np.linalg.norm(np.diff(px, axis=2), axis=-1)
+    return float(min(along_r.min(), along_c.min()))
 
 
 # -- 4. robot-agnostic limits ----------------------------------------------
@@ -168,6 +178,21 @@ def limits(G: Mat, seed_tool: Mat, cfg: SessionConfig,
     if a > cfg.max_orientation_change:
         return ORIENTATION_LIMIT, f'{np.degrees(a):.0f} deg from the seed orientation'
     return None, ''
+
+
+def lever_ball_points(mode: str, G: Mat, cfg: SessionConfig, board: BoardSpec) -> Mat:
+    """Before any estimate: where the carried object can be. Its reference point
+    (board centre for eye_to_hand, camera origin for eye_in_hand) is within
+    sqrt(3) L_max of the tool origin; for eye_to_hand every board corner is
+    within that plus the board's half-diagonal. The six extremes of that ball
+    along the box axes lie inside the (convex, axis-aligned in its own frame)
+    box iff the whole ball does."""
+    B = Rotation.from_euler('xyz', cfg.box_rpy).as_matrix()
+    r = np.sqrt(3) * cfg.lever_max
+    if mode == 'eye_to_hand':
+        r += 0.5 * float(np.hypot(*board.size_m))
+    offsets = np.vstack([B.T * r, -B.T * r])               # rows: +-r along each box axis
+    return np.asarray(G[:3, 3] + offsets, dtype=np.float64)
 
 
 def moving_points_base(mode: str, G: Mat, X: Mat, Z: Mat, board: BoardSpec) -> Mat:
@@ -320,9 +345,14 @@ def plan(mode: str, X: Mat, Z: Mat, camera: CameraModel, board: BoardSpec, seed_
         else:
             rejections[c.reject] += 1
 
-    # best first; enough for the target, the information top-up and the reserve
-    ranked = select(mode, ok, captured, cfg,
-                    count=min(len(ok), int(np.ceil(3 * cfg.target_captures * cfg.reserve_factor))))
+    # Budget: the target may grow by information top-up up to
+    # target_captures x reserve_factor (max_target); spares are
+    # target x (reserve_factor - 1) on top, all within
+    # budget = ceil(target_captures x reserve_factor^2) moves; if max_target
+    # poses are not informative enough, the plan is weak (reported before execution).
+    max_target = int(np.ceil(cfg.target_captures * cfg.reserve_factor))
+    budget = int(np.ceil(cfg.target_captures * cfg.reserve_factor ** 2))
+    ranked = select(mode, ok, captured, cfg, count=min(len(ok), budget))
     main = ranked[:cfg.target_captures]
     rest = ranked[cfg.target_captures:]
 
@@ -330,10 +360,31 @@ def plan(mode: str, X: Mat, Z: Mat, camera: CameraModel, board: BoardSpec, seed_
         return information(mode, X, Z, captured + [c.tool_pose for c in main], camera, board,
                            solver_cfg)
     current = info()
-    while current < cfg.min_plan_singular_value and rest:
+    while current < cfg.min_plan_singular_value and rest and len(main) < max_target:
         main.append(rest.pop(0))
         current = info()
-    n_spares = int(np.ceil(len(main) * (cfg.reserve_factor - 1.0)))
+    n_spares = min(int(np.ceil(len(main) * (cfg.reserve_factor - 1.0))), budget - len(main))
     spares = rest[:n_spares]
     poses = order(main, start_joints) + order(spares, main[-1].joints if main else None)
-    return Plan(poses, len(main), current, current < cfg.min_plan_singular_value, rejections)
+    weak = current < cfg.min_plan_singular_value
+    return Plan(poses, len(main), current, weak, rejections,
+                weak_advice(rejections, len(ok)) if weak else '')
+
+
+def weak_advice(rejections: Counter[str], usable: int) -> str:
+    """What to change when a plan is weak, from what rejected the candidates."""
+    tips = {OUTSIDE_BOX: 'enlarge or move the safety box',
+            OUTSIDE_ENVELOPE: 'widen the envelope radius',
+            ORIENTATION_LIMIT: 'raise the orientation limit',
+            IK_FAILED: 'move the seed to a more dexterous part of the workspace',
+            NOT_VISIBLE: 'use a wider lens or a smaller board, or increase the depth range',
+            COVERAGE: 'adjust the depth range or the coverage band',
+            TOO_SMALL: 'use a bigger board or bring it closer',
+            BACK_FACING: 'reduce the maximum tilt'}
+    top = [r for r, _ in rejections.most_common() if r in tips][:2]
+    text = (f'plan is weak: only {usable} usable candidate poses and not enough rotation '
+            'information among them')
+    if top:
+        text += '; most were rejected as ' + ', '.join(
+            f'{r} ({rejections[r]})' for r in top) + ': ' + '; '.join(tips[r] for r in top)
+    return text
