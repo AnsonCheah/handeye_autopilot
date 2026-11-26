@@ -205,6 +205,9 @@ def build(doc: dict[str, Any], profile: str = '') -> RunConfig:
                 (isinstance(d, float) and isinstance(v, (int, float)) and
                  not isinstance(v, bool))):
             raise ValueError(f'board.{k} must be a {type(d).__name__}, got {v!r}')
+    if doc['session']['frames_per_capture'] < doc['capture']['consensus_min_frames']:
+        raise ValueError('session.frames_per_capture must be >= '
+                         'capture.consensus_min_frames (else every capture is rejected)')
     board = BoardSpec.from_dict(dict(doc['board']))
     return RunConfig(
         board=board,

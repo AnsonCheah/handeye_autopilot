@@ -140,7 +140,7 @@ class CalibrationNode(Node):
         # of the old epoch is dropped at once
         self._jumps = 0
         self._jump_handle = self.get_clock().create_jump_callback(
-            JumpThreshold(min_forward=None, min_backward=RclDuration(seconds=-0.001),
+            JumpThreshold(min_forward=None, min_backward=RclDuration(nanoseconds=-1),
                           on_clock_change=True), post_callback=self._on_jump)
         self.last_run_records: list[CaptureRecord] = []
         self.last_result: Calibrate.Result | None = None
@@ -221,7 +221,7 @@ class CalibrationNode(Node):
                 else:
                     try:
                         profile_text = path.read_text()      # read once, here
-                    except OSError as e:
+                    except (OSError, UnicodeDecodeError) as e:
                         reason = f'profile {goal.profile!r} cannot be read: {e}'
             if not reason:
                 # reserve the slot before the next goal, and snapshot the parameters
@@ -302,6 +302,10 @@ class CalibrationNode(Node):
             # at least 5 distinct measurements whose own stamps span the window
             if len(stamps) >= min_msgs and stamps[-1] - stamps[0] >= window:
                 msgs = [m for _, m in fresh]
+                if any(not np.all(np.isfinite(m.position)) or
+                       not np.all(np.isfinite(m.velocity)) for m in msgs):
+                    res.success, res.message = False, 'joint_states contain NaN or inf'
+                    return res
                 if any(m.velocity and max(abs(v) for v in m.velocity) > vmax for m in msgs):
                     res.success, res.message = False, 'joints are still moving'
                     return res
@@ -332,33 +336,34 @@ class CalibrationNode(Node):
         try:
             result = self._run_goal(goal_handle, goal, run)
             result = self._final_verdict(run, result)
-            if result.error_code == R.CANCELED:
-                # the cancel callback runs before rclpy moves the goal to CANCELING:
-                # wait for that transition so canceled() is legal
-                t0 = time.monotonic()
-                while not goal_handle.is_cancel_requested and time.monotonic() - t0 < 2.0:
-                    time.sleep(0.01)
-            if result.error_code == R.CANCELED and goal_handle.is_cancel_requested:
-                goal_handle.canceled()
-            elif result.error_code == R.NONE:
-                goal_handle.succeed()
-            else:
-                goal_handle.abort()
+            self._terminate(goal_handle, result)
             return result
         except Exception as e:  # noqa: BLE001 - any bug must still end the goal
             self.get_logger().error(f'run failed: {e!r}')
             result = self._final_verdict(run, self._result(R.INTERNAL,
                                                            f'internal error: {e!r}'))
-            if result.error_code == R.CANCELED and goal_handle.is_cancel_requested:
-                goal_handle.canceled()       # an accepted cancel is honoured even here
-            else:
-                goal_handle.abort()
+            self._terminate(goal_handle, result)     # an accepted cancel is honoured here too
             return result
         finally:
             self.last_run_records = list(run.records)
             self.last_result = locals().get('result')       # for diagnostics and tests
             with self._lock:
                 self._run = None
+
+    def _terminate(self, goal_handle: Any, result: Calibrate.Result) -> None:
+        """The one place a goal reaches its terminal state."""
+        if result.error_code == R.CANCELED:
+            # the cancel callback runs before rclpy moves the goal to CANCELING:
+            # wait for that transition so canceled() is legal
+            t0 = time.monotonic()
+            while not goal_handle.is_cancel_requested and time.monotonic() - t0 < 2.0:
+                time.sleep(0.01)
+        if result.error_code == R.CANCELED and goal_handle.is_cancel_requested:
+            goal_handle.canceled()
+        elif result.error_code == R.NONE:
+            goal_handle.succeed()
+        else:
+            goal_handle.abort()
 
     def _final_verdict(self, run: RunState, result: Calibrate.Result) -> Calibrate.Result:
         """Decide the outcome once, under the lock: from here no cancel is accepted
@@ -369,8 +374,13 @@ class CalibrationNode(Node):
             cancel = run.cancelled.is_set()
             jumped = self._jumps != run.jumps
             info_changed = run.info_changed
-        kept = f' (result file {result.result_file} was written first)' \
-            if result.result_file else ''
+        kept = f' (result file {result.result_file} was written first; marked '\
+            'unpublishable)' if result.result_file else ''
+        overridden = result.error_code == R.NONE and (cancel or jumped or info_changed)
+        if overridden and result.result_file:
+            self._mark_unpublishable(result.result_file,
+                                     'cancelled' if cancel else 'clock jumped back' if jumped
+                                     else 'CameraInfo changed')
         if cancel and result.error_code != R.CANCELED:
             return self._result(R.CANCELED, 'cancelled' + kept,
                                 result_file=result.result_file)
@@ -382,6 +392,14 @@ class CalibrationNode(Node):
             return self._result(R.NO_CAMERA_INFO, 'CameraInfo changed during the run; the '
                                 'result is not trusted' + kept, result_file=result.result_file)
         return result
+
+    def _mark_unpublishable(self, path: str, why: str) -> None:
+        try:
+            doc = yaml.safe_load(Path(path).read_text()) or {}
+            doc['publish'] = {'ok': False, 'reason': f'run invalidated after writing: {why}'}
+            Path(path).write_text(yaml.safe_dump(doc, sort_keys=False))
+        except (OSError, yaml.YAMLError) as e:
+            self.get_logger().error(f'could not mark {path} unpublishable: {e}')
 
     def _feedback(self, goal_handle: Any, run: RunState, phase: str | None = None) -> None:
         if phase is not None:
@@ -437,8 +455,6 @@ class CalibrationNode(Node):
             run.target_captures = cfg.session.target_captures
         try:
             camera, info = self._preflight(goal_handle, run, cfg)
-            with self._lock:
-                run.info = info
             if goal.execution == Calibrate.Goal.EXECUTION_MOVEIT:
                 raise RunAbort(R.INTERNAL, 'MoveIt execution is not available yet (M4); '
                                'use execution "manual"')
@@ -486,6 +502,8 @@ class CalibrationNode(Node):
             camera = camera_model(info, cfg.image_is_rectified)
         except CameraInfoError as e:
             raise RunAbort(R.NO_CAMERA_INFO, str(e)) from e
+        with self._lock:
+            run.info = info                  # pinned now: any later change taints the run
         if img.frame_id != info.header.frame_id:
             raise RunAbort(R.NO_CAMERA_INFO, f'image frame {img.frame_id!r} differs from '
                            f'CameraInfo frame {info.header.frame_id!r}')
@@ -493,7 +511,8 @@ class CalibrationNode(Node):
             raise RunAbort(R.NO_CAMERA_INFO, 'image size differs from CameraInfo')
         self._check_clock(img.stamp, img.received, cfg)
         base, tool = cfg.frames['base_frame'], cfg.frames['tool_frame']
-        if tf_tools.lookup_at(self.tf_buffer, base, tool, img.stamp_ns, t.tf_timeout) is None:
+        if self._lookup_cancellable(goal_handle, run, base, tool, img.stamp_ns,
+                                    t.tf_timeout) is None:
             if tf_tools.latest(self.tf_buffer, base, tool) is None:
                 why = 'is the robot driver (robot_state_publisher) running?'
             else:

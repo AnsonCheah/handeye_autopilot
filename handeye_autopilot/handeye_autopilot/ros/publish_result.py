@@ -85,6 +85,12 @@ class ResultPublisher(Node):
         t0 = time.monotonic()
         while time.monotonic() - t0 < self.listen:          # let /tf_static arrive
             rclpy.spin_once(self, timeout_sec=0.1)
+        # drain everything already queued, so the /tf tracker has seen each message
+        # the buffer has (shortcut: a link that turns dynamic only AFTER this check
+        # is not caught; static links cannot be unpublished anyway)
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 0.5:
+            rclpy.spin_once(self, timeout_sec=0.0)
         reason = check(tf_tools.parents(self.buffer), self.parent, self.root)
         if not reason and self.subtree is not None:
             reason = self.check_subtree()

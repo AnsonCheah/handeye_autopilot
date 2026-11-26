@@ -615,6 +615,9 @@ def test_cancel_while_writing_the_result_ends_canceled(world_factory, monkeypatc
     d.wait(h.cancel_goal_async())
     res = w.result(h)
     assert res.status == 5 and res.result.error_code == R.CANCELED   # never SUCCEEDED
+    if res.result.result_file:                       # a file written first is unpublishable
+        import yaml
+        assert not yaml.safe_load(open(res.result.result_file))['publish']['ok']
 
 
 def test_clock_jump_between_goals_is_survived(world_factory):
@@ -750,9 +753,53 @@ def test_publish_result_refuses_a_moving_subtree_link(tmp_path):
     f.write_text(yaml.safe_dump(doc))
     node = ResultPublisher(str(f), listen=0.0)
     try:
-        m = tf_tools.to_msg(T, 'cam', 'cam_optical')
-        node.buffer.set_transform(m, 'test')               # same pose, but on /tf
-        node.moving.add(TFMessage(transforms=[m]))
+        # published for real on /tf by another node, received through the
+        # publisher's own subscription (not by filling its tracker directly)
+        import rclpy.node
+        other = rclpy.node.Node('moving_tf_source')
+        pub = other.create_publisher(TFMessage, '/tf', 10)
+        t0 = time.monotonic()
+        while not node.moving.has('cam', 'cam_optical') and time.monotonic() - t0 < 5:
+            m = tf_tools.to_msg(T, 'cam', 'cam_optical', other.get_clock().now().to_msg())
+            pub.publish(TFMessage(transforms=[m]))
+            rclpy.spin_once(node, timeout_sec=0.05)
         assert 'moving' in node.check_subtree()
+        other.destroy_node()
     finally:
         node.destroy_node()
+
+
+# -- review fixes (M3 xhigh pass 4) -------------------------------------------------
+
+def test_invalid_utf8_profile_is_rejected(world_factory, tmp_path):
+    (tmp_path / 'bin.yaml').write_bytes(b'session:\n  target_captures: \xff\xfe\n')
+    w = world_factory(node_over={'profiles_dir': str(tmp_path)})
+    assert not w.driver.send(profile='bin').accepted
+    assert w.driver.send().accepted                      # still alive
+
+
+def test_frames_below_the_consensus_minimum_are_invalid(world_factory, tmp_path):
+    (tmp_path / 'few.yaml').write_text('session:\n  frames_per_capture: 1\n')
+    w = world_factory(node_over={'profiles_dir': str(tmp_path)})
+    res = w.result(w.driver.send(profile='few')).result
+    assert res.error_code == R.INVALID_GOAL and 'consensus_min_frames' in res.message
+
+
+def test_nan_joint_states_do_not_clear_the_fault(world_factory):
+    from sensor_msgs.msg import JointState
+    w = world_factory()
+    d = w.driver
+    assert d.call(d.inject_fault).success
+    pub = w.client.create_publisher(JointState, '/joint_states', 10)
+    stop = threading.Event()
+
+    def nans():
+        while not stop.is_set():
+            j = JointState(name=['j1'], position=[float('nan')], velocity=[float('nan')])
+            j.header.stamp = w.client.get_clock().now().to_msg()
+            pub.publish(j)
+            time.sleep(0.02)
+    threading.Thread(target=nans, daemon=True).start()
+    r = d.call(d.clear_fault)
+    stop.set()
+    assert not r.success and 'NaN' in r.message

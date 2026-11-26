@@ -109,7 +109,9 @@ class TestManualCalibration(unittest.TestCase):
                 break
             self.robot.move_to(G)
             d.capture_and_wait()
-        res = d.wait(h.get_result_async(), 120.0).result
+        out = d.wait(h.get_result_async(), 120.0)
+        self.assertEqual(out.status, 4)                       # GoalStatus SUCCEEDED
+        res = out.result
         self.assertEqual(res.error_code, Calibrate.Result.NONE, res.message)
         t = res.camera_transform.transform.translation
         err = np.linalg.norm(np.array([t.x, t.y, t.z]) - X[:3, 3])

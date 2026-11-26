@@ -465,7 +465,11 @@ snapshotted at admission; every capture's images must match the run's
   clock). Checked in the preflight right after goal acceptance and per
   capture: if image stamps and the node clock differ by more than a threshold
   *(tune)*, the run is **aborted** (`ABORTED`, `TF_UNAVAILABLE`, message naming
-  the clock), not warned about. (It can't be an admission rejection: that
+  the clock), not warned about.
+  `shortcut:` the tolerance is in node-clock seconds; with simulation faster
+  than real time, callback queueing scales with the sim rate (150 ms of
+  queueing at 4× is 0.6 sim s), so raise `timing.clock_tolerance` for fast
+  sims; revisit if a fast-sim user hits false aborts. (It can't be an admission rejection: that
   would need an image first and rejections carry no result, §5.)
 - **Settle:** after motion, wait until the TF pose of the tool is stable over
   a window *(tune)* **and** the robot's measurement is fresh: the latest TF for
