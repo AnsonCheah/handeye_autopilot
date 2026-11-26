@@ -148,6 +148,10 @@ class TestManualCalibration(unittest.TestCase):
             true_root = pose(CAM['true_camera_xyz_rpy'])
             self.assertLess(np.linalg.norm(np.array([p.x, p.y, p.z]) - true_root[:3, 3]),
                             0.003)
+            q = got.transform.rotation
+            Rr = Rotation.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
+            self.assertLess(math.degrees(Rotation.from_matrix(Rr.T @ true_root[:3, :3])
+                                         .magnitude()), 0.5)
         finally:
             # stop the launch AND its children (a surviving publisher would keep
             # broadcasting this static transform into later tests)

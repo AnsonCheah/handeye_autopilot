@@ -56,7 +56,8 @@ def camera_model(info: CameraInfo, rectified: bool) -> CameraModel:
             P = np.asarray(pin.projection_matrix(), dtype=float).reshape(3, 4)
             return CameraModel(P[:, :3].copy(), np.zeros(0), int(info.width),
                                int(info.height), 'plumb_bob', rectified=True)
-        D = np.asarray(pin.distortion_coeffs(), dtype=float).ravel()
+        raw_d = pin.distortion_coeffs()
+        D = np.zeros(0) if raw_d is None else np.asarray(raw_d, dtype=float).ravel()
         return CameraModel(K, D, int(info.width), int(info.height),
                            info.distortion_model or 'plumb_bob')
     except CameraModelError as e:
@@ -96,12 +97,19 @@ class ImageBuffer:
         self._cond = threading.Condition(self._lock)
         self._bridge = CvBridge()
 
-    def add(self, msg: Image) -> None:
+    def add(self, msg: Image, msg_info: dict[str, int] | None = None) -> None:
+        """``msg_info`` (rclpy MessageInfo): its ``received_timestamp`` is when the
+        middleware got the message (system clock, ns); the callback may run later
+        under load, so that lag is subtracted from the node-clock arrival time."""
+        import time
+        lag = 0.0
+        if msg_info and msg_info.get('received_timestamp'):
+            lag = max(0.0, (time.time_ns() - int(msg_info['received_timestamp'])) * 1e-9)
         gray = self._bridge.imgmsg_to_cv2(msg, desired_encoding='mono8')
         ns = msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec
         with self._cond:
             self._buf.append(StampedImage(ns * 1e-9, ns, msg.header.frame_id,
-                                          np.asarray(gray), self._clock()))
+                                          np.asarray(gray), self._clock() - lag))
             self._cond.notify_all()
 
     def latest(self) -> StampedImage | None:

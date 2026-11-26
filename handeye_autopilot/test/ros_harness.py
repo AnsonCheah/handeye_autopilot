@@ -98,6 +98,7 @@ class Driver:
         self.clear_fault = node.create_client(Trigger, f'{ns}/clear_fault')
         self.inject_fault = node.create_client(Trigger, f'{ns}/inject_fault')
         self.feedback: list = []
+        self.debug = None          # optional callable describing the node's state
 
     def wait(self, fut, timeout=30.0):
         t0 = time.monotonic()
@@ -141,7 +142,9 @@ class Driver:
                 elif seen:
                     return f
             if time.monotonic() - t0 > timeout:
-                raise TimeoutError('capture did not finish')
+                phases = [f.phase for f in self.feedback[n:]]
+                raise TimeoutError(f'capture did not finish; feedback since: {phases}; '
+                                   f'state: {self.debug() if self.debug else None}')
             time.sleep(0.02)
 
 

@@ -15,12 +15,21 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+import yaml
 
 
 def _record(context):
     if LaunchConfiguration('record').perform(context).lower() not in ('1', 'true', 'yes'):
         return []
-    out = os.path.expanduser(LaunchConfiguration('bag_dir').perform(context))
+    out = LaunchConfiguration('bag_dir').perform(context)
+    if not out:                    # default: the node's output_dir from the params file
+        try:
+            with open(LaunchConfiguration('params_file').perform(context)) as f:
+                doc = yaml.safe_load(f) or {}
+            out = doc['handeye_autopilot']['ros__parameters']['output_dir']
+        except (OSError, KeyError, TypeError, yaml.YAMLError):
+            out = '~/.ros/handeye_autopilot'
+    out = os.path.expanduser(out)
     name = datetime.now(UTC).strftime('bag_%Y%m%dT%H%M%SZ')
     topics = [LaunchConfiguration('image').perform(context),
               LaunchConfiguration('camera_info').perform(context),
@@ -39,7 +48,8 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sim_time', default_value='false'),
         DeclareLaunchArgument('record', default_value='false',
                               description='also record a rosbag of the run'),
-        DeclareLaunchArgument('bag_dir', default_value='~/.ros/handeye_autopilot'),
+        DeclareLaunchArgument('bag_dir', default_value='',
+                              description="bag location (empty: the node's output_dir)"),
         Node(package='handeye_autopilot', executable='calibrate_node',
              name='handeye_autopilot', output='screen',
              parameters=[LaunchConfiguration('params_file'),

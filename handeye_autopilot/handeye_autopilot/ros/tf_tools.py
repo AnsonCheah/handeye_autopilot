@@ -110,11 +110,10 @@ def settle(buffer: tf2_ros.Buffer, base: str, tool: str, now: callable,  # type:
             T, stamp = got
             if stamp > start and (not fresh or stamp > fresh[-1][0]):
                 fresh.append((stamp, T))
-            if fresh and fresh[-1][0] - fresh[0][0] >= window:
-                last = fresh[-1][0]
+            opens = [k for k, (st, _) in enumerate(fresh) if st <= fresh[-1][0] - window]
+            if opens:                        # (float rounding can leave none yet)
                 # the newest sample at or before (last - window) opens the window
-                i = max(k for k, (st, _) in enumerate(fresh) if st <= last - window)
-                recent = fresh[i:]
+                recent = fresh[max(opens):]
                 ref = recent[-1][1]
                 still = len(recent) >= 3 and all(
                     np.linalg.norm(Pm[:3, 3] - ref[:3, 3]) <= max_translation and

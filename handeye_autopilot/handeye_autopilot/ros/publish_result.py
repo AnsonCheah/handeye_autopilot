@@ -49,16 +49,35 @@ class ResultPublisher(Node):
         self.parent, self.root = t['parent'], t['child']
         T = tf.make(Rotation.from_quat(t['rotation_xyzw']), np.asarray(t['translation']))
         self.msg = tf_tools.to_msg(T, self.parent, self.root)
+        self.subtree = pub.get('subtree')          # root -> optical at calibration time
         self.buffer = tf2_ros.Buffer()
         self.listener = tf2_ros.TransformListener(self.buffer, self)
         self.listen = listen
         self.static = tf2_ros.StaticTransformBroadcaster(self)
+
+    def check_subtree(self) -> str:
+        """The live root -> optical must equal the one the result was computed with
+        (a camera driver restarted with other extrinsics would move the optical
+        frame by that difference)."""
+        st = self.subtree
+        got = tf_tools.latest(self.buffer, st['parent'], st['child'])
+        if got is None:
+            return (f'the camera subtree {st["parent"]} -> {st["child"]} is not in TF now: '
+                    'start the camera driver first')
+        then = tf.make(Rotation.from_quat(st['rotation_xyzw']), np.asarray(st['translation']))
+        if tf.translation_distance(got[0], then) > 0.001 or \
+                tf.rotation_angle(got[0], then) > np.radians(0.1):
+            return (f'the camera subtree {st["parent"]} -> {st["child"]} changed since the '
+                    'calibration (driver extrinsics differ); recalibrate')
+        return ''
 
     def run(self) -> int:
         t0 = time.monotonic()
         while time.monotonic() - t0 < self.listen:          # let /tf_static arrive
             rclpy.spin_once(self, timeout_sec=0.1)
         reason = check(tf_tools.parents(self.buffer), self.parent, self.root)
+        if not reason and self.subtree is not None:
+            reason = self.check_subtree()
         if reason:
             self.get_logger().error(f'not publishing {self.parent} -> {self.root}: {reason}')
             return 1

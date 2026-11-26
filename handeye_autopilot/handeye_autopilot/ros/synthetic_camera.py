@@ -23,6 +23,8 @@ from typing import Any
 from cv_bridge import CvBridge
 import numpy as np
 import rclpy
+from rclpy.clock import JumpThreshold
+from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -76,6 +78,7 @@ class SyntheticCamera(Node):
         d('noise_sigma', 2.0)
         d('stamp_offset', 0.0)
         d('stamp_from_clock', False)   # stamp with the node clock, not the pose's TF stamp
+        d('max_pose_age', 0.2)         # s; an older robot pose drops the frame
         d('seed', 0)
 
         g = self.get_parameter
@@ -98,6 +101,7 @@ class SyntheticCamera(Node):
         self.Z = pose(list(g('true_board_xyz_rpy').value))
         self.offset = float(g('stamp_offset').value)
         self.stamp_from_clock = bool(g('stamp_from_clock').value)
+        self.max_pose_age = float(g('max_pose_age').value)
         self.rng = np.random.default_rng(int(g('seed').value))
         tex, H = board_texture(self.board, 60, 30)
         self.texture, self.tex_H = tex, H
@@ -107,6 +111,12 @@ class SyntheticCamera(Node):
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        # like the calibration node: a backwards clock jump (sim time reset) drops
+        # the TF history of the old epoch, which would otherwise look newer
+        self._jump = self.get_clock().create_jump_callback(
+            JumpThreshold(min_forward=None, min_backward=Duration(seconds=-0.1),
+                          on_clock_change=True),
+            post_callback=lambda _jump: self.tf_buffer.clear())
         self.static = tf2_ros.StaticTransformBroadcaster(self)
         self.static.sendTransform(tf_tools.to_msg(self.T_root_optical, self.root, self.optical,
                                                   self.get_clock().now().to_msg()))
@@ -140,6 +150,10 @@ class SyntheticCamera(Node):
         if got is None:
             return                                   # no robot yet: no image
         G, tf_stamp = got
+        now_s = self.get_clock().now().nanoseconds * 1e-9
+        if not self.stamp_from_clock and now_s - tf_stamp > self.max_pose_age:
+            return          # no recent robot pose (TF lagging): drop the frame, as a
+            # camera drops frames, rather than send one stamped in the past
         C = self.board_in_camera(G)
         img = self.renderer.render([PlanarObject(self.texture, self.tex_H, C)], self.rng)
         # the image shows the robot at the pose's TF stamp: stamp it with that
@@ -148,6 +162,9 @@ class SyntheticCamera(Node):
         stamp = tf_tools.stamp_to_time(t + self.offset).to_msg()
         msg = self.bridge.cv2_to_imgmsg(img, encoding='mono8')
         msg.header.stamp, msg.header.frame_id = stamp, self.optical
+        if not self.stamp_from_clock and \
+                self.get_clock().now().nanoseconds * 1e-9 - tf_stamp > self.max_pose_age:
+            return          # rendering ran late (CPU contention): drop, never publish stale
         self.pub_img.publish(msg)
         self.pub_info.publish(self.info(stamp))
 

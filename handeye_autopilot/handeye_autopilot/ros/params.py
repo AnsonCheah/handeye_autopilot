@@ -154,6 +154,27 @@ def merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def check_types(group: str, cls: type, values: dict[str, Any]) -> None:
+    """Each value has its field's type: a quoted "false" must not become True,
+    a bool must not pass as a number (YAML profiles are hand-written)."""
+    defaults = {f.name: getattr(cls(), f.name) for f in fields(cls)}
+    for k, v in values.items():
+        d = defaults.get(k)
+        if isinstance(d, bool):
+            ok = isinstance(v, bool)
+        elif isinstance(d, int):
+            ok = isinstance(v, int) and not isinstance(v, bool)
+        elif isinstance(d, float):
+            ok = isinstance(v, (int, float)) and not isinstance(v, bool)
+        elif isinstance(d, tuple):
+            ok = isinstance(v, (tuple, list)) and all(
+                isinstance(x, (int, float)) and not isinstance(x, bool) for x in v)
+        else:
+            ok = True
+        if not ok:
+            raise ValueError(f'{group}.{k} must be a {type(d).__name__}, got {v!r}')
+
+
 def build(doc: dict[str, Any], profile: str = '') -> RunConfig:
     """Validated RunConfig from a nested mapping; raises ValueError with the reason."""
     for k in ('base_frame', 'tool_frame', 'board_frame'):
@@ -171,6 +192,9 @@ def build(doc: dict[str, Any], profile: str = '') -> RunConfig:
             raise ValueError(f'{group} must be a mapping')
     if doc['base_frame'] == doc['tool_frame']:
         raise ValueError('base_frame and tool_frame must differ')
+    for group, cls in (('capture', CaptureConfig), ('solver', SolverConfig),
+                       ('session', SessionConfig), ('timing', Timing)):
+        check_types(group, cls, doc[group])
     board = BoardSpec.from_dict(dict(doc['board']))
     return RunConfig(
         board=board,
@@ -186,17 +210,19 @@ def build(doc: dict[str, Any], profile: str = '') -> RunConfig:
     )
 
 
-def load_run_config(node: Node, profile: str, snapshot: dict[str, Any] | None = None
-                    ) -> RunConfig:
+def load_run_config(node: Node, profile: str, snapshot: dict[str, Any] | None = None,
+                    profile_text: str | None = None) -> RunConfig:
     """Node parameters (``snapshot``: as taken at goal acceptance), overridden by
-    the profile file if one is named."""
+    the profile (``profile_text``: the file as read at acceptance)."""
     doc = snapshot if snapshot is not None else node_values(node)
     if profile:
-        path = profile_path(node, profile)
-        if path is None:
-            raise ValueError(f'profile {profile!r} not found')
+        if profile_text is None:
+            path = profile_path(node, profile)
+            if path is None:
+                raise ValueError(f'profile {profile!r} not found')
+            profile_text = path.read_text()
         try:
-            over = yaml.safe_load(path.read_text())
+            over = yaml.safe_load(profile_text)
         except yaml.YAMLError as e:
             raise ValueError(f'profile {profile!r}: {e}') from e
         if over is None:

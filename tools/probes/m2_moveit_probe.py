@@ -49,6 +49,17 @@ def _wait(pred, timeout: float) -> bool:
 
 
 MOVED_RAD = 0.02
+MISSING_API: set[str] = set()     # pymoveit2 methods this distro's release lacks
+
+
+def _api(m, name: str):
+    """Call a pymoveit2 method if this release has it; record it as missing if not
+    (pymoveit2's API differs between distro releases: an M4 compatibility input)."""
+    f = getattr(m, name, None)
+    if f is None:
+        MISSING_API.add(name)
+        return None
+    return f()
 
 
 def _joints(m: MoveIt2) -> list[float] | None:
@@ -80,10 +91,10 @@ def motion(m: MoveIt2, goal: list[float] | None, cancel: bool = False,
     out: dict = {'submitted': bool(out_submit)}
     left_requesting = _wait(lambda: str(m.query_state()) != 'MoveIt2State.REQUESTING', 10.0)
     out['left_requesting_s'] = round(time.time() - t0, 3) if left_requesting else None
-    gf = m.get_goal_future()
+    gf = _api(m, 'get_goal_future')
     handle = gf.result() if gf is not None and gf.done() else None
     out['accepted'] = None if handle is None else bool(handle.accepted)
-    rf = m.get_execution_future() if out['accepted'] else None
+    rf = _api(m, 'get_execution_future') if out['accepted'] else None
     t_cancel = None
     if cancel:
         # MoveGroup reports EXECUTING (goal accepted) while it is still planning,
@@ -115,13 +126,14 @@ def motion(m: MoveIt2, goal: list[float] | None, cancel: bool = False,
             out[key] = None if traj is None else len(traj.joint_trajectory.points)
     else:
         out['status'] = None
-        code = m.get_last_execution_error_code()
+        code = _api(m, 'get_last_execution_error_code')
         out['error_code'] = None if code is None else int(code.val)
-    op = m._MoveIt2__lifecycle.last_operation   # probe only: raw GoalStatus kept by pymoveit2
+    lc = getattr(m, '_MoveIt2__lifecycle', None)    # probe only: raw GoalStatus (newer pymoveit2)
+    op = getattr(lc, 'last_operation', None)
     out['lifecycle_status'] = None if op is None or op.status is None else int(op.status)
     if t_cancel is not None:
         out['moved_after_cancel_rad'] = round(_moved(m, start), 4)
-    out['last_failure'] = m.last_failure()
+    out['last_failure'] = _api(m, 'last_failure')
     time.sleep(0.5)                                  # let /joint_states catch up
     end = _joints(m)
     out['joints_after'] = None if end is None else [round(v, 4) for v in end]
@@ -396,6 +408,7 @@ def main() -> None:
         if not (isinstance(found.get(k), dict) and found[k].get('done') and
                 found[k].get('error_code') == -31):
             missing.append(f'{k}.no_completed_no_solution_reply')
+    found['pymoveit2_missing_api'] = sorted(MISSING_API)
     found['inconclusive'] = missing
     with open(a.output, 'w') as f:
         yaml.safe_dump(found, f, sort_keys=False)

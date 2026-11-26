@@ -50,6 +50,7 @@ class World:
         self.robot = FakeRobot(parameter_overrides=params(sim))
         self.client = Node('test_client')
         self.driver = Driver(self.client)
+        self.driver.debug = self._debug
         self.ex = MultiThreadedExecutor(num_threads=8)
         self.nodes = [self.node, self.camera, self.robot, self.client] + \
             ([self.clock] if self.clock else [])
@@ -63,6 +64,19 @@ class World:
                                     self.camera.board, n=14)
         self.robot.move_to(self.poses[0])
         time.sleep(1.0)            # TF, camera_info and images flowing
+
+    def _debug(self):
+        run = self.node._run
+        im = self.node.images.latest()
+        return {'run': None if run is None else (run.phase, run.capturing,
+                                                 run.capture_request.is_set(), run.accepted,
+                                                 run.rejected, run.last_detail[:80]),
+                'node_now': round(self.node.now(), 3),
+                'last_result': None if self.node.last_result is None else (
+                    self.node.last_result.error_code, self.node.last_result.message[:300]),
+                'latest_image': None if im is None else (round(im.stamp, 3),
+                                                         round(im.received, 3)),
+                'threads': [t.name for t in threading.enumerate()][:12]}
 
     def close(self):
         run = self.node._run                  # never leave a run blocking shutdown
@@ -163,7 +177,9 @@ def test_tf_that_never_arrives_rejects_the_capture(world_factory):
 
 def test_mismatched_image_stamps_abort_at_preflight(world_factory):
     w = world_factory(cam_over={'stamp_offset': 5.0})
-    res = w.result(w.driver.send()).result
+    out = w.result(w.driver.send())
+    res = out.result
+    assert out.status == 6                               # GoalStatus ABORTED
     assert res.error_code == R.TF_UNAVAILABLE and 'clock' in res.message
     assert not res.transform_valid
 
@@ -184,7 +200,9 @@ def test_clock_jump_aborts_the_run(world_factory):
     h = w.driver.send()
     w.driver.wait_phase(FB.PHASE_MANUAL_CAPTURE)
     w.clock.jump(-100.0)                       # sim time reset
-    res = w.result(h).result
+    out = w.result(h)
+    assert out.status == 6
+    res = out.result
     assert res.error_code == R.TF_UNAVAILABLE and 'jumped back' in res.message
 
 
@@ -483,4 +501,150 @@ def test_publish_result_rechecks_the_live_tree():
     assert 'already has a parent' in check({'camera_link': 'mount'}, 'base_link',
                                            'camera_link')
     assert 'cycle' in check({'base_link': 'camera_link'}, 'base_link', 'camera_link')
+
+
+# -- review fixes (M3 xhigh pass 2) -------------------------------------------------
+
+def test_bad_streams_do_not_crash_the_node(world_factory):
+    from sensor_msgs.msg import Image, JointState
+    w = world_factory()
+    m = Image(encoding='32FC1', width=2, height=2, step=8, data=bytes(16))
+    w.node._on_image(m)                              # logged and dropped
+    d = w.driver
+    assert d.call(d.inject_fault).success
+    pub = w.client.create_publisher(JointState, '/joint_states', 10)
+    stop = threading.Event()
+
+    def empty():
+        while not stop.is_set():
+            j = JointState()
+            j.header.stamp = w.client.get_clock().now().to_msg()
+            pub.publish(j)
+            time.sleep(0.02)
+    threading.Thread(target=empty, daemon=True).start()
+    r = d.call(d.clear_fault)
+    stop.set()
+    assert not r.success and 'no positions' in r.message
+
+
+def test_one_stamp_repeated_is_not_fresh_evidence(world_factory):
+    from sensor_msgs.msg import JointState
+    w = world_factory()
+    d = w.driver
+    assert d.call(d.inject_fault).success
+    pub = w.client.create_publisher(JointState, '/joint_states', 10)
+    stamp = None
+    stop = threading.Event()
+
+    def replay():
+        nonlocal stamp
+        time.sleep(0.1)
+        stamp = w.client.get_clock().now().to_msg()
+        while not stop.is_set():
+            j = JointState(name=['j1'], position=[0.1], velocity=[0.0])
+            j.header.stamp = stamp
+            pub.publish(j)
+            time.sleep(0.05)
+    threading.Thread(target=replay, daemon=True).start()
+    r = d.call(d.clear_fault)
+    stop.set()
+    assert not r.success
+
+
+def test_string_boolean_anywhere_in_a_profile_is_invalid(world_factory, tmp_path):
+    (tmp_path / 'mask.yaml').write_text('capture:\n  masking: "false"\n')
+    w = world_factory(node_over={'profiles_dir': str(tmp_path)})
+    res = w.result(w.driver.send(profile='mask')).result
+    assert res.error_code == R.INVALID_GOAL and 'capture.masking' in res.message
+
+
+def test_profile_is_read_at_admission(world_factory, tmp_path):
+    f = tmp_path / 'p.yaml'
+    f.write_text('session:\n  target_captures: 3\nsolver:\n  min_captures: 3\n')
+    w = world_factory(node_over={'profiles_dir': str(tmp_path)})
+    h = w.driver.send(profile='p')
+    f.write_text('session:\n  step_safety: 0.0\n')       # edited after acceptance
+    w.driver.wait_phase(FB.PHASE_MANUAL_CAPTURE)          # the accepted text still applies
+    w.driver.wait(h.cancel_goal_async())
+    assert w.result(h).result.error_code == R.CANCELED
+
+
+def test_capture_acknowledged_before_finish_is_taken(world_factory):
+    w = world_factory()
+    d = w.driver
+    h = d.send()
+    d.wait_phase(FB.PHASE_MANUAL_CAPTURE)
+    run_captures(w, len(w.poses), accepted_target=8)
+    n = len(w.node._run.records)
+    w.robot.move_to(w.poses[-1])
+    assert d.call(d.capture).success
+    assert d.call(d.finish).success
+    res = w.result(h).result
+    assert res.error_code == R.NONE
+    assert len(w.node.last_run_records) == n + 1
+
+
+def test_brief_camera_info_change_aborts(world_factory):
+    w = world_factory()
+    d = w.driver
+    h = d.send()
+    d.wait_phase(FB.PHASE_MANUAL_CAPTURE)
+    info = w.camera.info(w.client.get_clock().now().to_msg())
+    info.k = list(info.k)
+    info.k[0] += 50.0                                      # one CameraInfo with other fx
+    w.node._on_info(info)
+    res = w.result(h).result
+    assert res.error_code == R.NO_CAMERA_INFO and 'changed' in res.message
+
+
+def test_cancel_while_writing_the_result_ends_canceled(world_factory, monkeypatch):
+    w = world_factory()
+    d = w.driver
+    real = w.node._write_results
+
+    def slow(*a, **k):
+        time.sleep(1.0)
+        return real(*a, **k)
+    monkeypatch.setattr(w.node, '_write_results', slow)
+    h = d.send()
+    d.wait_phase(FB.PHASE_MANUAL_CAPTURE)
+    run_captures(w, len(w.poses), accepted_target=10)
+    d.wait_phase(FB.PHASE_VERIFYING)
+    d.wait(h.cancel_goal_async())
+    res = w.result(h)
+    assert res.status == 5 and res.result.error_code == R.CANCELED   # never SUCCEEDED
+
+
+def test_clock_jump_between_goals_is_survived(world_factory):
+    w = world_factory(sim_time=True)
+    w.clock.jump(-100.0)
+    time.sleep(1.0)
+    assert w.node._jumps >= 1
+    h = w.driver.send()                                   # a fresh goal in the new epoch
+    w.driver.wait_phase(FB.PHASE_MANUAL_CAPTURE)
+    w.driver.capture_and_wait()
+    assert w.driver.feedback[-1].accepted == 1
+    w.driver.wait(h.cancel_goal_async())
+    w.result(h)
+
+
+def test_publish_result_refuses_a_changed_camera_subtree(tmp_path):
+    from handeye_autopilot.core.results import transform_dict
+    from handeye_autopilot.ros import tf_tools
+    from handeye_autopilot.ros.publish_result import ResultPublisher
+    import yaml
+    T = tf.make(np.eye(3), [0.0, 0.0, 0.1])
+    doc = {'publish': {'ok': True, 'transform': transform_dict(np.eye(4), 'base_link', 'cam'),
+                       'subtree': transform_dict(T, 'cam', 'cam_optical')}}
+    f = tmp_path / 'result.yaml'
+    f.write_text(yaml.safe_dump(doc))
+    node = ResultPublisher(str(f), listen=0.0)
+    try:
+        node.buffer.set_transform_static(tf_tools.to_msg(T, 'cam', 'cam_optical'), 'test')
+        assert node.check_subtree() == ''
+        moved = tf.make(np.eye(3), [0.25, 0.0, 0.1])          # driver restarted: 25 cm off
+        node.buffer.set_transform_static(tf_tools.to_msg(moved, 'cam', 'cam_optical'), 'test')
+        assert 'changed' in node.check_subtree()
+    finally:
+        node.destroy_node()
 

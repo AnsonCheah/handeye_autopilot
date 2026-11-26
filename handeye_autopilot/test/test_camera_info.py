@@ -56,3 +56,8 @@ def test_same_info_compares_everything_and_never_raises():
                                  distortion_model='plumb_bob'))     # length differs
     assert not same_info(a, info(r=[0.0, -1, 0, 1, 0, 0, 0, 0, 1]))
     assert not same_info(a, info(binning_x=2))
+
+
+def test_empty_distortion_is_a_valid_raw_camera():
+    m = camera_model(info(d=[]), rectified=False)
+    assert m.D.size == 5 and not np.any(m.D)

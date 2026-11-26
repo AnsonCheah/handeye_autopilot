@@ -32,6 +32,8 @@ import numpy as np
 import rclpy
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
+from rclpy.clock import JumpThreshold
+from rclpy.duration import Duration as RclDuration
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import (
@@ -90,6 +92,11 @@ class RunState:
     min_captures: int = 0
     target_captures: int = 0
     snapshot: dict[str, Any] = field(default_factory=dict)   # parameters at acceptance
+    profile_text: str | None = None     # the profile file as read at acceptance
+    info: CameraInfo | None = None      # the run's CameraInfo (fixed after preflight)
+    info_changed: bool = False          # any differing CameraInfo arrived since
+    jumps: int = 0                      # clock-jump count at acceptance
+    finalizing: bool = False            # past the point where a cancel can win
     records: list[CaptureRecord] = field(default_factory=list)
 
 
@@ -107,7 +114,7 @@ class CalibrationNode(Node):
         self.images = ImageBuffer(self.now)
         self._info: CameraInfo | None = None
         self._info_lock = threading.Lock()
-        self.create_subscription(Image, 'image', self.images.add, qos_profile_sensor_data,
+        self.create_subscription(Image, 'image', self._on_image, qos_profile_sensor_data,
                                  callback_group=self._sensors)
         # best-effort + volatile is compatible with every publisher (reliable or not,
         # latched or not); CameraInfo is re-sent with each image by camera drivers
@@ -127,7 +134,15 @@ class CalibrationNode(Node):
         self.create_subscription(TFMessage, '/tf', self.dynamic_links.add, 100,
                                  callback_group=self._sensors)
         self._stopping = threading.Event()
+        # backwards clock jumps (sim time reset): counted by rclpy's jump callback,
+        # so a reset between two samples is never missed; the TF and image history
+        # of the old epoch is dropped at once
+        self._jumps = 0
+        self._jump_handle = self.get_clock().create_jump_callback(
+            JumpThreshold(min_forward=None, min_backward=RclDuration(seconds=-0.1),
+                          on_clock_change=True), post_callback=self._on_jump)
         self.last_run_records: list[CaptureRecord] = []
+        self.last_result: Calibrate.Result | None = None
         self._joints: list[tuple[float, JointState]] = []
         self.create_subscription(JointState, '/joint_states', self._on_joints, 10,
                                  callback_group=self._sensors)
@@ -158,9 +173,27 @@ class CalibrationNode(Node):
     def now(self) -> float:
         return self.get_clock().now().nanoseconds * 1e-9
 
+    def _on_jump(self, jump: Any) -> None:
+        with self._lock:
+            self._jumps += 1
+        self.tf_buffer.clear()              # static transforms are kept by tf2
+        self.images.clear()
+        self.get_logger().warning('the clock jumped backwards: TF and image history cleared')
+
     def _on_info(self, msg: CameraInfo) -> None:
         with self._info_lock:
             self._info = msg
+        with self._lock:
+            run = self._run
+            if run is not None and run.info is not None and not same_info(run.info, msg):
+                run.info_changed = True     # even a brief change taints the run (§7)
+
+    def _on_image(self, msg: Image, msg_info: Any = None) -> None:
+        try:
+            self.images.add(msg, msg_info)
+        except Exception as e:  # noqa: BLE001 - a bad stream must not kill the node
+            self.get_logger().warning(f'cannot use image ({msg.encoding}): {e}',
+                                      throttle_duration_sec=5.0)
 
     def _on_joints(self, msg: JointState) -> None:
         with self._lock:
@@ -184,17 +217,23 @@ class CalibrationNode(Node):
             if not reason:
                 # reserve the slot before the next goal, and snapshot the parameters
                 # now: later parameter changes must not reach an accepted run (§5)
-                self._run = RunState(snapshot=P.node_values(self))
+                path = P.profile_path(self, goal.profile)
+                self._run = RunState(snapshot=P.node_values(self), jumps=self._jumps,
+                                     profile_text=path.read_text() if path else None)
         if reason:
             self.get_logger().warning(f'goal rejected: {reason}')
             return GoalResponse.REJECT
         return GoalResponse.ACCEPT
 
     def _on_cancel(self, goal_handle: Any) -> CancelResponse:
+        """Accept (rclpy's default rejects), unless the run is already finalizing:
+        then the outcome is decided and a cancel could not be honoured."""
         with self._lock:
             if self._run is not None:
+                if self._run.finalizing:
+                    return CancelResponse.REJECT
                 self._run.cancelled.set()
-        return CancelResponse.ACCEPT        # rclpy's default rejects cancellation
+        return CancelResponse.ACCEPT
 
     # -- services -------------------------------------------------------------------
     def _srv_capture(self, req: Trigger.Request, res: Trigger.Response) -> Trigger.Response:
@@ -250,13 +289,17 @@ class CalibrationNode(Node):
                 # fresh: arrived after the call AND stamped after it (not a replay)
                 fresh = [(t, m) for t, m in self._joints if t > t0 and
                          m.header.stamp.sec + m.header.stamp.nanosec * 1e-9 >= call_now - 0.1]
-            if len(fresh) >= min_msgs and fresh[-1][0] - fresh[0][0] >= window:
+            stamps = {(m.header.stamp.sec, m.header.stamp.nanosec) for _, m in fresh}
+            if len(stamps) >= min_msgs and fresh[-1][0] - fresh[0][0] >= window:
                 msgs = [m for _, m in fresh]
                 if any(m.velocity and max(abs(v) for v in m.velocity) > vmax for m in msgs):
                     res.success, res.message = False, 'joints are still moving'
                     return res
                 pos = [m.position for m in msgs if len(m.position) == len(msgs[0].position)]
-                span = float(np.max(np.ptp(np.asarray(pos), axis=0))) if pos else 0.0
+                if not pos or not len(pos[0]):
+                    res.success, res.message = False, 'joint_states carry no positions'
+                    return res
+                span = float(np.max(np.ptp(np.asarray(pos, dtype=float), axis=0)))
                 if span > vmax * window:
                     res.success, res.message = False, 'joint positions are still changing'
                     return res
@@ -278,6 +321,13 @@ class CalibrationNode(Node):
         goal = goal_handle.request
         try:
             result = self._run_goal(goal_handle, goal, run)
+            with self._lock:                 # from here no cancel is accepted
+                run.finalizing = True
+                cancel = run.cancelled.is_set()
+            if cancel and result.error_code != R.CANCELED:
+                result = self._result(R.CANCELED, 'cancelled (the result file, if any, '
+                                      'was written before the cancel arrived)',
+                                      result_file=result.result_file)
             if result.error_code == R.CANCELED:
                 # the cancel callback runs before rclpy moves the goal to CANCELING:
                 # wait for that transition so canceled() is legal
@@ -293,10 +343,13 @@ class CalibrationNode(Node):
             return result
         except Exception as e:  # noqa: BLE001 - any bug must still end the goal
             self.get_logger().error(f'run failed: {e!r}')
+            with self._lock:
+                run.finalizing = True
             goal_handle.abort()
             return self._result(R.INTERNAL, f'internal error: {e!r}')
         finally:
             self.last_run_records = list(run.records)
+            self.last_result = locals().get('result')       # for diagnostics and tests
             with self._lock:
                 self._run = None
 
@@ -346,7 +399,7 @@ class CalibrationNode(Node):
     def _run_goal(self, goal_handle: Any, goal: Calibrate.Goal, run: RunState
                   ) -> Calibrate.Result:
         try:
-            cfg = P.load_run_config(self, goal.profile, run.snapshot)
+            cfg = P.load_run_config(self, goal.profile, run.snapshot, run.profile_text)
         except ValueError as e:
             return self._result(R.INVALID_GOAL, str(e))
         with self._lock:
@@ -354,6 +407,8 @@ class CalibrationNode(Node):
             run.target_captures = cfg.session.target_captures
         try:
             camera, info = self._preflight(goal_handle, run, cfg)
+            with self._lock:
+                run.info = info
             if goal.execution == Calibrate.Goal.EXECUTION_MOVEIT:
                 raise RunAbort(R.INTERNAL, 'MoveIt execution is not available yet (M4); '
                                'use execution "manual"')
@@ -418,16 +473,18 @@ class CalibrationNode(Node):
                            + why)
         return camera, info
 
-    def _check_jump(self, since: float) -> None:
-        """A backwards clock jump (sim time reset) aborts the run and drops the
-        TF and image history, which belong to the old epoch."""
+    def _check_jump(self, since: float, run: RunState | None = None) -> None:
+        """A backwards clock jump (sim time reset) aborts the run; the jump
+        callback has already dropped the old epoch's TF and image history."""
         now = self.now()
-        if now < since - 0.5:
+        run = run or self._run
+        jumped = run is not None and self._jumps != run.jumps
+        if jumped or now < since - 0.5:
             self.tf_buffer.clear()          # static transforms are kept by tf2
             self.images.clear()
-            raise RunAbort(R.TF_UNAVAILABLE, f'the node clock jumped back by '
-                           f'{since - now:.1f} s (sim time reset?); TF and image '
-                           'history are no longer comparable')
+            raise RunAbort(R.TF_UNAVAILABLE, 'the node clock jumped back during the run '
+                           '(sim time reset?); TF and image history are no longer '
+                           'comparable')
 
     def _check_clock(self, stamp: float, now: float, cfg: P.RunConfig) -> None:
         """§8 one clock domain: an image's stamp and the node clock when it
@@ -442,6 +499,11 @@ class CalibrationNode(Node):
                 'with the host / ROS clock'))
 
     # -- manual capture loop -------------------------------------------------------
+    def _check_info(self, run: RunState) -> None:
+        if run.info_changed:
+            raise RunAbort(R.NO_CAMERA_INFO, 'CameraInfo changed during the run; intrinsics '
+                           'are fixed per run')
+
     def _manual(self, goal_handle: Any, run: RunState, cfg: P.RunConfig, camera: CameraModel,
                 info: CameraInfo) -> list[CaptureRecord]:
         records: list[CaptureRecord] = []
@@ -451,12 +513,10 @@ class CalibrationNode(Node):
             self._check_cancel(goal_handle, run)
             self._check_jump(last_now)
             last_now = max(last_now, self.now())
-            with self._info_lock:
-                cur = self._info
-            if cur is not None and not same_info(cur, info):
-                raise RunAbort(R.NO_CAMERA_INFO, 'CameraInfo changed during the run; '
-                               'intrinsics are fixed per run')
-            if run.finish_request.is_set() or run.accepted >= cfg.session.target_captures:
+            self._check_info(run)
+            # a capture acknowledged before ~/finish is still taken
+            if not run.capture_request.is_set() and (
+                    run.finish_request.is_set() or run.accepted >= cfg.session.target_captures):
                 return records
             if run.capture_request.wait(0.05):
                 with self._lock:
@@ -516,15 +576,17 @@ class CalibrationNode(Node):
                 self._check_clock(im.stamp, im.received, cfg)
                 if im.stamp > s.end_stamp and len(images) < n:
                     images.append(im)
-        if not images:
-            return reject_record(cid, camera, codes.NO_BOARD,
-                                 f'no image acquired after the settle within {t.frame_timeout} s')
+        if len(images) < n:
+            return reject_record(cid, camera, codes.NO_BOARD if not images else codes.CONSENSUS,
+                                 f'{len(images)} of {n} images acquired after the settle within '
+                                 f'{t.frame_timeout} s')
         frames: list[Frame] = []
         for im in images:
             pose = tf_tools.lookup_at(self.tf_buffer, base, tool, im.stamp_ns, t.tf_timeout)
             frames.append(Frame(im.gray, im.stamp, pose))
             self._check_cancel(goal_handle, run)
         rec = capture(cid, frames, cfg.board, camera, cfg.capture)
+        self._check_info(run)               # intrinsics unchanged while these were taken
         shown = min(images, key=lambda im: abs(im.stamp - (rec.stamp or images[-1].stamp)))
         self._publish_viz(shown, rec, cfg, camera)
         return rec
@@ -579,7 +641,10 @@ class CalibrationNode(Node):
             T_root_opt = got[0]
         T_parent_root = cal.solution.X @ tf.inv(T_root_opt)
         return {'ok': True, 'reason': '',
-                'transform': transform_dict(T_parent_root, parent, sub.root)}
+                'transform': transform_dict(T_parent_root, parent, sub.root),
+                # the camera subtree at calibration time: publish_result refuses if
+                # the live one differs (a driver restart with other extrinsics)
+                'subtree': transform_dict(T_root_opt, sub.root, optical)}
 
 
 def reject_record(cid: int, camera: CameraModel, code: str, detail: str) -> CaptureRecord:
