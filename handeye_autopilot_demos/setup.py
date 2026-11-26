@@ -16,6 +16,7 @@ setup(
     maintainer_email='ansoncta.sg@gmail.com',
     description='Panda and UR mock-hardware demos for handeye_autopilot.',
     license='Apache-2.0',
-    tests_require=['pytest'],
+    # colcon runs pytest when it is listed here (tests_require is gone in new setuptools)
+    extras_require={'test': ['pytest']},
     entry_points={'console_scripts': []},
 )

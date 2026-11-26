@@ -11,5 +11,6 @@ setup(
     install_requires=['setuptools'],
     zip_safe=True,
     license='Apache-2.0',
-    tests_require=['pytest'],
+    # colcon runs pytest when it is listed here (tests_require is gone in new setuptools)
+    extras_require={'test': ['pytest']},
 )

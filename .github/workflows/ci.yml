@@ -30,8 +30,10 @@ jobs:
             docker_image: ubuntu:noble
           - ros_distribution: lyrical
             docker_image: ubuntu:resolute
+          # Rolling binaries are currently published for noble only (checked
+          # 2026-11-26 on packages.ros.org); move to resolute when they are.
           - ros_distribution: rolling
-            docker_image: ubuntu:resolute
+            docker_image: ubuntu:noble
     env:
       HANDEYE_AUTOPILOT_REQUIRE_DEPS: '1'
     steps:
@@ -51,8 +53,10 @@ jobs:
         run: |
           source /opt/ros/${{ matrix.ros_distribution }}/setup.bash
           rosdep update --rosdistro ${{ matrix.ros_distribution }}
-          src/handeye_autopilot/ci/scripts/check_deps.sh src ${{ matrix.ros_distribution }}
-          rosdep install --from-paths src -i -y --rosdistro ${{ matrix.ros_distribution }}
+          src/handeye_autopilot/ci/scripts/check_deps.sh src ${{ matrix.ros_distribution }} \
+            src/handeye_autopilot/ci/known_missing.txt skip_keys.txt
+          rosdep install --from-paths src -i -y --rosdistro ${{ matrix.ros_distribution }} \
+            --skip-keys "$(cat skip_keys.txt)"
       - uses: ros-tooling/action-ros-ci@v0.4
         with:
           package-name: handeye_autopilot handeye_autopilot_interfaces handeye_autopilot_demos

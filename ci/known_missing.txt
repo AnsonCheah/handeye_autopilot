@@ -1,0 +1,5 @@
+# Dependency-gate exceptions: rosdep keys known to have no apt package on a
+# distro. Format: <distro> <key> <date checked> <reason>
+# The gate warns about these instead of failing, and fails once the package
+# appears (so the line gets removed). Keep this list short and dated.
+rolling ur_moveit_config 2026-11-26 not built for Rolling on packages.ros.org; demos need it only from M4
