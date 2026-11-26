@@ -479,7 +479,11 @@ class Session:
                                     'is probably smaller than the real lever arm between '
                                     'the tool and the ' + ('board' if self.mode ==
                                                            'eye_to_hand' else 'camera'))
-                            v *= 0.5
+                            # the halved step must pass the same check before it is sent
+                            v = bs.safe_step(check, v * 0.5, v / 16)
+                            if v == 0.0:
+                                clean = False
+                                break
                             # the halved step becomes the current step for its kind;
                             # growth resumes only after a complete clean round
                             step[kind] = min(step[kind], v)

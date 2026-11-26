@@ -92,5 +92,12 @@ narrower issues (measured vs commanded pose, estimate margin, spare order,
 start-of-path and orientation between waypoints), all fixed with tests. The
 offset-TCP finding was confirmed in MoveIt: 4.52 mm TCP deviation with the end
 pose only vs 0.014 mm with dense converted waypoints (`docs/probes/`).
-Remaining items are M3 driver-contract notes (01-architecture §3.2) and the
-Lyrical/Rolling probe runs.
+Passes 2-10 each found narrower issues (all fixed with tests): measured vs
+commanded and per-frame poses, the carried-object box check (now always the
+L_max ball, never the estimate), orientation between waypoints, rotation
+steps past a half-turn, the printed side turning away, the commanded step
+between samples, and probe evidence that could pass vacuously.
+**Pass 11: "M2 merge: CLEAR"**; its two should-fixes (re-check a halved
+retry; verify the Cartesian end pose) are fixed in the merge commit.
+Remaining items are M3 driver-contract notes (01-architecture §3.2), the
+Lyrical/Rolling probe runs, and the bounded test-alarm delay in native code.

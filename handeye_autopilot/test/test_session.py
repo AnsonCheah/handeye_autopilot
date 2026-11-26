@@ -414,3 +414,22 @@ def test_seed_rejection_names_the_real_limit(monkeypatch):
     a = s.next_action()
     assert a.result.failure == session.SEED_REJECTED
     assert 'hold it still' in a.result.message and 'box' not in a.result.message
+
+
+def test_halved_retry_is_checked_before_it_is_sent(monkeypatch):
+    """After a lost board the halved step must pass the same visibility check;
+    here half the step fails it, so the retry is a quarter."""
+    from handeye_autopilot.core import bootstrap as bs
+    v0 = SessionConfig().first_rotation_step
+    real = bs.rotation_is_safe
+
+    def check(mode, C, board, camera, v, cfg, *a, **k):
+        return abs(v - v0 / 2) > 1e-12 and real(mode, C, board, camera, v, cfg, *a, **k)
+    monkeypatch.setattr(bs, 'rotation_is_safe', check)
+    log = []
+    r, *_ = run('eye_to_hand', lose={1}, log=log)
+    steps = [a for a in log if isinstance(a, Move) and a.purpose == 'bootstrap']
+    seed_tool = r.records[0].tool_pose
+    a1 = tf.rotation_angle(steps[0].tool_pose, seed_tool)
+    a2 = tf.rotation_angle(steps[1].tool_pose, seed_tool)
+    assert a1 == pytest.approx(v0, rel=0.02) and a2 == pytest.approx(v0 / 4, rel=0.02)

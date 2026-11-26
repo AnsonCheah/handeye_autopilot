@@ -282,6 +282,19 @@ def main() -> None:
                                           cartesian=True, cartesian_fraction_threshold=1.0,
                                           timeout_sec=10.0)
         found['cartesian_ok'] = motion(m, None, submit=cart(0.05))
+        # where the tool really ended (FK of the measured joints) vs the request
+        fk1 = m.compute_fk()
+        if fk1 is not None:
+            p1 = (fk1[0] if isinstance(fk1, list) else fk1).pose
+            want = np.array([p0.pose.position.x + 0.05, p0.pose.position.y,
+                             p0.pose.position.z])
+            got = np.array([p1.position.x, p1.position.y, p1.position.z])
+            dq = Rotation.from_quat(quat).inv() * Rotation.from_quat(
+                [p1.orientation.x, p1.orientation.y, p1.orientation.z, p1.orientation.w])
+            found['cartesian_ok']['end_position_error_mm'] = round(
+                float(np.linalg.norm(got - want)) * 1000, 3)
+            found['cartesian_ok']['end_rotation_error_deg'] = round(
+                float(np.degrees(dq.magnitude())), 3)
         found['cartesian_back'] = motion(m, None, submit=cart(0.0))
         found['cartesian_impossible'] = motion(m, None, submit=cart(3.0))
         cart_srv = node.create_client(GetCartesianPath, 'compute_cartesian_path',
@@ -341,6 +354,10 @@ def main() -> None:
     ji = found.get('cartesian_impossible', {}).get('joints_after')
     if jb is None or ji is None or max(abs(a - b) for a, b in zip(jb, ji, strict=True)) > 0.01:
         missing.append('cartesian_impossible.arm_moved')
+    co = found.get('cartesian_ok', {})
+    if co.get('end_position_error_mm') is None or co['end_position_error_mm'] > 1.0 or \
+            co.get('end_rotation_error_deg') is None or co['end_rotation_error_deg'] > 0.1:
+        missing.append('cartesian_ok.end_pose_not_reached')
     j0 = found['back_to_ready'].get('joints_after')
     j1 = found.get('cartesian_ok', {}).get('joints_after')
     if j0 is None or j1 is None or max(abs(a - b) for a, b in zip(j0, j1, strict=True)) < 0.01:
