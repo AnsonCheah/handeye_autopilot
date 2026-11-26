@@ -78,18 +78,30 @@ def _visible_all(pts: Mat, camera: CameraModel, margin: float) -> bool:
                 px[:, 1].max() <= camera.height - 1 - margin)
 
 
+def _faces_camera(normals: Mat, centres: Mat) -> bool:
+    """Printed side toward the camera for every (normal, centre) pair: the board
+    +z axis points away from the camera, i.e. along the line of sight (same
+    rule as planning.visibility)."""
+    return bool(np.all(np.einsum('...i,...i->...', normals, centres) > 0))
+
+
 def rotation_is_safe(mode: str, C: Mat, board: BoardSpec, camera: CameraModel,
                      angle: float, cfg: SessionConfig, directions: Mat = DIRECTIONS,
                      pivot_dirs: Mat = PIVOT_DIRS,
                      fractions: tuple[float, ...] = FRACTIONS) -> bool:
     pts = tf.apply(C, board.outline_samples(12))                     # (P, 3)
+    w, h = board.size_m
+    centre = tf.apply(C, np.array([[w / 2, h / 2, 0.0]]))[0]
     ref = reference_point(mode, C, board)
     pivots = np.vstack([ref, ref + np.sqrt(3) * cfg.lever_max * pivot_dirs])
     for frac in fractions:
         R = Rotation.from_rotvec(directions * angle * cfg.step_safety * frac).as_matrix()
+        normals = R @ C[:3, 2]                                           # (A, 3)
         for pivot in pivots:
             moved = np.einsum('aij,pj->api', R, pts - pivot) + pivot   # (A, P, 3)
             if not _visible_all(moved, camera, cfg.image_margin_px):
+                return False
+            if not _faces_camera(normals, R @ (centre - pivot) + pivot):
                 return False
     return True
 
@@ -112,6 +124,9 @@ def predicted_is_safe(mode: str, X: Mat, Z: Mat, start_tool: Mat, target_tool: M
     pts = board.outline_samples(12)
     for frac in FRACTIONS:          # the same straight path the Cartesian waypoints follow
         C = predict_board(mode, X, Z, tf.interpolate(start_tool, target_tool, frac))
+        w, h = board.size_m
+        if not _faces_camera(C[:3, 2], tf.apply(C, np.array([[w / 2, h / 2, 0.0]]))[0]):
+            return False
         if not _visible_all(tf.apply(C, pts), camera, margin):
             return False
     return True

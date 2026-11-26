@@ -422,3 +422,14 @@ def test_planning_applies_the_estimate_box_margin():
     loose = _plan_with(SessionConfig(**box, estimate_box_margin=0.0))
     tight = _plan_with(SessionConfig(**box, estimate_box_margin=0.15))
     assert tight.rejections[planning.OUTSIDE_BOX] > loose.rejections[planning.OUTSIDE_BOX]
+
+
+
+def test_rotation_check_refuses_turning_the_printed_side_away():
+    """A board seen nearly edge-on: even a small rotation can flip its printed
+    side away from the camera while the outline stays in the image."""
+    cfg = SessionConfig(lever_max=0.0, image_margin_px=0.0)
+    w, h = BOARD.size_m
+    C = board_pose(distance=0.6, tilt=(86, 0), roll=0)             # 4 deg from edge-on
+    assert bs._faces_camera(C[:3, 2], tf.apply(C, np.array([[w / 2, h / 2, 0]]))[0])
+    assert not bs.rotation_is_safe('eye_to_hand', C, BOARD, CAMERA, math.radians(4), cfg)

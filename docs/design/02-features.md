@@ -65,7 +65,8 @@ Intrinsics are fixed (from `CameraInfo`), not refined.
      eye-in-hand), the reference plus 32 pivots on that sphere, and the motion
      at ¼, ½, ¾ and the full step × safety factor *(tune)*; every board-outline
      sample is projected with the full camera model and must stay in front of
-     the camera and inside the image with the margin. `shortcut:` sampled, not
+     the camera and inside the image with the margin, with the printed side
+     still facing the camera (both checks, with and without an estimate). `shortcut:` sampled, not
      exact; tighten if a real run loses the board after a passed step. A
      property test checks it against random true geometry in both modes.
      Sampling error, measured against a dense 512 × 129 × 8 check: the default
