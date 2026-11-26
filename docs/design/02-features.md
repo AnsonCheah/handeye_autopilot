@@ -1,4 +1,4 @@
-# Checkpoint 2 — Features and algorithms (rev 3, after final Codex review)
+# Checkpoint 2 — Features and algorithms (rev 3.1, after pre-implementation Codex review)
 
 Scope of v1: **eye-to-hand and eye-in-hand** hand-eye calibration. Numbers
 marked *(tune)* come from simulation sweeps plus real-image fixtures, never from
@@ -138,7 +138,10 @@ recommending ChArUco.
    - **pose ambiguity:** IPPE gives two poses. Reject when the runner-up's error
      is within a noise-scaled factor of the best **and** the two poses differ by
      more than a pose threshold (nearly identical poses are not ambiguous).
-     Applies in every phase; no exemptions.
+     Applies in every phase; no exemptions. Its M1a fixture must be a view
+     that **meets both conditions** (verified in the test, not assumed from
+     "near face-on"); a near-face-on view that fails either condition is a
+     separate fixture that must be accepted.
    - TF at the frame stamp unavailable or extrapolated.
 4. **Stray-marker masking (ChArUco), on by default.** Case: a marker with an
    ID inside the board's range but not on the board (a different-size marker
@@ -164,10 +167,33 @@ recommending ChArUco.
       them explicitly so the detector does not re-detect the dropped markers
       (with an empty inlier set the capture is rejected before this call).
    6. Continue with the normal gates (§D3).
-   A synthetic stray-marker fixture is part of M1a; a real-image one of M5.
-5. **Record** per capture: the kept frame's corner IDs and pixels, board
-   coordinates, its tool pose, both IPPE poses and errors, the reason if
-   rejected.
+   **Expected outcomes, one fixture each (M1a):**
+   - *masking succeeds:* one isolated stray marker, enough board markers left
+     → the stray marker is dropped, the capture is **accepted**, and its
+     corners match the clean-view corners;
+   - *rejected after masking:* strays (or occlusion) leave too few or
+     poorly spread inlier markers → rejected with the support-check code;
+   - *two boards:* a second consistent group → rejected with the two-boards
+     code.
+   A real-image stray-marker fixture follows in M5.
+5. **Record** per capture (the **capture record**, ROS-free; the M1a → M1b
+   hand-off and the unit of the observations YAML):
+   - `capture_id` (acquisition order), `stamp` (acquisition stamp, float s);
+   - camera model: `K` (3×3), `D`, distortion model name, image size,
+     rectified flag;
+   - `ids`: corner IDs in ascending order; `object_points` (N×3, board frame,
+     m) and `image_points` (N×2, px) in the same order;
+   - `tool_pose`: `base_T_tool` paired with this frame's stamp (4×4);
+   - both IPPE poses (`camera_T_board`, 4×4) and their reprojection errors;
+   - `accepted` and, if rejected, the `REJECT_*` code and detail.
+   Accepted records must have every field. Rejected records keep what
+   existed when the capture was rejected; later fields are `null` (e.g. no
+   board → empty `ids` and null poses; TF unavailable → null `tool_pose`).
+   The solver reads accepted records only.
+   The **observations YAML** is a list of capture records plus run metadata
+   (mode, board definition, frames) and a top-level `schema_version: 1`
+   (integer, bumped on any incompatible change; the loader refuses unknown
+   versions).
 
 ## E. Solver
 
@@ -184,11 +210,31 @@ methods), SciPy `least_squares`, `scipy.stats.median_abs_deviation`.
    threshold `median + k·MAD` with a pixel floor; refit once without outliers.
    Rerun the observability check after removal; if too few captures remain or
    the set is degenerate, **fail**, don't continue.
-4. **Observability:** before solving, check the spread of **relative**
-   rotation axes and the rotation amplitude between captures; after solving,
-   the scaled smallest singular value of the Jacobian. Fail with a message
-   ("add rotation about another axis") rather than return a confident wrong
-   answer.
+4. **Observability:** fail with a message ("add rotation about another
+   axis") rather than return a confident wrong answer. Definitions (fixed so
+   thresholds keep their meaning):
+   - **Relative rotations:** over **all pairs** `i < j` of captures in the
+     set, `R_ij = R_i⁻¹ R_j` of the moving rotations `A_i` (§A). Amplitude
+     `θ_ij`, unit axis `a_ij`.
+   - **Rotation amplitude** = `max θ_ij` (rad).
+   - **Axis spread:** over pairs with `θ_ij` ≥ a minimum amplitude *(tune)*,
+     `M = mean(a_ij a_ijᵀ)` (sign-free); with eigenvalues `λ1 ≥ λ2 ≥ λ3`,
+     spread = `2·λ2` ∈ [0, 1] (0 = all axes parallel, which leaves the
+     hand-eye problem underdetermined; 1 = axes spanning at least a plane
+     evenly). With fewer than 2 qualifying pairs, spread = 0 (fails).
+   - **Scaled smallest singular value:** at the solution, take the raw
+     residual vector `r` (pixel errors, one element per corner coordinate)
+     and its Jacobian `J_r` with respect to the 12 tangent parameters. Let
+     `z_k = (r_k / s)²` with `s = f_scale` in pixels (`f_scale` = σ-multiple ×
+     σ, §E2) and `w_k = ρ'(z_k)` for the `soft_l1` loss (`w_k = 1/√(1+z_k)`).
+     Rows: `J_k = √w_k · J_r,k / σ`. Columns: translation as is, rotation
+     columns divided by `d` (median board depth), so every column is per
+     metre at the working distance. Reported value = smallest singular value
+     of that `J` (unit 1/m).
+   - **Where applied:** amplitude and spread before the first fit (on the
+     accepted captures), again after outlier removal, and on each fold's
+     training set; the singular value after the final fit and after each fold
+     fit.
 
 ## F. Quality gates and honest naming
 
@@ -220,8 +266,12 @@ alongside.
    each fold, the full training pipeline (outlier rejection included) runs on
    the other folds only. Held-out captures are scored with the **predicted**
    board pose `Ĉ_i` (no per-capture PnP fit). Each training set must pass
-   observability; a failed fold is reported and fails the fold-sensitivity
-   gate (§F). The same refits feed that gate.
+   observability; a fold whose training set fails to solve **or** fails
+   observability counts as failed, is reported, and fails the
+   fold-sensitivity gate (§F). The same refits feed that gate.
+   **Held-out aggregates** pool every corner of every accepted held-out
+   capture from the successful folds: RMS = √(mean of squared Euclidean
+   corner errors, px); max = largest corner error.
 2. **Offline re-solve:** `ros2 run handeye_autopilot resolve <run_dir>`.
 
 Reference check (CAD) and live verify mode: v1.x, not v1.
@@ -235,9 +285,11 @@ Reference check (CAD) and live verify mode: v1.x, not v1.
   plus configurable noise and a configurable systematic error, so tests can
   show what the gates catch and what they can't.
 - Geometry oracle in tests is written independently of the mode adapter.
-- **Expected-failure tests** (faults the pipeline can detect): parallel
-  rotation axes, near-face-on ambiguous views, delayed/bad timestamps, too
-  small `L_max`, stray markers. Each must fail with its committed reason code.
+- **Expected-failure tests** (faults the pipeline can detect), each owned by
+  the milestone that builds the detecting code and failing with its committed
+  reason code: genuinely ambiguous views and rejected-after-masking stray
+  markers (M1a); parallel rotation axes (M1b); too small `L_max` (M2,
+  bootstrap); delayed/bad timestamps (M3, TF and clock handling).
 - **Known-blind-spot tests** (biases that stay internally consistent): wrong
   board square size, small systematic robot kinematic error, small intrinsic
   error. These runs are **expected to pass** the gates while the result is

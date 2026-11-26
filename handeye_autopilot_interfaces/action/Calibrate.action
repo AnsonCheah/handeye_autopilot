@@ -1,0 +1,76 @@
+# Run one hand-eye calibration (docs/design/01-architecture.md §5).
+#
+# Admission: a goal is REJECTED (no result at all) when a run is active, mode
+# or execution is not one of the constants below, profile is unknown, or the
+# motion fault latch is set. An accepted goal ends as:
+#   SUCCEEDED - the run completed; `passed` may still be false (quality gates);
+#   CANCELED  - cancel requested and the stop confirmed (error_code CANCELED);
+#   ABORTED   - a runtime failure, error_code says which (MOTION_FAULT when a
+#               cancel's stop could not be confirmed).
+
+string MODE_EYE_TO_HAND=eye_to_hand
+string MODE_EYE_IN_HAND=eye_in_hand
+string EXECUTION_MOVEIT=moveit
+string EXECUTION_MANUAL=manual
+
+string mode        # MODE_*
+string execution   # EXECUTION_*
+string profile     # parameter profile name; empty = node parameters
+---
+uint8 NONE=0
+uint8 INVALID_GOAL=1          # profile parameters failed validation after acceptance
+uint8 NO_CAMERA_INFO=2
+uint8 TF_UNAVAILABLE=3        # includes the clock-domain preflight
+uint8 IK_SERVICE_MISSING=4
+uint8 MOTION_FAILED=5
+uint8 MOTION_FAULT=6          # stop not confirmed; latch set until ~/clear_fault
+uint8 NOT_ENOUGH_SAMPLES=7
+uint8 SOLVE_FAILED=8
+uint8 CANCELED=9
+uint8 INTERNAL=10
+
+uint8 error_code
+bool transform_valid       # an estimate exists (true even when quality failed)
+bool passed                # all gated quality checks passed
+# Pose of the camera optical frame in the parent: frame_id = base_frame
+# (eye_to_hand) or tool_frame (eye_in_hand), child_frame_id = optical frame.
+# Stamp = node time when the final solve finished. Identity with empty frame
+# ids when transform_valid is false (same for target_transform).
+geometry_msgs/TransformStamped camera_transform
+# Board pose: frame_id = tool_frame (eye_to_hand) or base_frame (eye_in_hand),
+# child_frame_id = configured board frame.
+geometry_msgs/TransformStamped target_transform
+handeye_autopilot_interfaces/QualityReport quality
+string result_file
+string message
+---
+string PHASE_PREFLIGHT=preflight
+string PHASE_SEED_CHECK=seed_check
+string PHASE_BOOTSTRAP=bootstrap
+string PHASE_CENTRING=centring
+string PHASE_PLANNING=planning
+string PHASE_MOVING=moving
+string PHASE_MANUAL_CAPTURE=manual_capture
+string PHASE_CAPTURING=capturing
+string PHASE_SOLVING=solving
+string PHASE_VERIFYING=verifying
+
+# Capture rejection codes (02-features §D)
+string REJECT_NO_BOARD=no_board
+string REJECT_FEW_FEATURES=few_features
+string REJECT_POOR_SPREAD=poor_spread
+string REJECT_COLLINEAR=collinear
+string REJECT_BLURRY=blurry
+string REJECT_NEAR_BORDER=near_border
+string REJECT_REPROJECTION=reprojection
+string REJECT_AMBIGUOUS_POSE=ambiguous_pose
+string REJECT_CONSENSUS=consensus
+string REJECT_TF_UNAVAILABLE=tf_unavailable
+string REJECT_MARKER_SUPPORT=marker_support
+string REJECT_TWO_BOARDS=two_boards
+
+string phase                   # PHASE_*
+uint32 accepted
+uint32 rejected
+string last_rejection          # REJECT_* or empty
+string last_rejection_detail   # free text for humans

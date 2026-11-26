@@ -1,4 +1,4 @@
-# Checkpoint 1 — Architecture and interfaces (rev 3, after final Codex review)
+# Checkpoint 1 — Architecture and interfaces (rev 3.1, after pre-implementation Codex review)
 
 Package: `handeye_autopilot`.
 
@@ -164,17 +164,38 @@ collision objects in the planning scene. Warn only if neither exists.
 | Package | Build | Contents |
 |---|---|---|
 | `handeye_autopilot` | `ament_python` | `handeye_autopilot/core/` (no ROS imports anywhere under it, and `handeye_autopilot/__init__.py` imports nothing ROS; a test enforces both), `handeye_autopilot/ros/` (node, synthetic camera node), launch, config, RViz files installed via `data_files`; packages found with `find_packages`. |
-| `handeye_autopilot_interfaces` | `ament_cmake` | One action, one message. Declares `rosidl_default_generators` (build), `rosidl_default_runtime` (exec), `member_of_group rosidl_interface_packages`. |
+| `handeye_autopilot_interfaces` | `ament_cmake` | One action, two messages (`QualityReport`, `GateResult`). Declares `rosidl_default_generators` (build), `rosidl_default_runtime` (exec), `member_of_group rosidl_interface_packages`. |
 | `handeye_autopilot_demos` | `ament_python` | UR and Panda demos. Only this package depends on robot configs. |
 
-`package.xml` declares all system deps via rosdep keys (`python3-numpy`,
-`python3-scipy`, `python3-opencv`, `python3-yaml`, `cv_bridge`,
-`image_geometry`, `tf2_ros`, `moveit_msgs`, `pymoveit2`, `std_srvs`). CI builds and tests a normal **installed**
-(not symlink) build on each distro's own OS image with distro OpenCV.
+Every dependency is a rosdep key that must resolve to an **apt** package on
+all three distros. The `package.xml` files are the source of truth; this table
+is the M0 baseline and grows as milestones add dependencies (each PR that adds
+one updates it):
 
-## 5. The one custom interface
+| Package | build / buildtool | exec | test |
+|---|---|---|---|
+| `handeye_autopilot_interfaces` | `ament_cmake`, `rosidl_default_generators`, `geometry_msgs`, `action_msgs`, `service_msgs` | `rosidl_default_runtime`, `geometry_msgs`, `action_msgs`, `service_msgs` | — |
+| `handeye_autopilot` | — | `python3-numpy`, `python3-scipy`, `python3-opencv`, `python3-yaml`, `rclpy`, `cv_bridge`, `image_geometry`, `tf2_ros`, `geometry_msgs`, `sensor_msgs`, `std_srvs`, `moveit_msgs`, `pymoveit2`, `handeye_autopilot_interfaces` | `python3-pytest` |
+| `handeye_autopilot_demos` | — | `handeye_autopilot`, `handeye_autopilot_interfaces`, `launch`, `launch_ros`, `moveit_resources_panda_moveit_config`, `ur_moveit_config`, `ur_robot_driver` | `python3-pytest` |
+
+**Dependency gate (CI, every PR, every distro;
+`ci/scripts/check_deps.sh`):** keys are listed with `rosdep keys --from-paths
+.` **without `-i`** (with `-i` rosdep also drops every key already installed in
+the sourced ROS underlay), minus the names of this repo's own packages; for
+each key, `rosdep resolve` must name the `apt` installer
+and `apt-cache policy` must show an install candidate, checked **before**
+anything is installed (so already-installed keys can't hide a pip-only or
+missing key); then `rosdep install` runs. CI builds and tests a normal
+**installed** (not symlink) build on each distro's own OS image with distro
+OpenCV.
+
+## 5. The custom interfaces
 
 ### `Calibrate.action`
+
+The `.msg`/`.action` files in `handeye_autopilot_interfaces` are the canonical
+schema (names, types, numeric constants); this section is the summary and the
+semantics. Shape:
 ```
 # Goal
 string mode                # "eye_to_hand" | "eye_in_hand"
@@ -182,7 +203,7 @@ string execution           # "moveit" | "manual"
 string profile             # parameter profile name; empty = node parameters
 ---
 # Result
-uint8  error_code          # NONE, INVALID_GOAL, BUSY, NO_CAMERA_INFO, TF_UNAVAILABLE,
+uint8  error_code          # NONE, INVALID_GOAL, NO_CAMERA_INFO, TF_UNAVAILABLE,
                            # IK_SERVICE_MISSING, MOTION_FAILED, MOTION_FAULT,
                            # NOT_ENOUGH_SAMPLES, SOLVE_FAILED, CANCELED, INTERNAL
 bool   transform_valid     # an estimate exists (true even when quality failed)
@@ -194,30 +215,66 @@ string result_file
 string message
 ---
 # Feedback
-string phase
+string phase               # one of the PHASE_* constants
 uint32 accepted
 uint32 rejected
-string last_rejection
+string last_rejection      # one of the REJECT_* constants, or empty
+string last_rejection_detail   # human-readable, free text
 ```
 
 **Semantics:**
-- Goal rejected (not accepted) if a run is already active, if `mode`,
-  `execution`, `profile` are invalid, or while the **motion fault latch** is
-  set (§6).
+- **Admission.** A ROS 2 action server can only accept or reject a goal; a
+  rejected goal gets **no result** (the client sees `accepted = false`, see
+  [ROS 2 actions design](https://design.ros2.org/articles/actions.html)).
+  Rejected at admission, with the reason logged: a run is already active;
+  `mode` or `execution` not one of the constants; `profile` names no known
+  profile; the **motion fault latch** is set (§6). There is therefore no
+  `BUSY` result code.
+- Everything else is checked **after** acceptance and ends as `ABORTED` with a
+  code: profile parameters failing validation (`INVALID_GOAL`), camera-info and
+  clock preflight (`NO_CAMERA_INFO`, `TF_UNAVAILABLE`, §7–8), IK service
+  missing in MoveIt mode (`IK_SERVICE_MISSING`).
 - Configuration is snapshotted at goal acceptance; parameter changes mid-run
   don't apply.
 - `SUCCEEDED`: the run completed. `passed` may be false (quality gates failed)
   with `transform_valid` true.
+- **Transforms in the result.** `camera_transform`: `header.frame_id` = the
+  parent (`base_frame` for eye-to-hand, `tool_frame` for eye-in-hand),
+  `child_frame_id` = the camera optical frame from `CameraInfo`, i.e. the pose
+  of the optical frame in the parent (`X`, checkpoint 2 §A).
+  `target_transform`: `header.frame_id` = `tool_frame` (eye-to-hand) or
+  `base_frame` (eye-in-hand), `child_frame_id` = the configured board frame
+  name (`Z`). `header.stamp` of both = node time when the final solve finished.
+  When `transform_valid` is false both are identity with empty frame ids.
 - `ABORTED`: a runtime failure; `error_code` says which.
 - `CANCELED`: cancel requested and completed (see §6).
 - `~/capture` (`std_srvs/Trigger`, manual mode): success means "capture
   started"; the accept/reject outcome arrives in feedback. Returns
   `success=false` outside the manual capture phase or while a capture runs.
 
-`QualityReport.msg`: per-gate value, limit, pass, and group (sanity /
-fold sensitivity / accuracy evidence); inlier count; reprojection stats;
-fold sensitivity of the camera transform (mm, deg); held-out reprojection;
-observability measures. See checkpoint 2 §F for what each group does and does not prove.
+**Unset vs zero.** Every float metric that was not computed (run aborted
+before that stage, or no data) is **NaN**; a measured zero is 0.0. Counts are
+always set. Gates that were not evaluated are absent from `gates`.
+**Failed folds.** Held-out aggregates use only folds whose training set solved
+and passed observability; `folds_failed` counts the others (any failed fold
+fails the run, checkpoint 2 §F).
+
+`QualityReport.msg`: a `GateResult[]` list plus summary fields: capture
+counts (accepted, rejected, inliers, outliers); reprojection RMS/max (px);
+observability (largest relative rotation, rotation-axis spread, scaled smallest
+singular value); folds and failed folds with worst-fold translation (m) and
+rotation (rad); held-out reprojection RMS/max (px). SI on the ROS side; the
+result YAML and docs show mm and degrees.
+
+`GateResult.msg` (added in M0: a list of gates needs an element type; one
+message with parallel arrays was rejected as error-prone): `name`, `group`
+(`sanity` / `fold_sensitivity` / `accuracy_evidence`), `unit`, `comparison`
+(`<=` or `>=`), `value`, `limit`, `gated` (false for accuracy evidence),
+`passed`. See checkpoint 2 §F for what each group does and does not prove.
+
+Error codes and the `mode`/`execution` strings are constants in the action
+definition. Fields may still change until the interface freeze at the end of
+M3.
 
 ## 6. Concurrency and cancellation
 
@@ -270,9 +327,11 @@ observability measures. See checkpoint 2 §F for what each group does and does n
 - **One clock domain.** Image stamps and TF stamps must come from the same
   clock (`use_sim_time` consistent across node, robot and camera; a camera
   driver stamping with its device clock must be configured to use the host
-  clock). Checked at goal start and per capture: if image stamps and the node
-  clock differ by more than a threshold *(tune)*, the goal is **refused**
-  (`TF_UNAVAILABLE` with a message naming the clock), not warned about.
+  clock). Checked in the preflight right after goal acceptance and per
+  capture: if image stamps and the node clock differ by more than a threshold
+  *(tune)*, the run is **aborted** (`ABORTED`, `TF_UNAVAILABLE`, message naming
+  the clock), not warned about. (It can't be an admission rejection: that
+  would need an image first and rejections carry no result, §5.)
 - **Settle:** after motion, wait until the TF pose of the tool is stable over
   a window *(tune)* **and** the robot's measurement is fresh: the latest TF for
   the tool must be newer than the settle start (catches frozen
@@ -331,14 +390,27 @@ observability measures. See checkpoint 2 §F for what each group does and does n
   per mode (a swapped inverse must fail a test); import-purity test.
 - **OpenCV fixtures:** the same stored board images run through detection on
   OpenCV 4.6 and 4.10 (Jazzy and Lyrical CI) and must give identical corner
-  IDs and board-frame coordinates (catches ChArUco legacy-pattern changes).
+  IDs and board-frame coordinates, and image corners within a committed pixel
+  tolerance (catches ChArUco legacy-pattern changes).
 - Node: `launch_testing` with the synthetic camera, a stub `compute_ik`
   server, a fake MoveGroup action server; cancel, timing and TF-ownership
   tests from §6, §8, §9.
 - MoveIt integration: Panda mock-hardware demo end to end in CI (Jazzy at
   least).
-- CI: GitHub Actions `ros-tooling/action-ros-ci`, matrix {Jazzy, Lyrical,
-  Rolling}; `ruff`; `mypy` on `handeye_autopilot.core`.
+- CI: GitHub Actions, matrix {Jazzy on `ubuntu:noble`, Lyrical on
+  `ubuntu:resolute`, Rolling on `ubuntu:resolute`} containers,
+  `ros-tooling/setup-ros@v0.7` + `ros-tooling/action-ros-ci@v0.4` with
+  `no-symlink-install`; the checkout used by the gate and the consumer and
+  action-ros-ci's own checkout are pinned to **one** commit (the PR head SHA,
+  passed as `ref` to both); dependency gate (§4); `ruff`; `mypy --strict` on
+  `handeye_autopilot.core`. The `pymoveit2` API smoke test runs (not skips) on
+  every leg (`HANDEYE_AUTOPILOT_REQUIRE_DEPS=1`).
+- **Downstream consumer (CI only):** `ci/interface_consumer/` is a minimal
+  package outside the released set (an ignore marker keeps bloom and colcon
+  away from `ci/`). After the main build, CI builds it in a separate workspace
+  overlaid on the install space; its test imports the interfaces and
+  round-trips a `Calibrate` result containing `GateResult`s through rclpy
+  serialization.
 
 ## 13. Risks
 
@@ -347,5 +419,5 @@ observability measures. See checkpoint 2 §F for what each group does and does n
   contained change in one module.
 - MoveIt `compute_ik` behaviour differs across distros (timeout handling).
   CI on all three.
-- Author new to ROS 2: the custom surface is one action and one message; it
+- Author new to ROS 2: the custom surface is one action and two messages; it
   gets a design review before node code is written.

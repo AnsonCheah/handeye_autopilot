@@ -1,0 +1,11 @@
+line-length = 99
+target-version = "py312"
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[lint.isort]
+force-sort-within-sections = true
+
+[format]
+quote-style = "single"
