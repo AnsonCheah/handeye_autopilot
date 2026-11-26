@@ -8,8 +8,11 @@ chain (m1b_sim.tool_from_board's inverse), not from the mode adapter.
 
 from __future__ import annotations
 
+import contextlib
+import faulthandler
 import math
 from pathlib import Path
+import signal
 import time
 
 from handeye_autopilot.core import transforms as tf
@@ -89,6 +92,31 @@ def run(mode, *, seed=0, session_cfg=None, ik=None, true_lever_scale=1.0, seed_s
     G = seed_pose(mode, X, Z, seed_spec)
     t0, stamp = time.time(), 0.0
     moves = captures = 0
+    with _deadline(SPEC['deadline_s']):
+        return _drive(s, mode, X, Z, G, t0, stamp, moves, captures, rng, tex, H, renderer,
+                      noise, ik, frames, lose, fail_move, log)
+
+
+@contextlib.contextmanager
+def _deadline(seconds):
+    """Fail a hung session at the deadline, even inside a call (SIGALRM, Linux)."""
+    def boom(signum, frame):
+        raise TimeoutError(f'session exceeded the {seconds} s test deadline')
+    old = signal.signal(signal.SIGALRM, boom)
+    signal.alarm(int(seconds))
+    # backstop: a native call can hold off the Python handler; kill the
+    # process (with tracebacks) if it is still stuck well past the deadline
+    faulthandler.dump_traceback_later(seconds + 60, exit=True)
+    try:
+        yield
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+
+
+def _drive(s, mode, X, Z, G, t0, stamp, moves, captures, rng, tex, H, renderer, noise, ik,
+           frames, lose, fail_move, log):
     while True:
         a = s.next_action()
         if isinstance(a, Finished):
@@ -105,7 +133,7 @@ def run(mode, *, seed=0, session_cfg=None, ik=None, true_lever_scale=1.0, seed_s
                 s.on_motion('not_started' if outcome is True else outcome)
                 continue
             G = fake_fk(a.joints)                  # perfect motion, through the joints
-            s.on_motion('ok', a.joints)
+            s.on_motion('ok', a.joints, G)         # measured joints and TF tool pose
         elif isinstance(a, Capture):
             captures += 1
             C = board_in_camera(mode, X, Z, G)

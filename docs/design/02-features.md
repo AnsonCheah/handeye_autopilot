@@ -77,7 +77,7 @@ Intrinsics are fixed (from `CameraInfo`), not refined.
      the board corners in eye-to-hand; that whole ball must lie inside the box.
    - **With a rough estimate**, a step is checked against the board position
      the estimate predicts along the move (step × safety, margin plus the
-     uncertainty term).
+     uncertainty term plus twice the estimate's worst reprojection).
    - **Rounds are multi-axis from the start:** each round is ± a rotation about
      each of the three tool axes and ± a translation along each, every step
      taken **from the seed pose** (the robot returns to the seed first, so the
@@ -86,7 +86,8 @@ Intrinsics are fixed (from `CameraInfo`), not refined.
      usable rough estimate is enough; the final gates are unchanged). A step
      doubles only after a complete clean round (no skipped or failed move,
      rejected capture, halving, or step already limited by the check) whose
-     estimate changed less than a threshold *(tune)* since the previous round,
+     estimate (both `X` and `Z`) changed less than a threshold *(tune)* since
+     the previous round,
      or, before the first usable estimate, after any complete clean round.
    - If the board is lost, the robot returns to the seed (the last good pose;
      a failed return stops the run, `recovery_failed`) and the step is halved;
@@ -100,6 +101,8 @@ Intrinsics are fixed (from `CameraInfo`), not refined.
    usable estimate in 3–4 rounds.
 3. **Bounded centring.** Bring the board toward image centre at nominal depth in
    checked increments (each one detected before the next), not one jump.
+   Session settings are validated on load: a value that would silently
+   disable a guard (safety factor < 1, a non-finite radius, ...) is refused.
    Starts from the latest verified view the robot is actually at (if the
    last bootstrap move was skipped or its capture rejected, the robot first
    returns to the seed and centring starts from the seed view); each increment is checked against
@@ -132,7 +135,8 @@ joints only as a reference (checkpoint 1 §3.2). Phases use the
 
 1. **Sample** camera-relative board poses: board-centre pixel `(u, v)` →
    ray through the camera model (de-projection with distortion), depth along
-   the ray, tilt about two in-plane axes, roll about the optical axis. The
+   the optical axis (`z`, as everywhere else in this plan, e.g. §E4), tilt about
+   two in-plane axes, roll about the optical axis. The
    rotation pivot is the board centre.
 2. **Visibility filter:** positive depth; printed face toward the camera;
    board outline (densely sampled along its edges, projected with distortion)
@@ -165,14 +169,16 @@ joints only as a reference (checkpoint 1 §3.2). Phases use the
 7. **Spares:** the plan's target is the number of informative poses it
    relies on (at least the configured target, more if the information check
    needed more, **at most** target × reserve factor; past that the plan is
-   weak); execution collects that many accepted captures; spares are
+   weak; fewer usable poses than the configured target is weak too, even if
+   earlier captures already carry the information); execution collects that many accepted captures; spares are
    target × (reserve factor − 1) on top, within ⌈configured target ×
    reserve factor²⌉ moves in all. A spare that replaces a skipped
    pose is not re-scored (`shortcut:`; the solver's observability gate on the
    real captures decides; re-plan from the captured set if runs end weak).
 8. **Ordering:** greedy tour by **joint-space distance** between the IK
    solutions. At execution time MoveIt plans from the actual current state, so
-   a pose that fails then is skipped and a spare used.
+   a pose that fails then is skipped and a spare used; the spare is chosen at
+   run time as the one nearest the robot's current joints.
 
 ## D. Capture and detection
 

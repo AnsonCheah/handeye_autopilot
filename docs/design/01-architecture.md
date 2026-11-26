@@ -142,8 +142,31 @@ MoveIt brand implicitly.
   pass as a safe skip). The result's `executed_trajectory` is always empty on
   Jazzy (probe), so it is not used.
 - **Checked short moves are Cartesian.** Bootstrap, centring and recovery moves
-  (`Move.cartesian`) are planned as a straight tool path (MoveIt Cartesian
-  path), so the executed path is the one the step check assumed. The driver
+  (`Move.cartesian`) carry `waypoints`: tool poses along the straight tool
+  path, at most 1° / 5 mm apart *(tune)*. The driver converts each through the
+  fixed `ik_link → tool_frame` transform (§3.1) and passes them all to the
+  Cartesian planner, so a TF-only TCP follows the checked path too (the
+  planner interpolates the IK link; with only the end pose given, a rotation
+  about an offset TCP would cut a chord, ~4.6 mm at mid-path for 20° at
+  300 mm; measured 4.5 mm vs 0.014 mm with 1° waypoints, probe). The core
+  checks the limits at every waypoint with a box margin for the arc a carried
+  point bulges out between waypoints (`r·(1 − cos(Δθ/2))`) plus, when the
+  carried object's position comes from the rough estimate, a fixed estimate
+  margin *(tune; `shortcut:` no covariance)*, so the carried object cannot
+  cross a box face between two good end poses. Waypoint spacing is capped at
+  5°.
+- The driver reports the measured TF tool pose with every completed motion;
+  the next move is checked from that pose, and a measured pose outside the
+  limits stops the run (`motion_failed`). Orientation from the seed can exceed
+  the endpoints' by half a waypoint segment, so the orientation limit is
+  checked with that margin; the path's start is checked like its waypoints.
+- **M3 driver contract** (from the M2 reviews): report `ok` only with a fresh
+  measured TF tool pose (the core falls back to the target only for
+  simulation); send fresh joints with every reply, `not_started` included
+  (spares are ordered from them); require Cartesian fraction 1.0; the residual
+  TCP deviation (~0.01 mm with 1° waypoints) is far inside the box margins;
+  the bootstrap return to the seed is checked against the nominal seed, so
+  the end-pose tolerance must stay well inside the step safety factor. The driver
   requires the whole path (pymoveit2 `cartesian_fraction_threshold=1.0`; a
   shorter path is refused before anything is sent, which is the `not_started`
   evidence for these moves; probe) and sets a joint-space jump threshold
@@ -156,7 +179,11 @@ MoveIt brand implicitly.
   "executing" is not evidence of motion.
 - The safety box, if enabled, is also sent as a `path_constraints` position
   constraint so intermediate motion stays inside it (option; can make planning
-  slower, default on when the box is on).
+  slower, default on when the box is on). That constrains the tool link only;
+  for planned joint-goal moves the carried object's path is guarded by MoveIt
+  collision checking (`shortcut:` the box is not a collision volume for the
+  carried object on planned moves; add the box faces as planning-scene walls in
+  M4 if `box_check_moving_object` is on).
 
 ### 3.3 Validation chain per candidate
 
@@ -180,7 +207,9 @@ shown in RViz as a marker (`shortcut: not editable in RViz, add an interactive
 marker if users ask`). The envelope around the seed and the orientation limit
 from the seed (checkpoint 2 §C4) always apply; the box adds a user-placed
 volume on top. Disabled box = limits come from the envelope, orientation
-limit, `compute_ik` and visibility.
+limit, `compute_ik` and visibility. With the box on, the seed must be inside
+it (else `seed_rejected`), and checked short moves are limit-checked at every
+waypoint (§3.2).
 
 The collision warning checks both representations of the carried board or
 camera: URDF collision geometry on links fixed to the tool, and attached
@@ -314,14 +343,16 @@ M3.
   callback and only awaits futures, never blocks on spin.
 - The action server installs a cancel callback that **accepts** cancellation
   (rclpy's default rejects it).
-- Cancel during motion: call pymoveit2's cancel on the active MoveGroup goal,
+- Cancel during motion: call pymoveit2's cancel on the active motion goal
+  (`MoveGroup` for planned moves, `ExecuteTrajectory` for Cartesian ones),
   then wait (with deadline) for its terminal status; only then report
   `CANCELED`. A cancel acknowledgement is not proof the robot stopped; if the
   terminal status doesn't arrive by the deadline, report `ABORTED` with
   `MOTION_FAULT` and a message telling the operator to check the robot.
 - **Motion fault latch.** After `MOTION_FAULT` the node refuses every new goal
   until the operator calls `~/clear_fault` (`std_srvs/Trigger`). Clearing
-  succeeds only when no MoveGroup goal from this node is still active **and**
+  succeeds only when no motion goal from this node (`MoveGroup` or
+  `ExecuteTrajectory`) is still active **and**
   fresh `joint_states` (newer than the call) show all joint velocities below a
   threshold over a window *(tune)*; otherwise it returns `success=false` with
   the reason. The latch survives goal completion and is logged loudly.

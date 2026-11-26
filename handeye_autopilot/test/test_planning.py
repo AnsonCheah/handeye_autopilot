@@ -54,6 +54,7 @@ def test_worst_case_check_holds_for_random_true_geometry(mode):
     rng = np.random.default_rng(3)
     cfg = SessionConfig(lever_max=0.15)
     w, h = BOARD.size_m
+    tested = real = 0
     for trial in range(25):
         C = board_pose(distance=rng.uniform(0.45, 0.7), tilt=rng.uniform(-25, 25, 2),
                        roll=rng.uniform(-40, 40), offset=rng.uniform(-60, 60, 2))
@@ -70,18 +71,26 @@ def test_worst_case_check_holds_for_random_true_geometry(mode):
                 start = math.radians(12) if kind == 'rotation' else 0.06
                 if kind == 'rotation':
                     v = bs.safe_step(lambda x, C=C: bs.rotation_is_safe(
-                        mode, C, BOARD, CAMERA, x, cfg), start, start / 16)
+                        mode, C, BOARD, CAMERA, x, cfg), start, start / 1024)
                 else:
                     v = bs.safe_step(lambda x, C=C: bs.translation_is_safe(
-                        C, BOARD, CAMERA, x, cfg), start, start / 16)
+                        C, BOARD, CAMERA, x, cfg), start, start / 1024)
+                tested += 1
+                if v == 0:          # nothing allowed: nothing to check (counted below)
+                    continue
+                real += 1
                 for frac in np.linspace(0, 1, 6)[1:]:
                     for sign in (1, -1):
                         D = bs.tool_step(kind, axis, sign * v * frac)
                         motion = tool_in_cam @ D @ tf.inv(tool_in_cam)    # in camera frame
                         C2 = motion @ C if mode == 'eye_to_hand' else tf.inv(motion) @ C
+                        pts = tf.apply(C2, BOARD.outline_samples(12))
+                        assert pts[:, 2].min() > 0, (trial, kind, axis, v)   # in front
                         px = CAMERA.project_object(C2, BOARD.outline_samples(12))
                         assert px.min() >= 0 and px[:, 0].max() < CAMERA.width and \
                             px[:, 1].max() < CAMERA.height, (trial, kind, axis, v)
+    # the property must be exercised by real steps, not passed vacuously
+    assert real >= 0.9 * tested, (real, tested)
 
 
 def test_pivot_origin_by_mode():
@@ -224,6 +233,47 @@ def test_ik_failures_are_recorded():
     p = planning.plan('eye_to_hand', X, Z, CAMERA, BOARD, seed_tool, None, [],
                       lambda G: planning.IKResult(None, 'NO_IK_SOLUTION'), CFG, SolverConfig())
     assert p.poses == [] and p.weak and p.rejections[planning.IK_FAILED] > 0
+    assert p.ik_errors == {'NO_IK_SOLUTION': p.rejections[planning.IK_FAILED]}
+
+
+def test_prior_captures_cannot_make_an_empty_plan_strong():
+    """All IK fails but the already-captured poses alone clear the information
+    threshold: the plan must still be weak (target below the configured one)."""
+    strong = _plan_with(CFG)
+    captured = [c.tool_pose for c in strong.poses]
+    X, Z = truth('eye_to_hand')
+    seed_tool = X @ board_pose() @ tf.inv(Z)
+    p = planning.plan('eye_to_hand', X, Z, CAMERA, BOARD, seed_tool, None, captured,
+                      lambda G: planning.IKResult(None, 'TIMED_OUT'), CFG, SolverConfig())
+    assert p.information >= CFG.min_plan_singular_value     # the captures carry it
+    assert p.target == 0 and p.weak and 'for a target of' in p.advice
+
+
+def test_tiny_relative_rotation_is_not_zero():
+    R = Rotation.from_rotvec([1e-9, 0, 0]).as_matrix()
+    ang, ax = planning._relative(np.eye(3)[None], R[None])
+    assert ang[0] == pytest.approx(1e-9, rel=1e-3) and ax[0] == pytest.approx([1, 0, 0])
+
+
+@pytest.mark.parametrize('bad', [dict(step_safety=0.0), dict(step_safety=0.5),
+                                 dict(envelope_radius=float('nan')),
+                                 dict(max_orientation_change=float('inf')),
+                                 dict(target_captures=True), dict(reserve_factor=0.9),
+                                 dict(box_size=(1.0, 0.0, 1.0)), dict(depth_range=(0.7, 0.4)),
+                                 dict(lever_max=-0.1), dict(waypoint_max_step=0.0),
+                                 dict(first_rotation_step=math.radians(30)),
+                                 dict(box_size=(2.0,)), dict(box_xyz=(0.0, 0.0)),
+                                 dict(coverage=(0.1, 0.2, 0.3)),
+                                 dict(waypoint_max_angle=math.radians(25)),
+                                 dict(estimate_box_margin=-0.01)])
+def test_session_config_rejects_values_that_disable_a_guard(bad):
+    with pytest.raises(ValueError):
+        SessionConfig(**bad)
+
+
+def test_session_config_defaults_and_spec_values_are_valid():
+    SessionConfig()
+    SessionConfig(lever_max=0.0)                    # the expected-failure spec case
 
 
 def _old_average_module(C, b):
@@ -357,3 +407,15 @@ def test_move_budget_has_a_single_rounding():
     p = _plan_with(cfg)
     assert p.weak and p.target == math.ceil(3 * 1.5)
     assert len(p.poses) <= math.ceil(3 * 1.5 ** 2)
+
+
+def test_planning_applies_the_estimate_box_margin():
+    """Candidates within the estimate margin of the box face are rejected at
+    planning time, as execution would skip them."""
+    X, Z = truth('eye_to_hand')
+    seed_tool = X @ board_pose() @ tf.inv(Z)
+    box = dict(box_enabled=True, box_check_moving_object=True,
+               box_xyz=tuple(seed_tool[:3, 3]), box_size=(0.9, 0.9, 0.9))
+    loose = _plan_with(SessionConfig(**box, estimate_box_margin=0.0))
+    tight = _plan_with(SessionConfig(**box, estimate_box_margin=0.15))
+    assert tight.rejections[planning.OUTSIDE_BOX] > loose.rejections[planning.OUTSIDE_BOX]

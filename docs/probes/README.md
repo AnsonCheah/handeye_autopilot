@@ -48,3 +48,9 @@ driven through pymoveit2 with the `MoveGroup` action.
    shift: the planner covered 13 % of the path and pymoveit2 refused it
    **before sending anything** (`submitted: false`, robot unmoved). MoveIt
    logs jump threshold 0 (jump check disabled) unless the caller sets one.
+8. **Offset TCP (TF-only tool frame) on a Cartesian path:** a 20° rotation
+   about a TCP 300 mm along `panda_link8` z, planned with
+   `compute_cartesian_path` for `panda_link8`. End pose only: the TCP strays
+   **4.52 mm** mid-path (the planner interpolates the link, cutting a chord).
+   Dense waypoints (1° apart) converted from the TCP path: **0.014 mm**. This
+   is why checked moves carry converted waypoints (01-architecture §3.2).

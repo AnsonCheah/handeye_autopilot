@@ -12,4 +12,6 @@ tolerance: {translation_m: 0.003, rotation_deg: 0.5}
 lever_too_small:
   eye_to_hand: {lever_max: 0.0, true_lever_scale: 8, first_rotation_deg: 10, max_halvings: 0}
   eye_in_hand: {lever_max: 0.0, true_lever_scale: 30, first_rotation_deg: 15, max_halvings: 0}
-weak_plan: {envelope_radius: 0.03, max_orientation_change_deg: 4, max_bootstrap_rounds: 1}
+# weak plan: limits so tight only a few poses are usable (measured: 3 poses,
+# information ~900 < 1000); the plan is reported weak AND still executed.
+weak_plan: {envelope_radius: 0.15, max_orientation_change_deg: 15, max_bootstrap_rounds: 1}

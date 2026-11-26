@@ -20,6 +20,7 @@ Internally the flow is a generator, so it reads top to bottom.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Generator
 from dataclasses import dataclass, field
 
@@ -64,9 +65,12 @@ class Move:
     joints: Mat               # the IK solution to send as a joint goal (01-architecture §3.2)
     purpose: str
     # True: a short, checked move (bootstrap, centring, recovery) whose path
-    # must be the straight tool motion the check assumed: the driver plans it as
-    # a Cartesian path and reports MOTION_NOT_STARTED if MoveIt cannot plan all of it.
+    # must be the straight tool motion the check assumed: the driver plans a
+    # Cartesian path through ``waypoints`` (tool poses, converted to the IK link,
+    # so an offset TCP still follows the checked path) and reports
+    # MOTION_NOT_STARTED if MoveIt cannot plan all of it.
     cartesian: bool = False
+    waypoints: list[Mat] = field(default_factory=list)
 
 
 @dataclass
@@ -86,6 +90,7 @@ class SessionResult:
     plan_weak: bool = False
     skipped_moves: int = 0
     capture_purposes: list[str] = field(default_factory=list)   # per record
+    skip_reasons: Counter[str] = field(default_factory=Counter)  # why moves were skipped
 
 
 @dataclass
@@ -109,6 +114,7 @@ class _State:
     joints: Mat | None = None
     skipped: int = 0
     seed_tool: Mat | None = None
+    skip_reasons: Counter[str] = field(default_factory=Counter)
     at_verified: bool = False           # robot is at the pose of the last accepted capture
     at_pose: Mat | None = None          # tool pose the robot was last sent to (or the seed)
     X: Mat | None = None                # current estimate (after bootstrap)
@@ -135,16 +141,16 @@ class Session:
     def next_action(self) -> Action:
         return self._pending
 
-    def on_motion(self, outcome: bool | str, joints: Mat | None = None) -> None:
-        """outcome: MOTION_OK / MOTION_NOT_STARTED / MOTION_FAILED (True/False map
-        to OK / NOT_STARTED); joints: measured joints after the motion, if known."""
-        if outcome is True:
-            outcome = MOTION_OK
-        elif outcome is False:
-            outcome = MOTION_NOT_STARTED
-        if outcome not in (MOTION_OK, MOTION_NOT_STARTED, MOTION_FAILED):
+    def on_motion(self, outcome: str, joints: Mat | None = None,
+                  tool_pose: Mat | None = None) -> None:
+        """outcome: MOTION_OK / MOTION_NOT_STARTED / MOTION_FAILED, explicitly (a
+        bare False must never become a safe skip: it may hide a partial motion);
+        joints / tool_pose: measured joints and TF tool pose after the motion, if
+        known. The next move is checked from the measured pose."""
+        if not isinstance(outcome, str) or \
+                outcome not in (MOTION_OK, MOTION_NOT_STARTED, MOTION_FAILED):
             raise ValueError(f'unknown motion outcome {outcome!r}')
-        self._advance(Move, (outcome, joints))
+        self._advance(Move, (outcome, joints, tool_pose))
 
     def on_capture(self, frames: list[Frame], joints: Mat | None = None) -> None:
         """frames may be empty (camera/TF timeout): recorded as a rejected capture."""
@@ -180,33 +186,72 @@ class Session:
         """Limits, then IK, then the motion. True only if the robot reached it.
         Raises _Abort on MOTION_FAILED (unknown robot state)."""
         st = self._st
+        start = st.at_pose if st.at_pose is not None else target
+        waypoints = tf.path(start, target, self.cfg.waypoint_max_angle,
+                            self.cfg.waypoint_max_step) if cartesian else [target]
         if check_limits and st.seed_tool is not None:
-            if st.X is not None and st.Z is not None:
-                pts = moving_points_base(self.mode, target, st.X, st.Z, self.board)
-            else:          # no estimate yet: anywhere within the lever bound (§B2)
-                pts = lever_ball_points(self.mode, target, self.cfg, self.board)
-            reason, _ = limits(target, st.seed_tool, self.cfg, pts)
-            if reason is not None:
-                st.skipped += 1
-                return False
+            # a checked move is limit-checked along its whole straight path (the
+            # carried object can cross a box face between two good end poses);
+            # a planned joint-goal move only at its end (MoveIt guards its path)
+            # segment angle between checked waypoints; 0 for a joint-goal move,
+            # whose path is MoveIt's (only its end pose is checked here)
+            sag_angle = max((tf.rotation_angle(a, b) for a, b in
+                             zip([start] + waypoints[:-1], waypoints, strict=True)),
+                            default=0.0) if cartesian else 0.0
+            # the start too: the first segment bulges out from it as much as any
+            checked = ([start] if cartesian and start is not target else []) + waypoints
+            for G in checked:
+                reason = self._limit_reason(G, sag_angle)
+                if reason is not None:
+                    return self._skip(reason)
         if joints is None:
             res = self.ik(target)
             if res.joints is None:
-                st.skipped += 1
-                return False
+                return self._skip(f'ik_failed: {res.reason or "unknown"}')
             joints = np.asarray(res.joints, dtype=float)
-        reply = yield Move(target, joints, purpose, cartesian)
+        reply = yield Move(target, joints, purpose, cartesian,
+                           waypoints if cartesian else [])
         outcome: str = reply[0]  # type: ignore[index]
         measured: Mat | None = reply[1]  # type: ignore[index]
+        measured_pose: Mat | None = reply[2]  # type: ignore[index]
         if outcome == MOTION_FAILED:
             raise _Abort(MOTION_FAILED_REASON, f'motion for {purpose} failed; check the robot')
         if outcome == MOTION_NOT_STARTED:
-            st.skipped += 1
-            return False
+            if measured is not None:        # fresh joints still order the next spare
+                st.joints = np.asarray(measured, dtype=np.float64)
+            return self._skip('not_started')
         st.at_verified = False
-        st.at_pose = target
+        st.at_pose = target if measured_pose is None else np.asarray(measured_pose, dtype=float)
+        if check_limits and st.seed_tool is not None and measured_pose is not None and \
+                self._limit_reason(st.at_pose) is not None:
+            raise _Abort(MOTION_FAILED_REASON, f'after the {purpose} move the measured tool '
+                         f'pose is outside the limits ({self._limit_reason(st.at_pose)}); '
+                         'check the robot')
         st.joints = np.asarray(measured if measured is not None else joints, dtype=np.float64)
         return True
+
+    def _skip(self, reason: str) -> bool:
+        self._st.skipped += 1
+        self._st.skip_reasons[reason] += 1
+        return False
+
+    def _limit_reason(self, G: Mat, sag_angle: float = 0.0) -> str | None:
+        """Limits at tool pose G. The box margin covers (a) the arc a carried
+        point bulges out between two checked waypoints sag_angle apart, and (b)
+        the rough estimate's error when the carried object comes from it."""
+        st = self._st
+        assert st.seed_tool is not None
+        margin = 0.0
+        if st.X is not None and st.Z is not None:
+            pts = moving_points_base(self.mode, G, st.X, st.Z, self.board)
+            margin += self.cfg.estimate_box_margin
+        else:          # no estimate yet: anywhere within the lever bound (§B2)
+            pts = lever_ball_points(self.mode, G, self.cfg, self.board)
+        r = float(np.max(np.linalg.norm(pts - G[:3, 3], axis=1)))
+        margin += r * (1.0 - np.cos(sag_angle / 2.0))
+        if not self.cfg.box_check_moving_object:
+            margin = 0.0               # the tool origin itself moves on the straight path
+        return limits(G, st.seed_tool, self.cfg, pts, margin, sag_angle / 2.0)[0]
 
     def _recover(self, target: Mat, purpose: str) -> Generator[Action, object, None]:
         # the target is a verified pose that already passed the limits (or the seed)
@@ -214,9 +259,11 @@ class Session:
         if at is not None and tf.translation_distance(at, target) < 1e-9 and \
                 tf.rotation_angle(at, target) < 1e-9:
             return                     # already there (the last move was skipped)
+        before = Counter(self._st.skip_reasons)
         if not (yield from self._move(target, purpose)):
+            why = ', '.join((self._st.skip_reasons - before).keys()) or 'unknown'
             raise _Abort(RECOVERY_FAILED, f'could not return to the last verified pose '
-                         f'({purpose}); stopping')
+                         f'({purpose}: {why}); stopping')
 
     def _finish(self, failure: str | None = None, message: str = '', **kw: object
                 ) -> Finished:
@@ -224,6 +271,7 @@ class Session:
         return Finished(SessionResult(kw.pop('calibration', None),  # type: ignore[arg-type]
                                       self._st.records, failure, message,
                                       skipped_moves=self._st.skipped,
+                                      skip_reasons=Counter(self._st.skip_reasons),
                                       capture_purposes=list(self._st.purposes),
                                       **kw))  # type: ignore[arg-type]
 
@@ -251,6 +299,12 @@ class Session:
             return
         seed_tool, seed_C = seed.tool_pose, seed.camera_T_board
         self._st.seed_tool = seed_tool
+        if self._limit_reason(seed_tool) is not None:     # e.g. outside the safety box
+            yield self._finish(SEED_REJECTED, 'the seed pose is outside the safety box'
+                               + (' (with the carried object within L_max)'
+                                  if cfg.box_check_moving_object else '')
+                               + '; jog inside it or move/enlarge the box')
+            return
         self._st.at_pose = seed_tool
 
         # 2. bootstrap with incremental excitation (§B2)
@@ -280,9 +334,16 @@ class Session:
         # information; the solver's observability gate on the real captures
         # decides. Re-plan from the captured set if this ever leaves runs weak.
         got = 0
-        for cand in p.poses:
-            if got >= p.target:
-                break
+        queue, spares = list(p.poses[:p.target]), list(p.poses[p.target:])
+        while got < p.target and (queue or spares):
+            if queue:
+                cand = queue.pop(0)
+            else:              # a spare: the one nearest the robot's current joints
+                cur = self._st.joints
+                cand = spares[0] if cur is None else min(
+                    spares, key=lambda c: float(np.linalg.norm(c.joints - cur))
+                    if c.joints is not None else np.inf)
+                spares.remove(cand)
             self.phase = MOVING
             if not (yield from self._move(cand.tool_pose, 'plan', cand.joints, cartesian=False)):
                 continue                       # a spare takes its place
@@ -294,14 +355,19 @@ class Session:
         self.phase = SOLVING
         accepted = sum(r.accepted for r in self._st.records)
         weak_msg = p.advice
+        if got < p.target:          # spares ran out: the plan's information is not met
+            weak_msg = (weak_msg + ' ' if weak_msg else '') + (
+                f'only {got} of the {p.target} planned captures succeeded (spares ran out)')
         if accepted < self.solver_cfg.min_captures:
             yield self._finish(NOT_ENOUGH_SAMPLES, f'{accepted} accepted captures. {weak_msg}',
-                               plan=p, bootstrap_rounds=rounds, plan_weak=p.weak)
+                               plan=p, bootstrap_rounds=rounds,
+                               plan_weak=p.weak or got < p.target)
             return
         cal = calibrate(self.mode, self._st.records, self.solver_cfg)
         yield self._finish(None if cal.transform_valid else
                            (cal.failure.reason if cal.failure else 'solve_failed'), weak_msg,
-                           calibration=cal, plan=p, bootstrap_rounds=rounds, plan_weak=p.weak)
+                           calibration=cal, plan=p, bootstrap_rounds=rounds,
+                           plan_weak=p.weak or got < p.target)
 
     def _bootstrap(self, seed_tool: Mat, seed_C: Mat
                    ) -> Generator[Action, object, tuple[Solution, int] | Finished]:
@@ -344,8 +410,9 @@ class Session:
                             # with a rough estimate: predicted view along the whole move
                             tgt = seed_tool @ bs.tool_step(kind, axis,
                                                            sign * v * cfg.step_safety)
-                            return bs.predicted_is_safe(self.mode, est.X, est.Z, seed_tool,
-                                                        tgt, self.board, self.camera, margin)
+                            return bs.predicted_is_safe(
+                                self.mode, est.X, est.Z, seed_tool, tgt, self.board,
+                                self.camera, margin + 2.0 * est.reprojection_max_px)
                         v = bs.safe_step(check, step[kind], step[kind] / 8)
                         if v < step[kind]:
                             clean = False          # visibility already limits this step
@@ -384,9 +451,7 @@ class Session:
                 sol: Solution | None = solve(self.mode, accepted, boot_cfg)
             except SolveError:
                 sol = None
-            settled = sol is not None and prev is not None and \
-                tf.rotation_angle(sol.X, prev.X) < cfg.estimate_change_rotation and \
-                tf.translation_distance(sol.X, prev.X) < cfg.estimate_change_translation
+            settled = sol is not None and prev is not None and settled_estimate(sol, prev, cfg)
             if clean and (settled or best is None):
                 for k in step:
                     step[k] = min(2 * step[k], cap[k])
@@ -396,8 +461,10 @@ class Session:
                 if settled and step['rotation'] >= cap['rotation']:
                     break
         if best is None:
+            why = ', '.join(f'{k} x{n}' for k, n in self._st.skip_reasons.most_common(3))
             return self._finish(BOOTSTRAP_FAILED, f'no usable estimate after {rounds} '
-                                'bootstrap rounds; check L_max and the seed pose')
+                                'bootstrap rounds; check L_max and the seed pose'
+                                + (f' (skipped moves: {why})' if why else ''))
         return best, rounds
 
     def _centre(self, X: Mat, Z: Mat, uncertainty: float) -> Generator[Action, object, None]:
@@ -446,3 +513,10 @@ def seed_tilt(C: Mat, board: BoardSpec) -> float:
     centre = tf.apply(C, np.array([[w / 2, h / 2, 0.0]]))[0]
     cos = abs(float(C[:3, 2] @ centre)) / float(np.linalg.norm(centre))
     return float(np.arccos(np.clip(cos, -1.0, 1.0)))
+
+
+def settled_estimate(sol: Solution, prev: Solution, cfg: SessionConfig) -> bool:
+    """Both X and Z (the prediction uses both) moved less than the thresholds."""
+    return all(tf.rotation_angle(a, b) < cfg.estimate_change_rotation and
+               tf.translation_distance(a, b) < cfg.estimate_change_translation
+               for a, b in ((sol.X, prev.X), (sol.Z, prev.Z)))

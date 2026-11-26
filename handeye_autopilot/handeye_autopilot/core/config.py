@@ -190,6 +190,65 @@ class SessionConfig:
     reserve_factor: float = 1.5
     min_plan_singular_value: float = 1000.0       # scaled information, 1/m (full M2 plans
     #                                               score ~4300; bootstrap alone ~400)
+    # checked short moves: Cartesian waypoint spacing (01-architecture §3.2)
+    waypoint_max_angle: float = math.radians(1.0)    # <= 5 deg (validated)
+    waypoint_max_step: float = 0.005
+    # box clearance for the carried object when its position comes from the
+    # rough estimate (shortcut: a fixed margin, no covariance; revisit in M5)
+    estimate_box_margin: float = 0.02             # m
+
+    def __post_init__(self) -> None:
+        """Reject values that would silently disable a motion guard (a zero
+        safety factor, a NaN radius, ...)."""
+        ints = {'frames_per_capture': 1, 'max_halvings': 0, 'max_bootstrap_rounds': 1,
+                'bootstrap_min_captures': 3, 'centring_steps': 1, 'candidates': 1,
+                'target_captures': 3}
+        for name, lo in ints.items():
+            v = getattr(self, name)
+            if isinstance(v, bool) or not isinstance(v, int) or v < lo:
+                raise ValueError(f'{name} must be an integer >= {lo}')
+        positive = ('first_rotation_step', 'first_translation_step', 'max_rotation_step',
+                    'max_translation_step', 'estimate_change_rotation',
+                    'estimate_change_translation', 'nominal_depth', 'envelope_radius',
+                    'max_orientation_change', 'waypoint_max_angle', 'waypoint_max_step',
+                    'bootstrap_min_rotation', 'bootstrap_min_pair_rotation')
+        non_negative = ('lever_max', 'image_margin_px', 'min_seed_tilt', 'max_tilt',
+                        'max_roll', 'uncertainty_margin_px', 'min_corner_spacing_px',
+                        'min_marker_module_px', 'min_plan_singular_value',
+                        'image_border_frac', 'estimate_box_margin')
+        for name in positive + non_negative + ('step_safety', 'reserve_factor'):
+            v = getattr(self, name)
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+                raise ValueError(f'{name} must be a finite number')
+            if name in positive and v <= 0:
+                raise ValueError(f'{name} must be > 0')
+            if v < 0:
+                raise ValueError(f'{name} must be >= 0')
+        if self.waypoint_max_angle > math.radians(5.0):
+            raise ValueError('waypoint_max_angle must be <= 5 deg (path sag between checks)')
+        if self.step_safety < 1:
+            raise ValueError('step_safety must be >= 1 (the check covers step x safety)')
+        if self.reserve_factor < 1:
+            raise ValueError('reserve_factor must be >= 1')
+        if self.image_border_frac >= 0.5:
+            raise ValueError('image_border_frac must be < 0.5')
+        for name, n in (('depth_range', 2), ('coverage', 2), ('box_xyz', 3), ('box_rpy', 3),
+                        ('box_size', 3)):
+            v = getattr(self, name)
+            if not isinstance(v, (tuple, list)) or len(v) != n:
+                raise ValueError(f'{name} must have {n} values')
+            if not all(isinstance(x, (int, float)) and not isinstance(x, bool) and
+                       math.isfinite(x) for x in v):
+                raise ValueError(f'{name} must hold finite numbers')
+        if not 0 < self.depth_range[0] < self.depth_range[1]:
+            raise ValueError('depth_range must be 0 < near < far')
+        if not 0 <= self.coverage[0] < self.coverage[1] <= 1:
+            raise ValueError('coverage must be 0 <= low < high <= 1')
+        if min(self.box_size) <= 0:
+            raise ValueError('box_size must be positive')
+        if self.first_rotation_step > self.max_rotation_step or \
+                self.first_translation_step > self.max_translation_step:
+            raise ValueError('first bootstrap steps must not exceed the max steps')
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

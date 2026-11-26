@@ -65,6 +65,7 @@ class Plan:
     weak: bool                             # information below the threshold
     rejections: Counter[str] = field(default_factory=Counter)
     advice: str = ''                       # what to change when weak (shown before execution)
+    ik_errors: Counter[str] = field(default_factory=Counter)   # IK failure detail (MoveIt code)
 
 
 # -- 1. sampling ----------------------------------------------------------
@@ -152,16 +153,21 @@ def marker_module_px(C: Mat, camera: CameraModel, board: BoardSpec) -> float:
 
 # -- 4. robot-agnostic limits ----------------------------------------------
 
-def box_contains(points_base: Mat, cfg: SessionConfig) -> bool:
-    """Are all points (base frame) inside the posed safety box?"""
+def box_contains(points_base: Mat, cfg: SessionConfig, margin: float = 0.0) -> bool:
+    """Are all points (base frame) inside the posed safety box, at least
+    ``margin`` (m) from every face?"""
     B = tf.make(Rotation.from_euler('xyz', cfg.box_rpy), np.asarray(cfg.box_xyz, dtype=float))
     local = tf.apply(tf.inv(B), np.atleast_2d(points_base))
-    half = np.asarray(cfg.box_size) / 2
+    half = np.asarray(cfg.box_size) / 2 - margin
     return bool(np.all(np.abs(local) <= half))
 
 
 def limits(G: Mat, seed_tool: Mat, cfg: SessionConfig,
-           moving_points: Mat | None = None) -> tuple[str | None, str]:
+           moving_points: Mat | None = None, box_margin: float = 0.0,
+           orientation_margin: float = 0.0) -> tuple[str | None, str]:
+    """(margins: a point between two checked waypoints can bulge out of the box
+    by the arc sag, and its orientation from the seed exceed the endpoints' by
+    up to half the segment angle; the caller passes both.)"""
     """Safety box (toggle), envelope around the seed, orientation limit from the
     seed. The envelope and orientation limits always apply; the box adds a
     user-placed volume on top (01-architecture §3.4)."""
@@ -169,13 +175,13 @@ def limits(G: Mat, seed_tool: Mat, cfg: SessionConfig,
     if cfg.box_enabled:
         pts = p[None] if moving_points is None or not cfg.box_check_moving_object else \
             np.vstack([p[None], moving_points])
-        if not box_contains(pts, cfg):
+        if not box_contains(pts, cfg, box_margin):
             return OUTSIDE_BOX, 'outside the safety box'
     d = float(np.linalg.norm(p - seed_tool[:3, 3]))
     if d > cfg.envelope_radius:
         return OUTSIDE_ENVELOPE, f'{d:.2f} m from the seed > {cfg.envelope_radius}'
     a = tf.rotation_angle(G, seed_tool)
-    if a > cfg.max_orientation_change:
+    if a > cfg.max_orientation_change - orientation_margin:
         return ORIENTATION_LIMIT, f'{np.degrees(a):.0f} deg from the seed orientation'
     return None, ''
 
@@ -234,19 +240,13 @@ def information(mode: str, X: Mat, Z: Mat, tool_poses: list[Mat], camera: Camera
 
 
 def _relative(Ra: Mat, Rb: Mat) -> tuple[Mat, Mat]:
-    """Angles (...,) and unit axes (..., 3) of Ra^T Rb, batched over leading dims."""
+    """Angles (...,) and unit axes (..., 3) of Ra^T Rb, batched over leading dims
+    (SciPy rotation vectors: robust near 0 and near a half-turn)."""
     rel = np.einsum('...ji,...jk->...ik', Ra, Rb)
-    cos = np.clip((np.trace(rel, axis1=-2, axis2=-1) - 1.0) / 2.0, -1.0, 1.0)
-    ang = np.arccos(cos)
-    v = np.stack([rel[..., 2, 1] - rel[..., 1, 2], rel[..., 0, 2] - rel[..., 2, 0],
-                  rel[..., 1, 0] - rel[..., 0, 1]], axis=-1)
-    n = np.linalg.norm(v, axis=-1, keepdims=True)
-    axes = np.where(n > 1e-12, v / np.maximum(n, 1e-12), 0.0)
-    # near a half-turn the skew part vanishes; take the axis from SciPy there
-    bad = (n[..., 0] < 1e-6) & (ang > np.pi / 2)
-    if np.any(bad):
-        rv = Rotation.from_matrix(rel[bad]).as_rotvec()
-        axes[bad] = rv / np.linalg.norm(rv, axis=-1, keepdims=True)
+    shape = rel.shape[:-2]
+    rv = Rotation.from_matrix(rel.reshape(-1, 3, 3)).as_rotvec().reshape(shape + (3,))
+    ang = np.linalg.norm(rv, axis=-1)
+    axes = np.where(ang[..., None] > 0, rv / np.maximum(ang, 1e-300)[..., None], 0.0)
     return ang, axes
 
 
@@ -326,18 +326,23 @@ def plan(mode: str, X: Mat, Z: Mat, camera: CameraModel, board: BoardSpec, seed_
     candidates run out before the information clears, the plan is weak.
     """
     rejections: Counter[str] = Counter()
+    ik_errors: Counter[str] = Counter()
     ok: list[Candidate] = []
     for C in sample(camera, board, cfg, seed):
         c = Candidate(C)
         c.reject, c.detail = visibility(C, camera, board, cfg, uncertainty_px)
         if c.reject is None:
             c.tool_pose = handeye.tool_pose_for(mode, X, Z, C)
+            # the carried object comes from the estimate: same margin as execution
             c.reject, c.detail = limits(c.tool_pose, seed_tool, cfg,
-                                        moving_points_base(mode, c.tool_pose, X, Z, board))
+                                        moving_points_base(mode, c.tool_pose, X, Z, board),
+                                        cfg.estimate_box_margin
+                                        if cfg.box_check_moving_object else 0.0)
         if c.reject is None:
             res = ik(c.tool_pose)
             if res.joints is None:
                 c.reject, c.detail = IK_FAILED, res.reason
+                ik_errors[res.reason or 'unknown'] += 1
             else:
                 c.joints = np.asarray(res.joints, dtype=float)
         if c.reject is None:
@@ -366,12 +371,16 @@ def plan(mode: str, X: Mat, Z: Mat, camera: CameraModel, board: BoardSpec, seed_
     n_spares = min(int(np.ceil(len(main) * (cfg.reserve_factor - 1.0))), budget - len(main))
     spares = rest[:n_spares]
     poses = order(main, start_joints) + order(spares, main[-1].joints if main else None)
-    weak = current < cfg.min_plan_singular_value
+    # weak: not informative enough, or fewer usable poses than the configured
+    # target (prior captures alone must not make an empty plan look strong)
+    weak = current < cfg.min_plan_singular_value or len(main) < cfg.target_captures
     return Plan(poses, len(main), current, weak, rejections,
-                weak_advice(rejections, len(ok)) if weak else '')
+                weak_advice(rejections, len(ok), cfg.target_captures, current,
+                            cfg.min_plan_singular_value) if weak else '', ik_errors)
 
 
-def weak_advice(rejections: Counter[str], usable: int) -> str:
+def weak_advice(rejections: Counter[str], usable: int, target: int = 0,
+                information: float = 0.0, threshold: float = 0.0) -> str:
     """What to change when a plan is weak, from what rejected the candidates."""
     tips = {OUTSIDE_BOX: 'enlarge or move the safety box',
             OUTSIDE_ENVELOPE: 'widen the envelope radius',
@@ -382,8 +391,10 @@ def weak_advice(rejections: Counter[str], usable: int) -> str:
             TOO_SMALL: 'use a bigger board or bring it closer',
             BACK_FACING: 'reduce the maximum tilt'}
     top = [r for r, _ in rejections.most_common() if r in tips][:2]
-    text = (f'plan is weak: only {usable} usable candidate poses and not enough rotation '
-            'information among them')
+    text = f'plan is weak: {usable} usable candidate poses'
+    if usable < target:
+        text += f' for a target of {target}'
+    text += f'; rotation information {information:.0f} (needs {threshold:.0f})'
     if top:
         text += '; most were rejected as ' + ', '.join(
             f'{r} ({rejections[r]})' for r in top) + ': ' + '; '.join(tips[r] for r in top)

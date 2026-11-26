@@ -10,6 +10,7 @@ from handeye_autopilot.core.session import Move
 from m2_sim import SPEC, FakeIK, run
 import numpy as np
 import pytest
+from scipy.spatial.transform import Rotation
 
 MODES = ['eye_to_hand', 'eye_in_hand']
 TOL = SPEC['tolerance']
@@ -115,10 +116,13 @@ def test_weak_plan_is_reported():
             max_orientation_change=math.radians(w['max_orientation_change_deg']),
             max_bootstrap_rounds=w['max_bootstrap_rounds'])
     r, *_ = run('eye_to_hand', session_cfg=c)
-    assert r.plan_weak and r.plan.weak
-    assert r.plan.information < c.min_plan_singular_value
-    # the run still finishes; here the final solve rejects the tiny rotations
-    assert r.failure == 'degenerate_rotation' or 'weak' in r.message
+    assert r.plan_weak and r.plan.weak and r.plan.advice
+    assert r.plan.target < c.target_captures or \
+        r.plan.information < c.min_plan_singular_value
+    # reported, and still executed: every planned pose was attempted and captured
+    planned = sum(1 for why in r.capture_purposes if why == 'plan')
+    assert planned == r.plan.target > 0
+    assert 'weak' in r.message
     assert r.plan.rejections['outside_envelope'] + r.plan.rejections['orientation_limit'] > 0
 
 
@@ -138,7 +142,10 @@ def test_driver_protocol_is_enforced():
     s = session.Session('eye_to_hand', *(__import__('m1b_sim').BOARD,
                                          __import__('m1b_sim').CAMERA), FakeIK(0, 2))
     with pytest.raises(RuntimeError, match='Capture'):
-        s.on_motion(True)          # first action is a capture, not a move
+        s.on_motion('ok')          # first action is a capture, not a move
+    for bare in (True, False, 'false', None):
+        with pytest.raises(ValueError):          # only the explicit outcomes are accepted
+            s.on_motion(bare)
     with pytest.raises(ValueError):
         session.Session('sideways', __import__('m1b_sim').BOARD,
                         __import__('m1b_sim').CAMERA, FakeIK(0, 2))
@@ -192,3 +199,179 @@ def test_no_recovery_move_to_where_the_robot_already_is():
     assert r.failure is None, r.message
     moves = [a for a in log if isinstance(a, Move)]
     assert moves[0].purpose == 'bootstrap' and moves[1].purpose == 'bootstrap'
+
+
+def test_seed_outside_the_safety_box_is_rejected():
+    far = cfg(box_enabled=True, box_xyz=(5.0, 5.0, 5.0), box_size=(0.5, 0.5, 0.5))
+    log = []
+    r, *_ = run('eye_to_hand', session_cfg=far, log=log)
+    assert r.failure == session.SEED_REJECTED and 'safety box' in r.message
+    assert not [a for a in log if isinstance(a, Move)]          # nothing was sent
+
+
+def test_checked_moves_carry_dense_waypoints_on_the_straight_path():
+    log = []
+    r, *_ = run('eye_in_hand', log=log)
+    assert r.failure is None, r.message
+    c = SessionConfig()
+    for m in (a for a in log if isinstance(a, Move) and a.cartesian):
+        assert m.waypoints and np.allclose(m.waypoints[-1], m.tool_pose)
+        for a, b in zip(m.waypoints, m.waypoints[1:], strict=False):
+            assert tf.rotation_angle(a, b) <= c.waypoint_max_angle + 1e-9
+            assert tf.translation_distance(a, b) <= c.waypoint_max_step + 1e-9
+    for m in (a for a in log if isinstance(a, Move) and not a.cartesian):
+        assert m.waypoints == []
+
+
+def test_box_is_checked_along_a_checked_path_not_only_at_its_ends():
+    """eye_in_hand, camera 200 mm from the tool: a +-10 deg swing keeps the camera
+    inside the box at both ends but crosses the face at 0 deg in between."""
+    from m1b_sim import BOARD, CAMERA
+    c = cfg(box_enabled=True, box_check_moving_object=True, box_xyz=(0.0, 0.0, 0.0),
+            box_size=(2.0, 2.0, 2 * 0.198), envelope_radius=1.0)
+    s = session.Session('eye_in_hand', BOARD, CAMERA, FakeIK(0, 3), cfg=c)
+    X = tf.make(np.eye(3), [0.0, 0.0, 0.2])                    # camera 200 mm along tool z
+    s._st.X, s._st.Z = X, np.eye(4)
+    s._st.seed_tool = np.eye(4)
+
+    def tool(deg):                                             # swing about tool x
+        return tf.make(Rotation.from_euler('x', deg, degrees=True), np.zeros(3))
+    for end in (-10, 10):                                      # ends: camera z = 0.197
+        assert abs((tool(end) @ X)[2, 3]) < 0.198
+    s._st.at_pose = tool(-10)
+    gen = s._move(tool(10), 'centring')
+    with pytest.raises(StopIteration) as stop:
+        next(gen)                                              # refused before any Move
+    assert stop.value.value is False and s._st.skipped == 1
+
+
+def test_bootstrap_growth_needs_both_x_and_z_settled():
+    from handeye_autopilot.core.session import settled_estimate
+    from handeye_autopilot.core.solver import Solution
+    c = SessionConfig()
+    a = Solution.__new__(Solution)
+    b = Solution.__new__(Solution)
+    a.X, a.Z = np.eye(4), np.eye(4)
+    b.X, b.Z = np.eye(4), tf.make(np.eye(3), [0.05, 0, 0])   # Z moved 5 cm
+    assert settled_estimate(a, a, c)
+    assert not settled_estimate(b, a, c)
+
+
+def _eih_box_session(**over):
+    """eye_in_hand session with a known estimate: camera 200 mm along tool z."""
+    from m1b_sim import BOARD, CAMERA
+    c = cfg(box_enabled=True, box_check_moving_object=True, box_xyz=(0.0, 0.0, 0.0),
+            envelope_radius=1.0, **over)
+    s = session.Session('eye_in_hand', BOARD, CAMERA, FakeIK(0, 3), cfg=c)
+    s._st.X, s._st.Z = tf.make(np.eye(3), [0.0, 0.0, 0.2]), np.eye(4)
+    s._st.seed_tool = np.eye(4)
+    return s
+
+
+def _swing(deg):
+    return tf.make(Rotation.from_euler('x', deg, degrees=True), np.zeros(3))
+
+
+def _refused(s, start, target):
+    s._st.at_pose = start
+    gen = s._move(target, 'centring')
+    try:
+        next(gen)
+    except StopIteration as stop:
+        return stop.value is False
+    return False
+
+
+def test_box_margin_covers_the_arc_between_waypoints():
+    """5 deg waypoints from -12.5 to +12.5 deg skip 0 deg, where the camera
+    (on the arc) is highest: the sag margin must refuse it."""
+    half = 0.1999
+    s = _eih_box_session(box_size=(2.0, 2.0, 2 * half), waypoint_max_angle=math.radians(5),
+                         estimate_box_margin=0.0)
+    for deg in (-7.5, -2.5, 2.5, 7.5, 12.5):                # the waypoints themselves pass
+        assert (_swing(deg) @ s._st.X)[2, 3] < half
+    assert _refused(s, _swing(-12.5), _swing(12.5))
+
+
+def test_estimate_margin_on_the_carried_object():
+    """1 cm predicted clearance: allowed with no estimate margin, refused with 2 cm."""
+    for margin, refused in ((0.0, False), (0.02, True)):
+        s = _eih_box_session(box_size=(2.0, 2.0, 2 * 0.21), estimate_box_margin=margin)
+        assert _refused(s, _swing(0), _swing(0.5)) is refused
+
+
+def test_measured_pose_outside_the_limits_stops_the_run():
+    s = _eih_box_session(box_size=(2.0, 2.0, 2 * 0.25))
+    s._st.at_pose = np.eye(4)
+    gen = s._move(_swing(1), 'centring')
+    assert isinstance(next(gen), Move)
+    drifted = tf.make(np.eye(3), [0.0, 0.0, 0.2])            # camera would be at 0.4 m
+    with pytest.raises(session._Abort, match='measured tool pose'):
+        gen.send(('ok', None, drifted))
+
+
+def test_skip_reasons_keep_the_ik_error():
+    s = _eih_box_session(box_size=(2.0, 2.0, 2.0))
+    from handeye_autopilot.core.planning import IKResult
+    s.ik = lambda G: IKResult(None, 'TIMED_OUT')
+    s._st.at_pose = np.eye(4)
+    assert _refused(s, np.eye(4), _swing(1))
+    assert s._st.skip_reasons == {'ik_failed: TIMED_OUT': 1}
+
+
+def test_spares_are_taken_nearest_to_the_current_joints():
+    log = []
+    plan_moves = []
+
+    def fail(index, purpose):
+        if purpose == 'plan':
+            plan_moves.append(index)
+            return len(plan_moves) <= 6          # the first six planned poses never start
+        return None
+    r, *_ = run('eye_to_hand', log=log, fail_move=fail)
+    assert r.failure is None, r.message
+    moves = [a for a in log if isinstance(a, Move)]
+    target = r.plan.target
+    spare_ids = {id(c) for c in r.plan.poses[target:]}
+    plan = [m for m in moves if m.purpose == 'plan']
+    # the first spare is sent after all main poses; it must be the spare nearest
+    # the joints the robot was at (the last main pose that ran)
+    k = next(i for i, m in enumerate(plan) if any(
+        np.array_equal(m.joints, c.joints) for c in r.plan.poses[target:]))
+    prev = plan[k - 1].joints
+    best = min(r.plan.poses[target:], key=lambda c: np.linalg.norm(c.joints - prev))
+    assert np.array_equal(plan[k].joints, best.joints) and spare_ids
+
+
+def test_orientation_limit_holds_between_waypoints():
+    """+179.6 -> -179.6 deg about z: both ends are inside a 179.8 deg limit, the
+    short path passes 180 deg in between; the move must be refused."""
+    s = _eih_box_session(box_size=(4.0, 4.0, 4.0), max_orientation_change=math.radians(179.8))
+
+    def yaw(d):
+        return tf.make(Rotation.from_euler('z', d, degrees=True), np.zeros(3))
+    for d in (179.6, -179.6):
+        assert tf.rotation_angle(yaw(d), np.eye(4)) < math.radians(179.8)
+    assert _refused(s, yaw(179.6), yaw(-179.6))
+    assert _refused(s, yaw(170), yaw(171)) is False          # well inside: allowed
+
+
+def test_path_start_is_checked_with_the_margins():
+    """The robot is at a pose inside the box but within the estimate margin of a
+    face: a checked move away from it is refused (its first segment could bulge out)."""
+    s = _eih_box_session(box_size=(4.0, 4.0, 2 * 0.205), estimate_box_margin=0.02)
+    start = tf.make(np.eye(3), [0.0, 0.0, -0.01])            # camera at z = 0.19
+    target = tf.make(np.eye(3), [0.0, 0.0, -0.05])           # camera at z = 0.15, fine
+    assert _refused(s, start, target)
+    assert _refused(s, target, tf.make(np.eye(3), [0.0, 0.0, -0.06])) is False
+
+
+def test_not_started_reply_updates_the_joints():
+    s = _eih_box_session(box_size=(4.0, 4.0, 4.0))
+    s._st.at_pose = np.eye(4)
+    gen = s._move(_swing(1), 'centring')
+    next(gen)
+    fresh = np.arange(7.0)
+    with pytest.raises(StopIteration):
+        gen.send(('not_started', fresh, None))
+    assert np.array_equal(s._st.joints, fresh)

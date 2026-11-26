@@ -110,11 +110,8 @@ def predicted_is_safe(mode: str, X: Mat, Z: Mat, start_tool: Mat, target_tool: M
     """With a rough estimate: is the board predicted in view along the whole move?"""
     from .handeye import predict_board
     pts = board.outline_samples(12)
-    rel = tf.inv(start_tool) @ target_tool
-    rv, t = Rotation.from_matrix(rel[:3, :3]).as_rotvec(), rel[:3, 3]
-    for frac in FRACTIONS:
-        step = tf.make(Rotation.from_rotvec(rv * frac), t * frac)
-        C = predict_board(mode, X, Z, start_tool @ step)
+    for frac in FRACTIONS:          # the same straight path the Cartesian waypoints follow
+        C = predict_board(mode, X, Z, tf.interpolate(start_tool, target_tool, frac))
         if not _visible_all(tf.apply(C, pts), camera, margin):
             return False
     return True

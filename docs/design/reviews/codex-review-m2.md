@@ -76,3 +76,21 @@ Third-pass findings and fixes:
   joints (probe: `executed_trajectory` is always empty on Jazzy).
 - Redundant recovery could abort a run; double rounding of the move budget;
   probe checks for the trajectory evidence → fixed with tests.
+
+## Re-review at `xhigh` reasoning effort (2026-11-27)
+
+Earlier passes ran at the model's default effort (unset in the Codex config).
+The maintainer set `model_reasoning_effort = "xhigh"` and asked for a
+comparison. Prompts and raw outputs: [`m2-xhigh/`](m2-xhigh/).
+
+The `xhigh` full review found 5 blockers and 5 should-fixes, nearly all new:
+config values that disable guards, the safety box at the seed and along
+paths, offset-TCP Cartesian paths, boolean motion outcomes, Cartesian
+cancellation, X+Z settling, underfilled plans, vacuous tests, probe evidence,
+IK error detail. Two verification passes followed; each further round found
+narrower issues (measured vs commanded pose, estimate margin, spare order,
+start-of-path and orientation between waypoints), all fixed with tests. The
+offset-TCP finding was confirmed in MoveIt: 4.52 mm TCP deviation with the end
+pose only vs 0.014 mm with dense converted waypoints (`docs/probes/`).
+Remaining items are M3 driver-contract notes (01-architecture §3.2) and the
+Lyrical/Rolling probe runs.

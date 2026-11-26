@@ -22,11 +22,14 @@ import threading
 import time
 
 from builtin_interfaces.msg import Duration
-from moveit_msgs.srv import GetPositionIK
+from geometry_msgs.msg import Pose
+from moveit_msgs.srv import GetCartesianPath, GetPositionFK, GetPositionIK
+import numpy as np
 from pymoveit2 import MoveIt2
 import rclpy
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
+from scipy.spatial.transform import Rotation
 import yaml
 
 JOINTS = [f'panda_joint{i}' for i in range(1, 8)]
@@ -126,6 +129,72 @@ def motion(m: MoveIt2, goal: list[float] | None, cancel: bool = False,
     return out
 
 
+def _mat(pose) -> np.ndarray:
+    T = np.eye(4)
+    T[:3, :3] = Rotation.from_quat([pose.orientation.x, pose.orientation.y,
+                                    pose.orientation.z, pose.orientation.w]).as_matrix()
+    T[:3, 3] = [pose.position.x, pose.position.y, pose.position.z]
+    return T
+
+
+def _pose(T: np.ndarray) -> Pose:
+    p = Pose()
+    p.position.x, p.position.y, p.position.z = (float(v) for v in T[:3, 3])
+    q = Rotation.from_matrix(T[:3, :3]).as_quat()
+    p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w = (float(v) for v in q)
+    return p
+
+
+def _call(client, req, timeout: float = 15.0):
+    fut = client.call_async(req)
+    t0 = time.time()
+    while not fut.done() and time.time() - t0 < timeout:
+        time.sleep(0.01)
+    return fut.result() if fut.done() else None
+
+
+def offset_tcp_path(cart, fk, link8, offset: float, degrees: float, dense: bool) -> dict:
+    """01-architecture §3.2: a rotation about a TCP ``offset`` m along link8 z
+    (not in the URDF), planned with GetCartesianPath for link8 either from the
+    end pose alone or through dense waypoints converted from the TCP path.
+    Measures how far the TCP strays on the planned trajectory (ideal: 0)."""
+    off = np.eye(4)
+    off[2, 3] = offset
+    tcp0 = link8 @ off
+
+    def link_for(deg):
+        rot = np.eye(4)
+        rot[:3, :3] = Rotation.from_euler('x', deg, degrees=True).as_matrix()
+        return tcp0 @ rot @ np.linalg.inv(off)
+    steps = [degrees] if not dense else list(np.linspace(1.0, degrees, int(degrees)))
+    req = GetCartesianPath.Request()
+    req.header.frame_id = 'panda_link0'
+    req.start_state.is_diff = True
+    req.group_name, req.link_name = 'panda_arm', 'panda_link8'
+    req.waypoints = [_pose(link_for(d)) for d in steps]
+    req.max_step, req.avoid_collisions = 0.0025, True
+    res = _call(cart, req)
+    if res is None:
+        return {'done': False}
+    pts = res.solution.joint_trajectory.points
+    names = res.solution.joint_trajectory.joint_names
+    worst = 0.0
+    for pt in pts:
+        f = GetPositionFK.Request()
+        f.header.frame_id = 'panda_link0'
+        f.fk_link_names = ['panda_link8']
+        f.robot_state.joint_state.name = list(names)
+        f.robot_state.joint_state.position = list(pt.positions)
+        r = _call(fk, f)
+        if r is None or not r.pose_stamped:
+            return {'done': False, 'fk_failed': True}
+        tcp = _mat(r.pose_stamped[0].pose) @ off
+        worst = max(worst, float(np.linalg.norm(tcp[:3, 3] - tcp0[:3, 3])))
+    return {'done': True, 'waypoints': len(steps), 'fraction': round(res.fraction, 4),
+            'points': len(pts), 'error_code': int(res.error_code.val),
+            'tcp_max_deviation_mm': round(worst * 1000, 3)}
+
+
 def ik_call(node, client, pose, timeout: Duration) -> dict:
     req = GetPositionIK.Request()
     req.ik_request.group_name = 'panda_arm'
@@ -200,6 +269,15 @@ def main() -> None:
         found['cartesian_ok'] = motion(m, None, submit=cart(0.05))
         found['cartesian_back'] = motion(m, None, submit=cart(0.0))
         found['cartesian_impossible'] = motion(m, None, submit=cart(3.0))
+        cart_srv = node.create_client(GetCartesianPath, 'compute_cartesian_path',
+                                      callback_group=cb)
+        fk_srv = node.create_client(GetPositionFK, 'compute_fk', callback_group=cb)
+        if cart_srv.wait_for_service(timeout_sec=5.0) and fk_srv.wait_for_service(timeout_sec=5.0):
+            link8 = _mat(p0.pose)
+            found['offset_tcp_endpoint_only'] = offset_tcp_path(cart_srv, fk_srv, link8,
+                                                                0.3, 20.0, dense=False)
+            found['offset_tcp_dense_waypoints'] = offset_tcp_path(cart_srv, fk_srv, link8,
+                                                                  0.3, 20.0, dense=True)
     fk = m.compute_fk()
     if fk is not None and ik.wait_for_service(timeout_sec=5.0):
         pose = fk[0] if isinstance(fk, list) else fk
@@ -229,10 +307,19 @@ def main() -> None:
         missing.append('cancel_mid_motion.planned_points_missing')
     if found.get('cartesian_ok', {}).get('status') != 4:
         missing.append('cartesian_ok.not_succeeded')
-    if found.get('cartesian_impossible', {}).get('status') == 4:
-        missing.append('cartesian_impossible.succeeded')
-    if found['cancel_mid_motion'].get('status') == 4:
-        missing.append('cancel_mid_motion.ended_succeeded')
+    # an impossible Cartesian path must be refused before anything is sent
+    ci = found.get('cartesian_impossible', {})
+    if ci.get('submitted') is not False or 'reached only' not in str(ci.get('last_failure')):
+        missing.append('cartesian_impossible.not_refused_for_path_fraction')
+    for k in ('offset_tcp_endpoint_only', 'offset_tcp_dense_waypoints'):
+        r = found.get(k, {})
+        if r.get('fraction') != 1.0 or not r.get('points') or \
+                r.get('tcp_max_deviation_mm') is None:
+            missing.append(k)
+    # the cancel must be accepted and end the goal as CANCELED (not some other abort)
+    cm = found['cancel_mid_motion']
+    if cm.get('cancel_request_returned') is not True or cm.get('status') != 5:
+        missing.append('cancel_mid_motion.not_canceled')
     for k in ('ik_whole_seconds', 'ik_nanosec_only'):
         if isinstance(found.get(k), dict) and found[k].get('error_code') != 1:
             missing.append(f'{k}.reachable_pose_failed')

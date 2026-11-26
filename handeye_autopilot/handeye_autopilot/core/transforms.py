@@ -52,3 +52,23 @@ def apply(T: Mat, points: Mat) -> Mat:
     """Transform (N, 3) points."""
     P = np.asarray(points, dtype=float).reshape(-1, 3)
     return np.asarray(P @ T[:3, :3].T + T[:3, 3], dtype=np.float64)
+
+
+def interpolate(start: Mat, target: Mat, s: float) -> Mat:
+    """The straight tool path start -> target at fraction s in [0, 1]: the
+    relative motion's rotation vector and translation (in the start frame)
+    scaled by s. Position moves on a straight line in the parent frame and
+    orientation by slerp, as a Cartesian path planner interpolates."""
+    rel = inv(start) @ target
+    rv = Rotation.from_matrix(rel[:3, :3]).as_rotvec()
+    return np.asarray(start @ make(Rotation.from_rotvec(rv * s), rel[:3, 3] * s),
+                      dtype=np.float64)
+
+
+def path(start: Mat, target: Mat, max_angle: float, max_step: float) -> list[Mat]:
+    """Poses along the straight tool path, excluding start, including target,
+    no further apart than max_angle (rad) / max_step (m)."""
+    rel = inv(start) @ target
+    ang = float(np.linalg.norm(Rotation.from_matrix(rel[:3, :3]).as_rotvec()))
+    n = max(1, int(np.ceil(max(ang / max_angle, float(np.linalg.norm(rel[:3, 3])) / max_step))))
+    return [interpolate(start, target, k / n) for k in range(1, n + 1)]
