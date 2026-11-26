@@ -643,6 +643,7 @@ def test_publish_result_refuses_a_changed_camera_subtree(tmp_path):
                        'subtree': transform_dict(T, 'cam', 'cam_optical')}}
     f = tmp_path / 'result.yaml'
     f.write_text(yaml.safe_dump(doc))
+    (tmp_path / '.publishable').touch()               # as after a SUCCEEDED run
     node = ResultPublisher(str(f), listen=0.0)
     try:
         node.buffer.set_transform_static(tf_tools.to_msg(T, 'cam', 'cam_optical'), 'test')
@@ -751,6 +752,7 @@ def test_publish_result_refuses_a_moving_subtree_link(tmp_path):
                        'subtree': transform_dict(T, 'cam', 'cam_optical')}}
     f = tmp_path / 'result.yaml'
     f.write_text(yaml.safe_dump(doc))
+    (tmp_path / '.publishable').touch()               # as after a SUCCEEDED run
     node = ResultPublisher(str(f), listen=0.0)
     try:
         # published for real on /tf by another node, received through the
@@ -803,3 +805,71 @@ def test_nan_joint_states_do_not_clear_the_fault(world_factory):
     r = d.call(d.clear_fault)
     stop.set()
     assert not r.success and 'NaN' in r.message
+
+
+# -- review fixes (M3 xhigh pass 5) -------------------------------------------------
+
+def test_result_without_the_success_marker_is_not_published(tmp_path):
+    from handeye_autopilot.core.results import transform_dict
+    from handeye_autopilot.ros.publish_result import ResultPublisher
+    import yaml
+    doc = {'publish': {'ok': True, 'transform': transform_dict(np.eye(4), 'base_link', 'cam')}}
+    f = tmp_path / 'result.yaml'
+    f.write_text(yaml.safe_dump(doc))
+    with pytest.raises(SystemExit, match='publishable'):
+        ResultPublisher(str(f), listen=0.0)
+
+
+def test_successful_run_leaves_the_marker(world_factory):
+    import os
+    w = world_factory()
+    res = _finish_run(w)
+    assert res.error_code == R.NONE
+    assert os.path.exists(os.path.join(os.path.dirname(res.result_file), '.publishable'))
+
+
+def test_competing_parent_on_tf_is_refused():
+    from handeye_autopilot.ros import tf_tools
+    from tf2_msgs.msg import TFMessage
+    static, moving = tf_tools.StaticLinks(), tf_tools.StaticLinks()
+    static.add(TFMessage(transforms=[tf_tools.to_msg(np.eye(4), 'cam', 'opt')]))
+    moving.add(TFMessage(transforms=[tf_tools.to_msg(np.eye(4), 'other_driver', 'opt')]))
+    sub = tf_tools.camera_subtree({'opt': 'cam'}, static, 'opt', 'base_link', '', moving)
+    assert sub.error and 'other_driver' in sub.error
+
+
+def test_unexpandable_profiles_dir_is_a_rejection(world_factory):
+    w = world_factory(node_over={'profiles_dir': '~no_such_user_xyz/profiles'})
+    assert not w.driver.send(profile='p').accepted
+    assert w.driver.send().accepted
+
+
+def test_target_below_the_solver_minimum_is_invalid(world_factory, tmp_path):
+    (tmp_path / 'low.yaml').write_text('session:\n  target_captures: 4\n')
+    w = world_factory(node_over={'profiles_dir': str(tmp_path)})
+    res = w.result(w.driver.send(profile='low')).result
+    assert res.error_code == R.INVALID_GOAL and 'min_captures' in res.message
+
+
+def test_a_moving_joint_on_another_publisher_blocks_clearing(world_factory):
+    from sensor_msgs.msg import JointState
+    w = world_factory()
+    d = w.driver
+    assert d.call(d.inject_fault).success
+    pub = w.client.create_publisher(JointState, '/joint_states', 10)
+    stop = threading.Event()
+
+    def two_publishers():
+        k = 0
+        while not stop.is_set():
+            k += 1
+            now = w.client.get_clock().now().to_msg()
+            pub.publish(JointState(header=JointState().header.__class__(stamp=now),
+                                   name=['a1', 'a2'], position=[0.1, 0.2]))
+            pub.publish(JointState(header=JointState().header.__class__(stamp=now),
+                                   name=['rail'], position=[0.01 * k]))     # moving, no velocity
+            time.sleep(0.02)
+    threading.Thread(target=two_publishers, daemon=True).start()
+    r = d.call(d.clear_fault)
+    stop.set()
+    assert not r.success and 'changing' in r.message

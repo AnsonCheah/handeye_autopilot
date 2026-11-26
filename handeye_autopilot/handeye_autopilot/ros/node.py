@@ -63,6 +63,7 @@ from ..core.results import result_dict, transform_dict
 from . import params as P
 from . import tf_tools, viz
 from .camera_input import CameraInfoError, ImageBuffer, camera_model, same_info
+from .publish_result import PUBLISHABLE
 
 R = Calibrate.Result
 FB = Calibrate.Feedback
@@ -97,6 +98,7 @@ class RunState:
     info_changed: bool = False          # any differing CameraInfo arrived since
     jumps: int = 0                      # clock-jump count at acceptance
     finalizing: bool = False            # past the point where a cancel can win
+    max_now: float = 0.0                # latest node time seen (sampled jump check)
     records: list[CaptureRecord] = field(default_factory=list)
 
 
@@ -309,11 +311,14 @@ class CalibrationNode(Node):
                 if any(m.velocity and max(abs(v) for v in m.velocity) > vmax for m in msgs):
                     res.success, res.message = False, 'joints are still moving'
                     return res
-                pos = [m.position for m in msgs if len(m.position) == len(msgs[0].position)]
-                if not pos or not len(pos[0]):
+                series: dict[str, list[float]] = {}      # per joint NAME (several
+                for m in msgs:                            # publishers may share the topic)
+                    for name, p in zip(m.name, m.position, strict=False):
+                        series.setdefault(name, []).append(p)
+                if not series:
                     res.success, res.message = False, 'joint_states carry no positions'
                     return res
-                span = float(np.max(np.ptp(np.asarray(pos, dtype=float), axis=0)))
+                span = max(float(np.ptp(v)) for v in series.values())
                 if span > vmax * window:
                     res.success, res.message = False, 'joint positions are still changing'
                     return res
@@ -351,7 +356,13 @@ class CalibrationNode(Node):
                 self._run = None
 
     def _terminate(self, goal_handle: Any, result: Calibrate.Result) -> None:
-        """The one place a goal reaches its terminal state."""
+        """The one place a goal reaches its terminal state. Only a success leaves
+        the result publishable: the marker is created after the final verdict."""
+        if result.error_code == R.NONE and result.result_file:
+            try:
+                (Path(result.result_file).parent / PUBLISHABLE).touch()
+            except OSError as e:
+                self.get_logger().error(f'result kept but not publishable: {e}')
         if result.error_code == R.CANCELED:
             # the cancel callback runs before rclpy moves the goal to CANCELING:
             # wait for that transition so canceled() is legal
@@ -369,10 +380,11 @@ class CalibrationNode(Node):
         """Decide the outcome once, under the lock: from here no cancel is accepted
         (the cancel callback checks ``finalizing``), and anything that happened up
         to this instant (cancel, clock jump, CameraInfo change) wins over success."""
+        now = self.now()
         with self._lock:
             run.finalizing = True
             cancel = run.cancelled.is_set()
-            jumped = self._jumps != run.jumps
+            jumped = self._jumps != run.jumps or now < run.max_now - 0.001
             info_changed = run.info_changed
         kept = f' (result file {result.result_file} was written first; marked '\
             'unpublishable)' if result.result_file else ''
@@ -524,16 +536,19 @@ class CalibrationNode(Node):
 
     def _check_jump(self, since: float, run: RunState | None = None) -> None:
         """A backwards clock jump (sim time reset) aborts the run; the jump
-        callback has already dropped the old epoch's TF and image history."""
+        callback has already dropped the old epoch's TF and image history. A host
+        clock step (wall time; no ROS jump callback) is caught by sampling."""
         now = self.now()
         run = run or self._run
-        jumped = run is not None and self._jumps != run.jumps
+        if run is not None:
+            run.max_now = max(run.max_now, now)
+        jumped = run is not None and (self._jumps != run.jumps or now < run.max_now - 0.001)
         if jumped or now < since - 0.5:
             self.tf_buffer.clear()          # static transforms are kept by tf2
             self.images.clear()
             raise RunAbort(R.TF_UNAVAILABLE, 'the node clock jumped back during the run '
-                           '(sim time reset?); TF and image history are no longer '
-                           'comparable')
+                           '(sim time reset or a host clock step); TF and image history '
+                           'are no longer comparable')
 
     def _check_clock(self, stamp: float, now: float, cfg: P.RunConfig) -> None:
         """§8 one clock domain: an image's stamp and the node clock when it

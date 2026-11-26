@@ -127,8 +127,11 @@ def profile_path(node: Node, profile: str) -> Path | None:
     d = node.get_parameter('profiles_dir').value
     if not d:
         return None
-    p = Path(d).expanduser() / f'{profile}.yaml'
-    return p if p.is_file() else None
+    try:
+        p = Path(d).expanduser() / f'{profile}.yaml'
+        return p if p.is_file() else None
+    except (RuntimeError, OSError):      # e.g. '~unknown_user/...' cannot be expanded
+        return None
 
 
 def profile_exists(node: Node, profile: str) -> bool:
@@ -205,6 +208,9 @@ def build(doc: dict[str, Any], profile: str = '') -> RunConfig:
                 (isinstance(d, float) and isinstance(v, (int, float)) and
                  not isinstance(v, bool))):
             raise ValueError(f'board.{k} must be a {type(d).__name__}, got {v!r}')
+    if doc['session']['target_captures'] < doc['solver']['min_captures']:
+        raise ValueError('session.target_captures must be >= solver.min_captures (manual '
+                         'mode solves when the target is reached)')
     if doc['session']['frames_per_capture'] < doc['capture']['consensus_min_frames']:
         raise ValueError('session.frames_per_capture must be >= '
                          'capture.consensus_min_frames (else every capture is rejected)')

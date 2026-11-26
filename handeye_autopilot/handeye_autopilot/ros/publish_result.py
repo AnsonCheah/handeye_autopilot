@@ -12,6 +12,7 @@ tf2's StaticTransformBroadcaster (latched on /tf_static).
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 
@@ -26,6 +27,9 @@ import yaml
 
 from ..core import transforms as tf
 from . import tf_tools
+
+# created by the node only after a run's final verdict is success (§9)
+PUBLISHABLE = '.publishable'
 
 
 def check(tree: dict[str, str], parent: str, root: str) -> str:
@@ -43,6 +47,10 @@ class ResultPublisher(Node):
         super().__init__('handeye_result_publisher')
         doc = yaml.safe_load(open(path)) or {}
         pub = doc.get('publish') or {}
+        marker = os.path.join(os.path.dirname(os.path.abspath(path)), PUBLISHABLE)
+        if pub.get('ok') and not os.path.exists(marker):
+            pub = {'ok': False, 'reason': f'no {PUBLISHABLE} marker: the run did not end '
+                   'SUCCEEDED (cancelled or invalidated after the result was written)'}
         if not pub.get('ok'):
             raise SystemExit(f'refusing to publish {path}: '
                              f'{pub.get("reason", "no publish section")}')
@@ -64,11 +72,12 @@ class ResultPublisher(Node):
         frame by that difference)."""
         st = self.subtree
         chain = tf_tools.ancestors(tf_tools.parents(self.buffer), st['child'])
-        for child, par in zip(chain, chain[1:], strict=False):
-            if self.moving.has(par, child):
-                return (f'{par} -> {child} is published on /tf (moving): the camera '
-                        'subtree must be static')
-            if par == st['parent']:
+        for child in chain:
+            moving = self.moving.has_child(child)
+            if moving is not None:
+                return (f'{moving} -> {child} is published on /tf (moving or a competing '
+                        'driver): the camera subtree must be static')
+            if child == st['parent']:
                 break
         got = tf_tools.latest(self.buffer, st['parent'], st['child'])
         if got is None:

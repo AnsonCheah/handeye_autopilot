@@ -503,9 +503,13 @@ snapshotted at admission; every capture's images must match the run's
     `parent`'s ancestors in the TF tree); otherwise refuse.
 - Parent = `base_frame` (eye-to-hand) or `tool_frame` (eye-in-hand).
 - The node runs the checks when the run finishes and writes the outcome to the
-  result YAML (`publish`: parent, root, transform; or `null` with the reason).
-  The result launch publishes only a result whose checks passed, so the
-  calibration itself is never lost to an ownership problem.
+  result YAML (`publish`: parent, root, transform, the camera subtree at that
+  time; or `ok: false` with the reason). Only after the run's final verdict is
+  success does it create a `.publishable` marker next to the file. The result
+  launch publishes only a result with `ok` **and** the marker, after
+  re-checking the live tree (no parent on the root, no cycle, no chain frame
+  with any parent on `/tf`, subtree unchanged). The calibration itself is
+  never lost to an ownership problem.
 - Depth and other driver frames follow automatically, as long as the driver's
   internal extrinsics are right (documented as an assumption).
 

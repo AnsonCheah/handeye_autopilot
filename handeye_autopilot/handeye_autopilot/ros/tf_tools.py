@@ -149,6 +149,11 @@ class StaticLinks:
         with self._lock:
             return (parent, child) in self.links
 
+    def has_child(self, child: str) -> str | None:
+        """A parent this child was seen under, if any (a competing driver)."""
+        with self._lock:
+            return next((p for p, c in self.links if c == child), None)
+
 
 def parents(buffer: tf2_ros.Buffer) -> dict[str, str]:
     """child -> parent for every frame TF currently knows."""
@@ -199,9 +204,10 @@ def camera_subtree(tree: dict[str, str], static: StaticLinks, optical: str, pare
                        f'{parent} -> {root} would make a cycle; set camera_root_frame to the '
                        "camera driver's own root frame")
     for child, par in zip(chain, chain[1:], strict=False):
-        if dynamic is not None and dynamic.has(par, child):
-            return Subtree(root, chain, f'{par} -> {child} is also published on /tf (moving): '
-                           'the camera subtree must be static')
+        moving = dynamic.has_child(child) if dynamic is not None else None
+        if moving is not None:
+            return Subtree(root, chain, f'{moving} -> {child} is published on /tf (moving or '
+                           'a competing driver): the camera subtree must be static')
         if not static.has(par, child):
             return Subtree(root, chain, f'{par} -> {child} is not on /tf_static: the camera '
                            'subtree must be static (a moving link cannot be calibrated '
