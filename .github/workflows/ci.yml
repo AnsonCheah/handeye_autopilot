@@ -30,16 +30,18 @@ jobs:
             docker_image: ubuntu:noble
           - ros_distribution: lyrical
             docker_image: ubuntu:resolute
-          # Rolling binaries are currently published for noble only (checked
-          # 2026-11-26 on packages.ros.org); move to resolute when they are.
+          # Rolling targets resolute; its binaries are in ros2-testing only so far
+          # (checked 2026-11-26). Drop use_testing once they sync to main.
           - ros_distribution: rolling
-            docker_image: ubuntu:noble
+            docker_image: ubuntu:resolute
+            use_testing: true
     env:
       HANDEYE_AUTOPILOT_REQUIRE_DEPS: '1'
     steps:
       - uses: ros-tooling/setup-ros@v0.7
         with:
           required-ros-distributions: ${{ matrix.ros_distribution }}
+          use-ros2-testing: ${{ matrix.use_testing || false }}
       # Dependency gate (03-milestones M0): every key must resolve to an apt
       # package in a clean container; pip installs are not allowed.
       # One commit for everything: the gate, action-ros-ci's own checkout and
