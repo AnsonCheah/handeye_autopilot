@@ -1,4 +1,4 @@
-# Checkpoint 3 — Milestones and release (rev 2, after Codex review)
+# Checkpoint 3 — Milestones and release (rev 3, after final Codex review)
 
 **Assumption for estimates:** ~10 hours/week with an AI coding assistant.
 Effort is listed separately from **waits** (hardware access, reviewers, build
@@ -25,7 +25,10 @@ farm sync), which don't shrink with more effort. Re-estimate after M1a.
 - Metadata: real maintainer name + email, Apache-2.0 in every `package.xml`,
   matching versions in `package.xml` and `setup.py` (`0.1.0`), one
   `CHANGELOG.rst` per package, `docs/design/` with the three checkpoints,
-  `AGENTS.md`/`CLAUDE.md` (clean-room + ponytail + reuse-map rule).
+  `AGENTS.md`/`CLAUDE.md` (clean-room + ponytail + reuse-map rule),
+  `.gitattributes` (`* text=auto eol=lf`). Release tags are numeric
+  `X.Y.Z`, created by bloom/catkin_prepare_release, and never moved or
+  deleted once pushed.
 - Interface package with generator/runtime deps and `member_of_group`; the
   action and message defined.
 - CI: `ros-tooling/action-ros-ci` on Jazzy (24.04), Lyrical (26.04), Rolling;
@@ -36,8 +39,10 @@ farm sync), which don't shrink with more effort. Re-estimate after M1a.
   its used API (`MoveIt2`, cancel) is smoke-tested on each distro.
 - **Release paperwork starts now:** PR adding the repo to rosdistro as a
   *source* entry (gets name review early); request a release repository
-  (Rolling requires it under `ros2-gbp`); set up bloom config. These are
-  external approvals and must not sit on the M6 critical path.
+  (Rolling requires it under `ros2-gbp`) **and write access to it for the
+  maintainer**; set up bloom config. These are external approvals and must not
+  sit on the M6 critical path: M5 cannot close until write access is
+  confirmed.
 - Reserve access to a real arm + camera for M5 (date booked).
 - *Learn:* workspaces, colcon, `package.xml`/rosdep, ament_python vs
   ament_cmake, interface packages, REP 149.
@@ -62,14 +67,15 @@ farm sync), which don't shrink with more effort. Re-estimate after M1a.
 
 ## M1b — Solver and verification (effort 2–3 wk)
 
-- Mode adapter, initial guess, refinement, outlier rejection, observability,
-  k-fold verification and precision measure, gates, observations YAML,
-  offline re-solve CLI.
+- Mode adapter (with the OpenCV mapping tests), initial guess, refinement,
+  outlier rejection, observability, k-fold verification and fold sensitivity,
+  gates, observations YAML, offline re-solve CLI.
 - **Done when:** for the committed sweep, both modes recover ground truth
   within committed translation/rotation tolerances; expected-failure cases
-  (parallel axes, ambiguity, wrong square size, systematic robot error) fail
-  with their committed codes; observations save → reload → re-solve gives an
-  identical result; transform-direction tests pass.
+  (checkpoint 2 §H) fail with their committed codes; known-blind-spot cases
+  pass the gates and their measured bias is recorded in the test output;
+  observations save → reload → re-solve gives an identical result;
+  transform-direction tests pass.
 - First public post ("offline solver works") is possible here.
 
 ## M2 — Planning core (effort 2 wk)
@@ -105,12 +111,15 @@ farm sync), which don't shrink with more effort. Re-estimate after M1a.
 - `compute_ik` client (IK contract), pymoveit2 motion with result checks,
   box as path constraint, cancel during motion.
 - `handeye_autopilot_demos`: Panda and UR (mock hardware), both modes, synthetic camera, a
-  table collision object and a point-cloud obstacle.
+  table collision object and a point-cloud obstacle. Both demos are in 1.0 by
+  the maintainer's decision (review suggested deferring UR; declined).
 - **Failure tests required before hardware:** planning-only `move_group`
   reporting success without motion (caught by the TF check); collision
-  rejection by `compute_ik`; cancel where the MoveGroup goal never reaches a
-  terminal state (→ `ABORTED`, `MOTION_FAILED`); attached collision object
-  still present after IK calls; real `compute_ik` contract test (timeout
+  rejection by `compute_ik`; a pose where **only the attached board/camera**
+  collides must be rejected (proves attached bodies take part in the IK
+  collision check); cancel where the MoveGroup goal never reaches a terminal
+  state (→ `ABORTED`, `MOTION_FAULT`), then a new goal is rejected until
+  `~/clear_fault` succeeds; real `compute_ik` contract test (timeout
   behaviour) on all three distros.
 - *Learn:* MoveIt 2 concepts (groups, SRDF, planning scene, move_group),
   pymoveit2.
@@ -124,14 +133,23 @@ farm sync), which don't shrink with more effort. Re-estimate after M1a.
   marker in view); σ and detection thresholds re-tuned.
 - Exposure: driver ROI auto-exposure (checkpoint 2 §L), tested on a fake
   parameter server and the real camera.
-- **Evidence required for release** (committed to `docs/results/`): one
-  arm + camera, one mode at least, **5 repeated runs** with the same config:
-  per-run gate report, held-out reprojection, spread of the camera transform
-  across runs (mm, deg), plus a physical check (e.g. touching a known point
-  with the TCP, or a measured distance) as accuracy evidence. Numbers are
-  published whatever they are; release proceeds only if gates pass in ≥4 of 5
-  runs.
-- **Done when:** the evidence file exists and meets that rule.
+- **Evidence protocol, committed to `docs/results/` before the first run**
+  (so limits can't be fitted to the outcome): one arm + camera, one mode at
+  least, **5 repeated runs** with the same config, each reporting the gates,
+  held-out reprojection and the camera transform; the spread across runs (mm,
+  deg).
+- **Independent accuracy check sensitive to the camera transform:** a second,
+  separate board fixed in the workspace is located by the camera, and its
+  corner positions are mapped into the robot base **through the calibrated
+  transform**. The robot then touches the same corners with a pointed tool of
+  known TCP. The error (mm) between camera-predicted and touched positions is
+  the accuracy number; a camera-transform error shows up in it directly. Its
+  limit is declared in the protocol before the runs.
+- **Release rule:** gates pass in ≥4 of 5 runs **and** the touch-check error
+  is within the predeclared limit. All numbers are published whatever they
+  are.
+- **Done when:** the protocol and the evidence file exist and meet the rule;
+  release-repository write access (M0) is confirmed.
 
 ## M6 — Docs and 1.0 release (effort 2 wk; waits: farm builds + sync, 2–4 wk)
 
@@ -159,7 +177,8 @@ farm sync), which don't shrink with more effort. Re-estimate after M1a.
 
 ## Totals
 
-Effort ≈ 20–22 weeks at 10 h/week, plus waits (rosdistro review overlaps
+Milestone effort sums to 18–20 weeks at 10 h/week; plan on ~22 with a
+2-week buffer for rework after reviews, plus waits (rosdistro review overlaps
 M0–M5; build-farm sync 2–4 weeks after M6). Treat this as optimistic until
 recalibrated after M1a. If work stops after M1b, the offline solver is still a
 coherent, demonstrable result.

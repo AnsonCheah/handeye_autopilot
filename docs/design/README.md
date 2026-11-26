@@ -6,6 +6,6 @@ Read in order:
 2. [02-features.md](02-features.md): geometry, session flow, candidate planning, capture gates, solver, quality gates, verification, simulation.
 3. [03-milestones.md](03-milestones.md): milestones M0–M6, acceptance criteria, release path to the ROS build farm.
 
-`reviews/` holds the Codex review of each checkpoint. Each review was written against an **earlier draft**; the documents above already apply its findings, so section numbers in a review may not match.
+`reviews/` holds the Codex review of each checkpoint (`codex-review-01..03.md`) and a final review of the whole plan (`codex-review-final.md`). Each review was written against an **earlier draft**; the documents above (rev 3) already apply its findings, so line and section numbers in a review may not match. Findings deliberately declined are marked as such in the documents (marker masking, exposure, the UR demo).
 
 Implementation rule: this is a clean-room project. Implementation works from these documents only.

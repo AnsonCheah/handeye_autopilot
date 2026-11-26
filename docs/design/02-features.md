@@ -1,4 +1,4 @@
-# Checkpoint 2 — Features and algorithms (rev 2, after Codex review)
+# Checkpoint 2 — Features and algorithms (rev 3, after final Codex review)
 
 Scope of v1: **eye-to-hand and eye-in-hand** hand-eye calibration. Numbers
 marked *(tune)* come from simulation sweeps plus real-image fixtures, never from
@@ -6,8 +6,9 @@ earlier projects. Every "write" item ships with a test.
 
 Cut from v1 after review (named so nobody re-adds them silently): CLAHE
 retry, symmetric-checkerboard branch resolution, Jacobian covariance,
-split-half (replaced by k-fold, §F). Exposure search (§L) and marker masking
-(§D4) stay in v1 because the author asked for them, with the reviewed designs.
+split-half (replaced by k-fold, §F), own exposure search (replaced by driver
+ROI auto-exposure, §L). Exposure (§L) and marker masking (§D4) stay in v1
+because the author asked for them, with the reviewed designs.
 
 ## A. Geometry (one model, both modes)
 
@@ -28,6 +29,19 @@ inputs/outputs to and from OpenCV's conventions for the initial solvers
 camera-relative board pose to a tool pose. Unit tests check each direction
 against an independent ground-truth oracle (a swapped inverse must fail).
 
+OpenCV argument mapping (OpenCV names transforms "a2b" = pose of `a` in `b` =
+`b_T_a`):
+
+| Call | Eye-in-hand inputs → output | Eye-to-hand inputs → output |
+|---|---|---|
+| `calibrateHandEye(gripper2base, target2cam)` → `cam2gripper` | `G_i`, `C_i` → `X = tool_T_camera` | `inv(G_i)`, `C_i` → `X = base_T_camera` |
+
+`calibrateRobotWorldHandEye` returns both unknowns; its mapping is written by
+the implementer **from a test first**: the ground-truth oracle generates
+`G_i`, `C_i` for known `X`, `Z`, and the adapter's mapping for each mode is
+accepted only when it recovers both. `Z` for `calibrateHandEye` seeds is
+recovered as the rotation-averaged `Z = A_i · X · C_i` over captures.
+
 Intrinsics are fixed (from `CameraInfo`), not refined.
 
 ## B. Session flow
@@ -36,20 +50,29 @@ Intrinsics are fixed (from `CameraInfo`), not refined.
    **tilted away from face-on** by at least a minimum angle *(tune)*; the node
    checks it (§D gates) and says what to fix if not. The tilt requirement avoids
    planar pose ambiguity from the very first sample.
-2. **Bootstrap with incremental excitation.** No estimate exists yet, so steps
-   are derived from what is measured:
-   - image-shift bound for a rotation `θ` about the tool:
-     `shift ≲ f·θ·(1 + L_max / d)`, where `d` is the measured board depth,
-     `f` the focal length, and `L_max` the configured upper bound on the lever
-     arm (board-to-tool for eye-to-hand, camera-to-tool for eye-in-hand). `θ`
-     is chosen so the shift stays inside the board's current image margin with a
-     safety factor;
-   - translation steps likewise from margin and depth.
-   Moves start small; after each round the node solves and **grows the step
-   only when the preliminary estimate is stable** (precision measure of §F
-   below a threshold). Every bootstrap capture must pass all §D gates. If the
-   board is lost, return to the last good pose and halve the step; after a
-   limit, fail with a message naming `L_max` as the likely culprit.
+2. **Bootstrap with incremental excitation.** No hand-eye estimate exists yet,
+   but the current board pose in the camera (`C`, from PnP) is measured. Steps
+   are checked **numerically, not by a closed-form bound** (small-angle
+   formulas underestimate the shift away from the image centre):
+   - the only unknown is the lever arm between the tool and the moving object
+     (board for eye-to-hand, camera for eye-in-hand), bounded by the configured
+     `L_max`. A candidate step (finite rotation about a tool axis, or a
+     translation) is applied to the board corners for a set of worst-case lever
+     arms: zero and `±L_max` along each tool axis, plus the 8 diagonal
+     corners of that cube;
+   - every resulting corner is projected with the full camera model
+     (distortion included) via the mode adapter; the step is accepted only if
+     all corners, for every lever arm, stay inside the image with the margin
+     and stay in front of the camera, with a safety factor *(tune)*.
+   - **Rounds are multi-axis from the start:** each round is ± a rotation
+     about each of the three tool axes and ± a translation along each, so the
+     first preliminary solve already has rotation about several axes.
+   - After each round the node solves; the step **doubles only if** every
+     capture in the round passed §D and the estimate of `X` changed less than
+     a threshold *(tune)* since the previous round (k-fold is not used here:
+     too few captures).
+   - If the board is lost, return to the last good pose and halve that step;
+     after a limit, fail with a message naming `L_max` as the likely culprit.
    An optional rough initial guess (e.g. CAD) only sets the first step size; it
    is never trusted for visibility.
 3. **Bounded centring.** Bring the board toward image centre at nominal depth in
@@ -122,13 +145,26 @@ recommending ChArUco.
    farther away that looks the same size, a reflection, another board).
    OpenCV doesn't solve it for us: `checkBoard` (4.7+) discards the whole board
    instead of the marker, and Jazzy's OpenCV 4.6 has no check at all.
-   **Reuse:** `cv2.solvePnPRansac` on all detected marker corners against
-   their board coordinates; markers whose corners are RANSAC outliers are
-   dropped. This tests *position on the board plane*, so a stray marker of
-   similar apparent size still fails. Then **re-run ChArUco corner
-   interpolation with inlier markers only** and continue with the normal gates;
-   reject the capture if too few spread corners remain. Real-image fixture with
-   a stray marker in view is part of the M5 test set; a synthetic one in M1.
+   Order of operations:
+   1. **Detect markers only** (ArUco detector), not the full board.
+   2. **Duplicate IDs:** if an ID appears more than once, keep none of its
+      copies for the RANSAC fit; after the fit, keep at most the one copy that
+      is an inlier, else drop all.
+   3. **RANSAC:** `cv2.solvePnPRansac` on all marker corners against their
+      board coordinates. Markers with any outlier corner are dropped. This
+      tests **projection consistency** with one board pose: a stray marker
+      whose projected position and shape agree with the board's plane (e.g.
+      lying exactly where the board would continue) cannot be told apart, and
+      the docs say so.
+   4. **Support checks:** reject the capture if the inlier markers are too
+      few or not spread over the board (convex-hull fraction), or if a
+      **second** RANSAC on the outliers finds a consistent group of comparable
+      size (two boards in view).
+   5. **Interpolate ChArUco corners from the inlier markers only**, passing
+      them explicitly so the detector does not re-detect the dropped markers
+      (with an empty inlier set the capture is rejected before this call).
+   6. Continue with the normal gates (§D3).
+   A synthetic stray-marker fixture is part of M1a; a real-image one of M5.
 5. **Record** per capture: the kept frame's corner IDs and pixels, board
    coordinates, its tool pose, both IPPE poses and errors, the reason if
    rejected.
@@ -160,23 +196,32 @@ Three groups, named for what they measure:
 
 - **Data sanity** (broken data): minimum inliers, reprojection ceilings,
   observability.
-- **Precision / stability** (how repeatable the estimate is from *this* data):
-  k-fold refits (§G) give the spread of `X` across folds, reported as
-  translation (mm) and rotation (SO(3) angle, degrees). Gate on it.
-- **Accuracy** (closeness to truth): only from evidence the solve did not use:
-  held-out reprojection (§G), the optional reference check, live verification.
+- **Fold sensitivity** (how much the estimate depends on which captures were
+  used): from the k-fold refits (§G), with `k = 5` by default. For each fold,
+  the translation distance and the SO(3) angle between that fold's `X` and the
+  all-data `X`; the gate uses the **maximum** over folds, against fixed
+  thresholds tuned in simulation. Overlapping training sets make these
+  estimates correlated, so this is **not** a calibrated confidence interval
+  and is never reported as one. If any fold cannot be solved or fails
+  observability, the gate **fails** (the run cannot pass).
+- **Accuracy evidence** (closeness to truth): in v1 only held-out
+  reprojection (§G), i.e. evidence the solve did not use. Reported, not gated.
   Docs state plainly that shared errors (intrinsics, robot kinematics, board
-  print scale) bias every fold equally, so precision ≠ accuracy.
+  print scale) shift every fold the same way, so neither gate group detects
+  them.
 
-`passed` = sanity + precision gates; accuracy evidence is reported alongside.
+`passed` = sanity + fold-sensitivity gates; accuracy evidence is reported
+alongside.
 
 ## G. Verification (no leakage)
 
-1. **k-fold by capture:** for each fold, the full training pipeline (outlier
-   rejection included) runs on the other folds only. Held-out captures are
-   scored with the **predicted** board pose `Ĉ_i` (no per-capture PnP fit).
-   Each fold must pass observability; failed folds are reported, not hidden.
-   The same refits feed the precision measure in §F.
+1. **k-fold by capture:** captures are assigned to folds by index modulo `k`
+   in acquisition order (deterministic; each fold spans the whole run). For
+   each fold, the full training pipeline (outlier rejection included) runs on
+   the other folds only. Held-out captures are scored with the **predicted**
+   board pose `Ĉ_i` (no per-capture PnP fit). Each training set must pass
+   observability; a failed fold is reported and fails the fold-sensitivity
+   gate (§F). The same refits feed that gate.
 2. **Offline re-solve:** `ros2 run handeye_autopilot resolve <run_dir>`.
 
 Reference check (CAD) and live verify mode: v1.x, not v1.
@@ -190,9 +235,14 @@ Reference check (CAD) and live verify mode: v1.x, not v1.
   plus configurable noise and a configurable systematic error, so tests can
   show what the gates catch and what they can't.
 - Geometry oracle in tests is written independently of the mode adapter.
-- **Expected-failure tests:** parallel rotation axes, near-face-on ambiguous
-  views, delayed/bad timestamps, wrong board square size, wrong `L_max`. Each
-  must fail with the right reason.
+- **Expected-failure tests** (faults the pipeline can detect): parallel
+  rotation axes, near-face-on ambiguous views, delayed/bad timestamps, too
+  small `L_max`, stray markers. Each must fail with its committed reason code.
+- **Known-blind-spot tests** (biases that stay internally consistent): wrong
+  board square size, small systematic robot kinematic error, small intrinsic
+  error. These runs are **expected to pass** the gates while the result is
+  biased; the test asserts both, and records the size of the bias, so the docs
+  can state what the gates cannot see.
 - **Real-image fixtures:** a small set of real captures (from M5 hardware runs)
   is added to tests for detection gates and σ tuning. Simulation alone does not
   set thresholds.
@@ -202,7 +252,7 @@ Reference check (CAD) and live verify mode: v1.x, not v1.
 
 ## I. Visualisation
 
-RViz2 + `MarkerArray` + `interactive_markers` + OpenCV drawing. We write marker
+RViz2 + `MarkerArray` + OpenCV drawing. We write marker
 builders for the safety box, envelope, candidates by status, frustum, detected
 board, and an annotated image with the rejection reason.
 
@@ -216,14 +266,30 @@ calipers.
 
 ## L. Exposure: point the driver's auto-exposure at the board (off by default)
 
-**Reuse:** the camera driver's own auto-exposure with a region of interest,
-set through rclpy `AsyncParameterClient`. No search algorithm of ours.
-**Write:** after each detection, set the driver's auto-exposure ROI to the
-board's bounding box (padded); a YAML map of each driver's ROI parameter names
-(RealSense and ZED shipped). Before capture, wait for frames acquired after the
-write. Restore the original ROI on exit, error or cancel. Cameras without an
-ROI auto-exposure parameter: the feature reports "unsupported" and the run
-continues; lighting-related rejections are counted in the report.
+**Reuse:** the camera driver's own auto-exposure (AE) with a region of
+interest, set through rclpy `AsyncParameterClient`. No search algorithm of
+ours.
+
+**Supported in v1: `realsense2_camera` only**, which exposes AE-ROI parameters
+on its colour sensor. The ZED wrapper's documented ROI is a different control
+(processing region), so ZED is marked unsupported until an AE-ROI endpoint is
+verified (`shortcut: ZED unsupported, add when its AE ROI is verified`).
+Other cameras: the feature reports "unsupported" and the run continues;
+lighting-related rejections are counted in the report.
+
+**Write:** a small YAML map per driver (parameter names, ROI coordinate
+convention, valid range) and the update logic:
+1. At goal start, read and remember the driver's AE enable state and ROI;
+   enable AE if needed.
+2. After a detection, map the board's padded bounding box from image pixels
+   to the driver's ROI coordinates (sensor resolution; clipped to the valid
+   range), write it, and check the parameter response succeeded.
+3. **Convergence:** capture only after the mean intensity inside the board
+   region changes by less than a threshold over M consecutive frames
+   acquired after the write *(tune)*, with a timeout; on timeout the capture
+   proceeds and is flagged.
+4. Restore the remembered AE state and ROI on exit, error or cancel.
+
 `shortcut: no own exposure search, add one only if ROI auto-exposure proves
 insufficient on real runs.`
 

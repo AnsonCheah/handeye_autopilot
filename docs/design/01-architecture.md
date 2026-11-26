@@ -1,4 +1,4 @@
-# Checkpoint 1 — Architecture and interfaces (rev 2, after Codex review)
+# Checkpoint 1 — Architecture and interfaces (rev 3, after final Codex review)
 
 Package: `handeye_autopilot`.
 
@@ -30,7 +30,8 @@ Package: `handeye_autopilot`.
 **This package's contribution:** automated, safe, quality-gated *data
 collection and validation* for hand-eye calibration: pose planning from the
 camera's point of view, reachability/collision through MoveIt, robust
-per-capture rejection, accuracy gates, verification, and simulation tests.
+per-capture rejection, sanity and fold-sensitivity gates, held-out
+verification, and simulation tests.
 Solving uses OpenCV + SciPy. Interop (v1.1): export observations in
 `industrial_calibration`'s format so users can cross-check with its solver.
 
@@ -42,13 +43,13 @@ Solving uses OpenCV + SciPy. Interop (v1.1): export observations in
 | Camera model, raw vs rectified | `image_geometry` `PinholeCameraModel` | Validation of `CameraInfo` (§7) |
 | Board detection | OpenCV `findChessboardCornersSB`, ArUco/ChArUco detectors | Compatibility shim for OpenCV 4.6 (24.04) and 4.10 (26.04) |
 | Board pose per frame, both planar solutions | OpenCV `solvePnPGeneric` with `SOLVEPNP_IPPE` | Nothing |
-| Board printouts | OpenCV `generateImage` | A short script |
+| Board printouts | OpenCV `CharucoBoard.generateImage` (ChArUco) | A short NumPy function for checkerboards |
 | Intrinsics | `camera_calibration` (image_pipeline) | Nothing |
 | Initial hand-eye solve | OpenCV `calibrateHandEye`, `calibrateRobotWorldHandEye` | Nothing |
 | Refinement and uncertainty | SciPy `least_squares` (robust loss, Jacobian) | Residual function |
 | Rotations | SciPy `Rotation` | Nothing |
 | Quasi-random sampling | SciPy `qmc.Halton` | Nothing |
-| Image + info sync | `message_filters` `ApproximateTimeSynchronizer` | Nothing |
+| Image + camera info | Image subscription; latest `CameraInfo` cached (§7) | Cache + consistency check |
 | Robot pose at a stamp | `tf2_ros` Buffer, async wait with deadline | Nothing |
 | Motion (plan + execute, cancel) | `pymoveit2` `MoveIt2` | Goal parameters, result checks |
 | Reachability + collision | `moveit_msgs/srv/GetPositionIK` on `compute_ik` | A direct client (~20 lines; pymoveit2's IK call sets `is_diff=false`, see §3.1) |
@@ -56,12 +57,24 @@ Solving uses OpenCV + SciPy. Interop (v1.1): export observations in
 | Exposure | Driver's own ROI auto-exposure, set via rclpy `AsyncParameterClient` | ROI update + driver parameter-name map (checkpoint 2 §L) |
 | Stray-marker rejection | OpenCV `solvePnPRansac` + ChArUco interpolation | Glue (checkpoint 2 §D4) |
 | Publish result | `tf2_ros static_transform_publisher` from a launch file | Launch file |
-| Visualisation | RViz2, `MarkerArray`, `interactive_markers`, OpenCV drawing | Marker builders |
+| Visualisation | RViz2, `MarkerArray`, OpenCV drawing | Marker builders |
 | Run recording | `ros2 bag record` (launch option) | Observations YAML for offline re-solve |
 | Start / cancel / progress | ROS 2 action | One action definition |
 | Manual capture trigger | `std_srvs/srv/Trigger` | Nothing |
 | Robots for demos and CI | UR (`ur_robot_driver` mock hardware), Panda (`moveit_resources_panda`) | Demo launch files |
 | Camera simulation | Gazebo + `ros_gz` (optional, realistic) | Lightweight homography renderer for deterministic CI (§10) |
+
+Modules we write that have no ecosystem equivalent (the actual contribution);
+each still builds on the reused pieces named:
+
+| Module | Builds on | Spec |
+|---|---|---|
+| Mode adapter (both modes, OpenCV argument mapping) | NumPy, SciPy `Rotation`, OpenCV hand-eye solvers | checkpoint 2 §A |
+| Session state machine + bootstrap | the modules below | checkpoint 2 §B |
+| Visibility filter + information-based pose selection + ordering | OpenCV `projectPoints`, SciPy `qmc`, `compute_ik` joint solutions | checkpoint 2 §C |
+| Capture gates + consensus + stray-marker masking | OpenCV detection, PnP, RANSAC | checkpoint 2 §D |
+| Refinement residual, outlier rejection, observability | SciPy `least_squares`, `median_abs_deviation` | checkpoint 2 §E |
+| Fold refits (held-out reprojection, fold sensitivity) + quality gates | the solver above | checkpoint 2 §F–G |
 
 ## 3. Robot side: MoveIt's interfaces are the hook
 
@@ -106,10 +119,14 @@ MoveIt brand implicitly.
 
 ### 3.2 Motion (pymoveit2)
 
-- Goal per planned pose: position + orientation constraints on `ik_link` with
-  explicit tolerances *(tune)*, finite planning time, and **both** velocity and
-  acceleration scaling set in (0, 1] from parameters (a zero scaling means full
-  speed in MoveIt; parameter validation rejects 0).
+- Goal per planned pose: a **joint goal** equal to the IK solution kept for
+  that candidate (checkpoint 2 §C5), so execution reaches the same arm
+  configuration the ordering was computed for (a pose goal could pick another
+  IK branch and a long wrist flip). Finite planning time, and **both** velocity
+  and acceleration scaling set in (0, 1] from parameters (a zero scaling means
+  full speed in MoveIt; parameter validation rejects 0).
+- If planning to the joint goal fails from the actual current state, the
+  candidate is skipped and a spare is used.
 - Success requires: goal accepted, terminal status `SUCCEEDED`, MoveIt error
   code `SUCCESS`, **and** the measured TF pose within tolerance of the target
   after settling. A planning-only `move_group` can report success without
@@ -152,8 +169,7 @@ collision objects in the planning scene. Warn only if neither exists.
 
 `package.xml` declares all system deps via rosdep keys (`python3-numpy`,
 `python3-scipy`, `python3-opencv`, `python3-yaml`, `cv_bridge`,
-`image_geometry`, `tf2_ros`, `message_filters`, `moveit_msgs`, `pymoveit2`,
-`interactive_markers`, `std_srvs`). CI builds and tests a normal **installed**
+`image_geometry`, `tf2_ros`, `moveit_msgs`, `pymoveit2`, `std_srvs`). CI builds and tests a normal **installed**
 (not symlink) build on each distro's own OS image with distro OpenCV.
 
 ## 5. The one custom interface
@@ -167,8 +183,8 @@ string profile             # parameter profile name; empty = node parameters
 ---
 # Result
 uint8  error_code          # NONE, INVALID_GOAL, BUSY, NO_CAMERA_INFO, TF_UNAVAILABLE,
-                           # IK_SERVICE_MISSING, MOTION_FAILED, NOT_ENOUGH_SAMPLES,
-                           # SOLVE_FAILED, CANCELED, INTERNAL
+                           # IK_SERVICE_MISSING, MOTION_FAILED, MOTION_FAULT,
+                           # NOT_ENOUGH_SAMPLES, SOLVE_FAILED, CANCELED, INTERNAL
 bool   transform_valid     # an estimate exists (true even when quality failed)
 bool   passed              # all quality gates passed
 geometry_msgs/TransformStamped camera_transform   # parent -> camera optical frame
@@ -185,8 +201,9 @@ string last_rejection
 ```
 
 **Semantics:**
-- Goal rejected (not accepted) if a run is already active or `mode`,
-  `execution`, `profile` are invalid.
+- Goal rejected (not accepted) if a run is already active, if `mode`,
+  `execution`, `profile` are invalid, or while the **motion fault latch** is
+  set (§6).
 - Configuration is snapshotted at goal acceptance; parameter changes mid-run
   don't apply.
 - `SUCCEEDED`: the run completed. `passed` may be false (quality gates failed)
@@ -198,9 +215,9 @@ string last_rejection
   `success=false` outside the manual capture phase or while a capture runs.
 
 `QualityReport.msg`: per-gate value, limit, pass, and group (sanity /
-precision / accuracy evidence); inlier count; reprojection stats; k-fold spread
-of the camera transform (mm, deg); held-out reprojection; observability
-measures. See checkpoint 2 §F for what each group does and does not prove.
+fold sensitivity / accuracy evidence); inlier count; reprojection stats;
+fold sensitivity of the camera transform (mm, deg); held-out reprojection;
+observability measures. See checkpoint 2 §F for what each group does and does not prove.
 
 ## 6. Concurrency and cancellation
 
@@ -214,10 +231,18 @@ measures. See checkpoint 2 §F for what each group does and does not prove.
   then wait (with deadline) for its terminal status; only then report
   `CANCELED`. A cancel acknowledgement is not proof the robot stopped; if the
   terminal status doesn't arrive by the deadline, report `ABORTED` with
-  `MOTION_FAILED` and a message telling the operator to check the robot.
+  `MOTION_FAULT` and a message telling the operator to check the robot.
+- **Motion fault latch.** After `MOTION_FAULT` the node refuses every new goal
+  until the operator calls `~/clear_fault` (`std_srvs/Trigger`). Clearing
+  succeeds only when no MoveGroup goal from this node is still active **and**
+  fresh `joint_states` (newer than the call) show all joint velocities below a
+  threshold over a window *(tune)*; otherwise it returns `success=false` with
+  the reason. The latch survives goal completion and is logged loudly.
 - Cancel during capture or IK: stop issuing new requests, drop outstanding
   results, report `CANCELED`.
-- Launch tests cover cancel during motion, during capture, and during IK.
+- Launch tests cover cancel during motion, during capture, and during IK, and
+  a new goal sent after a cancel timeout (must be rejected until the fault is
+  cleared).
 
 ## 7. Camera input
 
@@ -226,18 +251,28 @@ measures. See checkpoint 2 §F for what each group does and does not prove.
   - raw: use `K` and `D`; supported distortion models `plumb_bob` and
     `rational_polynomial`; others rejected with a clear message
     (`shortcut: no fisheye in v1, add via cv2.fisheye if requested`);
-  - rectified: use `P` with zero distortion.
+  - rectified: use `P[:3,:3]` as the camera matrix with zero distortion. The
+    image is then in the rectified optical frame. v1 requires `R` = identity
+    (monocular rectification); otherwise refuse with a message
+    (`shortcut: stereo-rectified R unsupported, rotate the result by R when
+    someone needs it`).
 - Reject uncalibrated `CameraInfo` (`K` all zero). Reject non-default binning or
   ROI in v1 (`shortcut: binning/ROI unsupported, scale K when someone needs it`).
-- Subscriptions use sensor-data QoS; `CameraInfo` is cached (some drivers
-  publish it latched or rarely). `ApproximateTimeSynchronizer` with a small
-  slop for image + info.
+- Images use sensor-data QoS. `CameraInfo` is **not** time-synchronised: the
+  node keeps the latest message (its subscription uses reliable,
+  transient-local QoS when the driver offers it, so a latched message arrives
+  late-joining) and the image callback uses it if `frame_id` and image size
+  match. A changed `CameraInfo` mid-run aborts the run (`NO_CAMERA_INFO` with a
+  message), since the intrinsics are fixed per run.
 
 ## 8. Capture timing
 
-- `use_sim_time` must match across the node, robot and camera (checked at
-  start: warn if the image stamps and the node clock disagree by more than a
-  threshold).
+- **One clock domain.** Image stamps and TF stamps must come from the same
+  clock (`use_sim_time` consistent across node, robot and camera; a camera
+  driver stamping with its device clock must be configured to use the host
+  clock). Checked at goal start and per capture: if image stamps and the node
+  clock differ by more than a threshold *(tune)*, the goal is **refused**
+  (`TF_UNAVAILABLE` with a message naming the clock), not warned about.
 - **Settle:** after motion, wait until the TF pose of the tool is stable over
   a window *(tune)* **and** the robot's measurement is fresh: the latest TF for
   the tool must be newer than the settle start (catches frozen
@@ -259,11 +294,14 @@ measures. See checkpoint 2 §F for what each group does and does not prove.
   `T_parent_root = T_parent_optical × inverse(T_root_optical)`.
   The result launch publishes `parent → root` with
   `static_transform_publisher`.
-- **Ownership checks before publishing:** the chain `root → optical` must be
-  static (checked twice); `root` must have **no existing parent** in TF (from
-  a URDF mounting joint, a driver, or a previous calibration). If it has one,
-  refuse and tell the user which frame to drop or which `root` to use instead.
-  A cycle check is implied by the same lookup.
+- **Ownership checks before publishing:**
+  - every link of the chain `root → optical` must be published on
+    `/tf_static` (checked by listening to `/tf_static` briefly), not on `/tf`;
+  - `root` must have **no existing parent** in TF (from a URDF mounting joint,
+    a driver, or a previous calibration). If it has one, refuse and tell the
+    user which frame to drop or which `root` to use instead;
+  - **cycle check:** `root` must not be an ancestor of `parent` (walk
+    `parent`'s ancestors in the TF tree); otherwise refuse.
 - Parent = `base_frame` (eye-to-hand) or `tool_frame` (eye-in-hand).
 - Depth and other driver frames follow automatically, as long as the driver's
   internal extrinsics are right (documented as an assumption).
@@ -280,7 +318,7 @@ measures. See checkpoint 2 §F for what each group does and does not prove.
 
 ## 11. UI
 
-1. **v1: RViz2 + command line.** RViz config: safety box (interactive),
+1. **v1: RViz2 + command line.** RViz config: safety box (display only, §3.4),
    envelope, candidates coloured by status, camera frustum, detected board,
    annotated image. Copy-paste commands in the docs.
 2. **v1.x: rqt plugin in Python** (`python_qt_binding`).
