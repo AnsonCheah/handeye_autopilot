@@ -187,8 +187,7 @@ and `apt-cache policy` must show an install candidate, checked **before**
 anything is installed (so already-installed keys can't hide a pip-only or
 missing key); then `rosdep install` runs. Known gaps go in
 `ci/known_missing.txt` (distro, key, date, reason): the gate warns instead of
-failing, and fails once the package appears so the entry gets removed. First
-entry: `ur_moveit_config` is not built for Rolling (needed from M4). CI builds and tests a normal
+failing, and fails once the package appears so the entry gets removed. CI builds and tests a normal
 **installed** (not symlink) build on each distro's own OS image with distro
 OpenCV.
 
@@ -402,8 +401,9 @@ M3.
 - MoveIt integration: Panda mock-hardware demo end to end in CI (Jazzy at
   least).
 - CI: GitHub Actions, matrix {Jazzy on `ubuntu:noble`, Lyrical on
-  `ubuntu:resolute`, Rolling on whichever Ubuntu its binaries are published
-  for (`ubuntu:noble` as of 2026-11-26)} containers,
+  `ubuntu:resolute`, Rolling on `ubuntu:resolute` from the `ros2-testing`
+  apt repository (its binaries had not synced to main as of 2026-11-26)}
+  containers,
   `ros-tooling/setup-ros@v0.7` + `ros-tooling/action-ros-ci@v0.4` with
   `no-symlink-install`; the checkout used by the gate and the consumer and
   action-ros-ci's own checkout are pinned to **one** commit (the PR head SHA,
