@@ -1,11 +1,11 @@
 ros_distro: jazzy
-time: Fri Nov 27 03:30:54 2026
+time: Fri Nov 27 03:40:35 2026
 to_ready:
   submitted: true
-  left_requesting_s: 0.011
+  left_requesting_s: 0.014
   accepted: true
   wait_returned: true
-  seconds: 0.102
+  seconds: 0.109
   status: 4
   error_code: 1
   action: MoveGroup_Result
@@ -24,10 +24,10 @@ to_ready:
   state_after: MoveIt2State.IDLE
 success:
   submitted: true
-  left_requesting_s: 0.014
+  left_requesting_s: 0.011
   accepted: true
   wait_returned: true
-  seconds: 2.96
+  seconds: 2.976
   status: 4
   error_code: 1
   action: MoveGroup_Result
@@ -36,20 +36,20 @@ success:
   lifecycle_status: 4
   last_failure: null
   joints_after:
-  - 1.1995
-  - 0.2993
-  - -0.3991
-  - -1.6003
-  - 0.4997
-  - 2.2005
-  - -0.2991
+  - 1.2
+  - 0.2997
+  - -0.3994
+  - -1.5997
+  - 0.5003
+  - 2.2008
+  - -0.3004
   state_after: MoveIt2State.IDLE
 planning_failure:
   submitted: true
   left_requesting_s: 0.011
   accepted: true
   wait_returned: false
-  seconds: 0.066
+  seconds: 0.04
   status: 6
   error_code: 99999
   action: MoveGroup_Result
@@ -59,20 +59,20 @@ planning_failure:
   last_failure: 'FAILURE: The request failed without a specific reason. Check the
     `move_group` log.'
   joints_after:
-  - 1.1995
-  - 0.2993
-  - -0.3991
-  - -1.6003
-  - 0.4997
-  - 2.2005
-  - -0.2991
+  - 1.2
+  - 0.2997
+  - -0.3994
+  - -1.5997
+  - 0.5003
+  - 2.2008
+  - -0.3004
   state_after: MoveIt2State.IDLE
 out_of_bounds_goal:
   submitted: true
   left_requesting_s: 0.011
   accepted: true
   wait_returned: true
-  seconds: 3.388
+  seconds: 3.368
   status: 4
   error_code: 1
   action: MoveGroup_Result
@@ -81,20 +81,20 @@ out_of_bounds_goal:
   lifecycle_status: 4
   last_failure: null
   joints_after:
-  - -0.0004
-  - -0.7842
-  - 0.0007
+  - 0.0009
+  - -0.784
+  - -0.0001
   - 0.0175
-  - 0.0006
+  - -0.0007
   - 1.5705
-  - 0.7853
+  - 0.7855
   state_after: MoveIt2State.IDLE
 back_to_far:
   submitted: true
   left_requesting_s: 0.011
   accepted: true
   wait_returned: true
-  seconds: 3.372
+  seconds: 3.349
   status: 4
   error_code: 1
   action: MoveGroup_Result
@@ -103,13 +103,13 @@ back_to_far:
   lifecycle_status: 4
   last_failure: null
   joints_after:
-  - 1.1992
-  - 0.2997
-  - -0.3996
-  - -1.6009
-  - 0.4997
-  - 2.2008
-  - -0.2992
+  - 1.2004
+  - 0.2991
+  - -0.4007
+  - -1.5991
+  - 0.4991
+  - 2.1995
+  - -0.3008
   state_after: MoveIt2State.IDLE
 cancel_mid_motion:
   submitted: true
@@ -120,32 +120,32 @@ cancel_mid_motion:
   moved_at_cancel_rad: 0.021
   cancel_request_returned: true
   wait_returned: false
-  seconds: 0.334
-  cancel_to_terminal_s: 0.026
+  seconds: 0.33
+  cancel_to_terminal_s: 0.027
   status: 5
   error_code: -7
   action: MoveGroup_Result
   planned_points: 30
   executed_points: 0
   lifecycle_status: 5
-  moved_after_cancel_rad: 0.0227
+  moved_after_cancel_rad: 0.0226
   last_failure: 'PREEMPTED: The goal was cancelled, by `cancel_execution()` or by
     a newer goal.'
   joints_after:
-  - 1.1765
-  - 0.2792
-  - -0.3921
-  - -1.6152
-  - 0.4903
-  - 2.1889
-  - -0.2787
+  - 1.1778
+  - 0.2787
+  - -0.3932
+  - -1.6134
+  - 0.4897
+  - 2.1877
+  - -0.2803
   state_after: MoveIt2State.IDLE
 back_to_ready:
   submitted: true
   left_requesting_s: 0.016
   accepted: true
   wait_returned: true
-  seconds: 2.959
+  seconds: 2.958
   status: 4
   error_code: 1
   action: MoveGroup_Result
@@ -154,20 +154,20 @@ back_to_ready:
   lifecycle_status: 4
   last_failure: null
   joints_after:
-  - -0.0001
-  - -0.7852
-  - 0.0004
+  - -0.0002
+  - -0.7844
+  - -0.0009
   - -2.3551
-  - -0.0007
-  - 1.5712
-  - 0.7843
+  - 0.0003
+  - 1.5716
+  - 0.7856
   state_after: MoveIt2State.IDLE
 cartesian_ok:
   submitted: true
-  left_requesting_s: 0.014
+  left_requesting_s: 0.015
   accepted: true
   wait_returned: true
-  seconds: 1.143
+  seconds: 1.161
   status: 4
   error_code: 1
   action: ExecuteTrajectory_Result
@@ -177,19 +177,19 @@ cartesian_ok:
   last_failure: null
   joints_after:
   - -0.0001
-  - -0.629
-  - 0.0005
-  - -2.2565
-  - -0.0007
-  - 1.6288
-  - 0.7843
+  - -0.6281
+  - -0.0009
+  - -2.2564
+  - 0.0004
+  - 1.6292
+  - 0.7856
   state_after: MoveIt2State.IDLE
 cartesian_back:
   submitted: true
-  left_requesting_s: 0.017
+  left_requesting_s: 0.023
   accepted: true
   wait_returned: true
-  seconds: 1.154
+  seconds: 1.151
   status: 4
   error_code: 1
   action: ExecuteTrajectory_Result
@@ -198,20 +198,20 @@ cartesian_back:
   lifecycle_status: 4
   last_failure: null
   joints_after:
-  - -0.0001
-  - -0.7852
-  - 0.0004
+  - -0.0002
+  - -0.7844
+  - -0.0009
   - -2.3551
-  - -0.0007
-  - 1.5712
-  - 0.7843
+  - 0.0003
+  - 1.5716
+  - 0.7856
   state_after: MoveIt2State.IDLE
 cartesian_impossible:
   submitted: false
-  left_requesting_s: 0.072
+  left_requesting_s: 0.073
   accepted: null
   wait_returned: false
-  seconds: 0.072
+  seconds: 0.073
   status: null
   error_code: null
   lifecycle_status: null
@@ -219,13 +219,13 @@ cartesian_impossible:
     short of the threshold 1.0; lower `cartesian_fraction_threshold`, or move the
     goal closer so a straight path exists.
   joints_after:
-  - -0.0001
-  - -0.7852
-  - 0.0004
+  - -0.0002
+  - -0.7844
+  - -0.0009
   - -2.3551
-  - -0.0007
-  - 1.5712
-  - 0.7843
+  - 0.0003
+  - 1.5716
+  - 0.7856
   state_after: MoveIt2State.IDLE
 offset_tcp_endpoint_only:
   done: true
@@ -233,7 +233,7 @@ offset_tcp_endpoint_only:
   fraction: 1.0
   points: 10
   error_code: 1
-  tcp_max_deviation_mm: 4.52
+  tcp_max_deviation_mm: 4.519
   tcp_rotation_deg: 20.0
   tcp_goal_error_deg: 0.0
 offset_tcp_dense_waypoints:
@@ -247,36 +247,36 @@ offset_tcp_dense_waypoints:
   tcp_goal_error_deg: 0.0
 ik_whole_seconds:
   done: true
-  seconds: 0.024
+  seconds: 0.01
   error_code: 1
   joints:
-  - -0.0001
-  - -0.7852
-  - 0.0004
+  - -0.0002
+  - -0.7844
+  - -0.0009
   - -2.3551
-  - -0.0007
-  - 1.5712
-  - 0.7843
+  - 0.0003
+  - 1.5716
+  - 0.7856
 ik_nanosec_only:
   done: true
   seconds: 0.01
   error_code: 1
   joints:
-  - -0.0001
-  - -0.7852
-  - 0.0004
+  - -0.0002
+  - -0.7844
+  - -0.0009
   - -2.3551
-  - -0.0007
-  - 1.5712
-  - 0.7843
+  - 0.0003
+  - 1.5716
+  - 0.7856
 ik_unreachable:
   done: true
-  seconds: 1.009
+  seconds: 1.005
   error_code: -31
   joints: []
 ik_unreachable_nanosec_only:
   done: true
-  seconds: 0.062
+  seconds: 0.068
   error_code: -31
   joints: []
 inconclusive: []

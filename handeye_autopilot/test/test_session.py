@@ -351,15 +351,32 @@ def test_measured_pose_outside_the_limits_stops_the_run(outcome):
 
 
 def test_capture_pose_outside_the_limits_stops_the_run(monkeypatch):
-    """The motion reply said inside, the capture's TF says outside: the capture
-    is the freshest measurement and wins."""
+    """The selected frame is inside, a newer frame of the same capture is
+    outside: every frame's TF is a measurement, and any outside one stops the run."""
+    from handeye_autopilot.core.capture import Frame
     s = _eih_box_session(box_size=(4.0, 4.0, 2 * 0.25), lever_max=0.05)
     s._st.at_pose = np.eye(4)
-    outside = tf.make(np.eye(3), [0.0, 0.0, 0.2])
+    inside, outside = np.eye(4), tf.make(np.eye(3), [0.0, 0.0, 0.2])
     rec = session.CaptureRecord(0, 0.0, s.camera, np.zeros(0, np.int32), None, None,
-                                outside, None, None, None, False, codes.NO_BOARD, '')
+                                inside, None, None, None, False, codes.NO_BOARD, '')
     monkeypatch.setattr(session, 'capture', lambda *a, **k: rec)
+    img = np.zeros((2, 2), np.uint8)
     gen = s._capture('centring')
     next(gen)
     with pytest.raises(session._Abort, match='at capture'):
-        gen.send(([object()], None))
+        gen.send(([Frame(img, 0.0, inside), Frame(img, 0.1, outside)], None))
+
+
+def test_newest_frame_pose_is_the_next_start(monkeypatch):
+    from handeye_autopilot.core.capture import Frame
+    s = _eih_box_session(box_size=(4.0, 4.0, 4.0), lever_max=0.05)
+    a, b = np.eye(4), tf.make(np.eye(3), [0.0, 0.0, 0.01])
+    rec = session.CaptureRecord(0, 0.0, s.camera, np.zeros(0, np.int32), None, None,
+                                a, None, None, None, False, codes.NO_BOARD, '')
+    monkeypatch.setattr(session, 'capture', lambda *a, **k: rec)
+    img = np.zeros((2, 2), np.uint8)
+    gen = s._capture('centring')
+    next(gen)
+    with pytest.raises(StopIteration):
+        gen.send(([Frame(img, 0.2, b), Frame(img, 0.1, a)], None))
+    assert np.array_equal(s._st.at_pose, b)

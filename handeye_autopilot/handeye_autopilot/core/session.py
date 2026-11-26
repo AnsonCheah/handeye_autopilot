@@ -178,15 +178,18 @@ class Session:
         self._st.records.append(rec)
         self._st.purposes.append(purpose)
         self._st.at_verified = bool(rec.accepted)
-        if rec.tool_pose is not None:
-            # the capture's TF tool pose is the freshest measurement of where the
-            # robot is: the next move starts from it, and it must be inside the limits
-            self._st.at_pose = np.asarray(rec.tool_pose, dtype=float)
+        # Every frame's TF tool pose is a measurement of where the robot is: all
+        # must be inside the limits, and the newest one is where the next move
+        # starts (not only the frame consensus selected).
+        measured = sorted((f for f in frames if f.tool_pose is not None), key=lambda f: f.stamp)
+        if measured:
+            self._st.at_pose = np.asarray(measured[-1].tool_pose, dtype=float)
             if self._st.seed_tool is not None:
-                reason = self._limit_reason(self._st.at_pose)
-                if reason is not None:
-                    raise _Abort(MOTION_FAILED_REASON, 'the measured tool pose at capture is '
-                                 f'outside the limits ({reason}); check the robot')
+                for f in measured:
+                    reason = self._limit_reason(np.asarray(f.tool_pose, dtype=float))
+                    if reason is not None:
+                        raise _Abort(MOTION_FAILED_REASON, 'a measured tool pose at capture is '
+                                     f'outside the limits ({reason}); check the robot')
         return rec
 
     def _move(self, target: Mat, purpose: str, joints: Mat | None = None,

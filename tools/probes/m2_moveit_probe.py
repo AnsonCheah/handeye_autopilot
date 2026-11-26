@@ -313,6 +313,9 @@ def main() -> None:
                if found[k].get('status') is None and found[k].get('error_code') is None]
     if found['success'].get('status') != 4:
         missing.append('success.status_succeeded')
+    got = found['success'].get('joints_after')
+    if got is None or max(abs(a - b) for a, b in zip(got, FAR, strict=True)) > 0.01:
+        missing.append('success.did_not_reach_goal')
     if found['planning_failure'].get('status') == 4:
         missing.append('planning_failure.did_not_fail')
     # the not_started rule rests on these (01-architecture §3.2)
@@ -360,6 +363,10 @@ def main() -> None:
     if not isinstance(found.get('ik_whole_seconds'), dict) or \
             not found['ik_whole_seconds'].get('done'):
         missing.append('ik_whole_seconds')
+    for k in ('ik_unreachable', 'ik_unreachable_nanosec_only'):
+        if not (isinstance(found.get(k), dict) and found[k].get('done') and
+                found[k].get('error_code') == -31):
+            missing.append(f'{k}.no_completed_no_solution_reply')
     found['inconclusive'] = missing
     with open(a.output, 'w') as f:
         yaml.safe_dump(found, f, sort_keys=False)
