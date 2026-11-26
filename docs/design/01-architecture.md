@@ -149,11 +149,15 @@ Every rejection is recorded with its reason.
 
 ### 3.4 Safety box
 
-`bounds.enabled: true|false`. Pose + size in a named frame. Constrains the
-`tool_frame` origin, optionally all board corners. Defined in parameters,
+`bounds.enabled: true|false`. Pose + size in a named frame (the node
+resolves it into the base frame through TF; the core gets a posed box in the
+base frame). Constrains the `tool_frame` origin, optionally the carried object
+too (board corners for eye-to-hand, the camera origin for eye-in-hand). Defined in parameters,
 shown in RViz as a marker (`shortcut: not editable in RViz, add an interactive
-marker if users ask`). Disabled = limits come from `compute_ik` and visibility
-only.
+marker if users ask`). The envelope around the seed and the orientation limit
+from the seed (checkpoint 2 §C4) always apply; the box adds a user-placed
+volume on top. Disabled box = limits come from the envelope, orientation
+limit, `compute_ik` and visibility.
 
 The collision warning checks both representations of the carried board or
 camera: URDF collision geometry on links fixed to the tool, and attached

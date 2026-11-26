@@ -94,6 +94,13 @@ class BoardSpec:
         scale = np.array([self.square_length, self.square_length, 1.0])
         return np.asarray(pts * scale, dtype=np.float64)
 
+    def outline_samples(self, per_edge: int = 50) -> NDArray[np.float64]:
+        """(4 * per_edge, 3) points densely along the outer outline, in order."""
+        c = self.outline
+        t = np.linspace(0.0, 1.0, per_edge, endpoint=False)[:, None]
+        ends = np.roll(c, -1, axis=0)
+        return np.concatenate([a + t * (b - a) for a, b in zip(c, ends, strict=True)])
+
     @property
     def outline(self) -> NDArray[np.float64]:
         """(4, 3) outer corners of the square grid."""

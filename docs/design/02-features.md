@@ -53,34 +53,65 @@ Intrinsics are fixed (from `CameraInfo`), not refined.
 2. **Bootstrap with incremental excitation.** No hand-eye estimate exists yet,
    but the current board pose in the camera (`C`, from PnP) is measured. Steps
    are checked **numerically, not by a closed-form bound** (small-angle
-   formulas underestimate the shift away from the image centre):
-   - the only unknown is the lever arm between the tool and the moving object
-     (board for eye-to-hand, camera for eye-in-hand), bounded by the configured
-     `L_max`. A candidate step (finite rotation about a tool axis, or a
-     translation) is applied to the board corners for a set of worst-case lever
-     arms: zero and `±L_max` along each tool axis, plus the 8 diagonal
-     corners of that cube;
-   - every resulting corner is projected with the full camera model
-     (distortion included) via the mode adapter; the step is accepted only if
-     all corners, for every lever arm, stay inside the image with the margin
-     and stay in front of the camera, with a safety factor *(tune)*.
-   - **Rounds are multi-axis from the start:** each round is ± a rotation
-     about each of the three tool axes and ± a translation along each, so the
-     first preliminary solve already has rotation about several axes.
-   - After each round the node solves; the step **doubles only if** every
-     capture in the round passed §D and the estimate of `X` changed less than
-     a threshold *(tune)* since the previous round (k-fold is not used here:
-     too few captures).
-   - If the board is lost, return to the last good pose and halve that step;
-     after a limit, fail with a message naming `L_max` as the likely culprit.
+   formulas underestimate the shift away from the image centre).
+   - **Worst case before any estimate.** The only geometric bound is `L_max`
+     on the lever arm between the tool and the moving object (board for
+     eye-to-hand, camera for eye-in-hand), per tool axis. The tool's
+     orientation in the camera frame is unknown, so the pivot (tool origin)
+     can be anywhere in the ball of radius √3·`L_max` around the reference
+     (board centre / camera origin) and the step's axis or direction can be
+     anything. The check samples 64 directions over the sphere (both signs:
+     the board moves with the tool in eye-to-hand, by the inverse in
+     eye-in-hand), the reference plus 32 pivots on that sphere, and the motion
+     at ¼, ½, ¾ and the full step × safety factor *(tune)*; every board-outline
+     sample is projected with the full camera model and must stay in front of
+     the camera and inside the image with the margin. `shortcut:` sampled, not
+     exact; tighten if a real run loses the board after a passed step. A
+     property test checks it against random true geometry in both modes.
+   - **With a rough estimate**, a step is checked against the board position
+     the estimate predicts along the move (step × safety, margin plus the
+     uncertainty term).
+   - **Rounds are multi-axis from the start:** each round is ± a rotation about
+     each of the three tool axes and ± a translation along each, every step
+     taken **from the seed pose** (the robot returns to the seed first, so the
+     checked motion is the one it makes).
+   - After each round the node solves with relaxed observability limits (a
+     usable rough estimate is enough; the final gates are unchanged). A step
+     doubles only after a complete clean round (no skipped or failed move,
+     rejected capture, halving, or step already limited by the check) whose
+     estimate changed less than a threshold *(tune)* since the previous round,
+     or, before the first usable estimate, after any complete clean round.
+   - If the board is lost, the robot returns to the seed (the last good pose;
+     a failed return stops the run, `recovery_failed`) and the step is halved;
+     the halved step becomes the current step for its kind (growth resumes
+     only after a complete clean round; a permanent cap let one transient
+     loss stall the bootstrap in M2 tests); after `max_halvings` the run fails
+     (`board_lost`) with a message naming `L_max` as the likely culprit.
    An optional rough initial guess (e.g. CAD) only sets the first step size; it
-   is never trusted for visibility.
+   is never trusted for visibility. Measured in M2: worst-case rotation steps
+   from the seed are ~1.5°; a 0.2 mm / 0.02° noisy simulated robot reaches a
+   usable estimate in 3–4 rounds.
 3. **Bounded centring.** Bring the board toward image centre at nominal depth in
    checked increments (each one detected before the next), not one jump.
+   Starts from the latest verified view; each increment is checked against
+   the estimate's predicted view before it is sent; a rejected capture sends
+   the robot back to the last verified pose and ends centring.
 4. **Candidate generation** (§C), **execution**, **final solve** (§E),
    **gates** (§F).
 
 The state machine is one plain class in `handeye_autopilot.core`; the node drives it.
+It does no I/O: the driver asks `next_action()` and gets `Move(tool_pose,
+joints, purpose)`, `Capture(frames, purpose)` or `Finished(result)`, and
+reports back with `on_motion(outcome, joints)` / `on_capture(frames, joints)`.
+Motion outcomes: `ok`; `not_started` (planning failed, the robot did not move:
+a safe skip, a spare is used); `failed` (execution failed or its end state is
+unknown: the run stops with `motion_failed`). An empty capture reply (camera
+or TF timeout) is a recorded rejection. Every move passes the robot-agnostic
+limits and IK before it is sent. Moves carry the IK joint
+solution (sent as a joint goal, checkpoint 1 §3.2). Phases use the
+`Calibrate.Feedback` `PHASE_*` strings. Session failure reasons:
+`seed_rejected` (with what to fix), `board_lost` (names `L_max`),
+`bootstrap_failed`, `not_enough_samples`, or a solver reason (§E5).
 
 ## C. Candidate generation (main contribution)
 
@@ -94,8 +125,12 @@ The state machine is one plain class in `handeye_autopilot.core`; the node drive
 2. **Visibility filter:** positive depth; printed face toward the camera;
    board outline (densely sampled along its edges, projected with distortion)
    inside the image with a margin **plus a term for the current estimate's
-   uncertainty**; coverage band; minimum projected spacing of features and, for
-   ChArUco, minimum projected marker-module width.
+   uncertainty** (a base term plus twice the bootstrap estimate's worst
+   reprojection; `shortcut:` no covariance, revisit with real runs); coverage
+   band (area of the sampled, distorted outline); minimum projected spacing of
+   features and, for ChArUco, minimum projected marker-module width (each
+   marker's shortest projected edge over its cells, bits read from the OpenCV
+   dictionary).
 3. **Convert** to tool poses through the mode adapter.
 4. **Robot-agnostic limits:** safety box, envelope, orientation limit from the
    seed.
@@ -105,8 +140,18 @@ The state machine is one plain class in `handeye_autopilot.core`; the node drive
    axes are spread. After selection, check the **scaled** information of the
    set (smallest singular value of the Jacobian with parameters scaled to
    metres/radians at the working distance); add poses until it clears a
-   threshold *(tune)* or report the plan as weak.
-7. **Spares:** plan length = target count × reserve factor.
+   threshold *(tune)* or report the plan as weak. A set that would fail the
+   solver's rotation checks (§E4 amplitude, axis spread) counts as zero
+   information: in M2 a bootstrap-only set scored well on the singular value
+   while its rotations were too small to solve. A weak plan is reported
+   (`plan_weak`, with advice) and still executed; the final gates decide.
+   Selection score: smallest SO(3) angle to anything chosen or captured ×
+   (1 + axis novelty), novelty = 1 − max |cos| between the new relative
+   rotation axis and the axes already used.
+7. **Spares:** the plan's target is the number of informative poses it
+   relies on (at least the configured target, more if the information check
+   needed more); execution collects that many accepted captures; spares are
+   target × (reserve factor − 1) on top.
 8. **Ordering:** greedy tour by **joint-space distance** between the IK
    solutions. At execution time MoveIt plans from the actual current state, so
    a pose that fails then is skipped and a spare used.

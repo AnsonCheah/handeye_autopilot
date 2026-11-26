@@ -1,0 +1,53 @@
+name: MoveIt probe (M2)
+
+# Manual: runs tools/probes/m2_moveit_probe.py against the Panda mock-hardware
+# demo on each distro and uploads what MoveIt reported. Results are committed
+# under docs/probes/ by hand (03-milestones M2 "probe ahead").
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    name: probe ${{ matrix.ros_distribution }}
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ matrix.docker_image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - ros_distribution: jazzy
+            docker_image: ubuntu:noble
+          - ros_distribution: lyrical
+            docker_image: ubuntu:resolute
+          - ros_distribution: rolling
+            docker_image: ubuntu:resolute
+            use_testing: true
+    steps:
+      - uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: ${{ matrix.ros_distribution }}
+          use-ros2-testing: ${{ matrix.use_testing || false }}
+      - uses: actions/checkout@v4
+      - name: Install MoveIt, Panda config, pymoveit2
+        run: |
+          apt-get update
+          apt-get install -y ros-${{ matrix.ros_distribution }}-moveit \
+            ros-${{ matrix.ros_distribution }}-moveit-resources-panda-moveit-config \
+            ros-${{ matrix.ros_distribution }}-pymoveit2 python3-yaml
+      - name: Run the probe
+        shell: bash
+        run: |
+          source /opt/ros/${{ matrix.ros_distribution }}/setup.bash
+          ros2 launch moveit_resources_panda_moveit_config demo.launch.py use_rviz:=false \
+            > demo.log 2>&1 &
+          sleep 20
+          timeout 300 python3 tools/probes/m2_moveit_probe.py \
+            -o probe_${{ matrix.ros_distribution }}.yaml
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-${{ matrix.ros_distribution }}
+          path: |
+            probe_*.yaml
+            demo.log

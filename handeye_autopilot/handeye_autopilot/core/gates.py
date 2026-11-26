@@ -110,10 +110,7 @@ def outline_margin(camera_T_board: NDArray[np.float64], spec: BoardSpec,
     The outline is sampled densely along its edges and projected with
     distortion; negative when it leaves the image or goes behind the camera.
     """
-    corners = spec.outline
-    t = np.linspace(0.0, 1.0, OUTLINE_SAMPLES_PER_EDGE, endpoint=False)[:, None]
-    ends = np.roll(corners, -1, axis=0)
-    pts = np.concatenate([a + t * (b - a) for a, b in zip(corners, ends, strict=True)])
+    pts = spec.outline_samples(OUTLINE_SAMPLES_PER_EDGE)
     if np.any(tf.apply(camera_T_board, pts)[:, 2] <= 0):
         return -1.0
     px = camera.project_object(camera_T_board, pts)

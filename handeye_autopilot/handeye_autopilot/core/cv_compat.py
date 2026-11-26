@@ -30,6 +30,11 @@ def get_dictionary(name: str) -> Any:
     return aruco.getPredefinedDictionary(getattr(aruco, key))
 
 
+def marker_bits(dictionary: Any) -> int:
+    """Inner bits per marker side (e.g. 5 for DICT_5X5_*, 6 for APRILTAG_36h11)."""
+    return int(dictionary.markerSize)
+
+
 def dictionary_size(dictionary: Any) -> int:
     return int(np.asarray(dictionary.bytesList).shape[0])
 

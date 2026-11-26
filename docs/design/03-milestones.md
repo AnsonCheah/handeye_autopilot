@@ -114,6 +114,10 @@ farm sync), which don't shrink with more effort. Re-estimate after M1a.
   `is_diff=true` on all three distros. It records the MoveGroup terminal
   status and error code for success, planning failure and cancel, so the
   M3 interface freeze is based on observed outcomes. Findings feed M4.
+- Test spec: `handeye_autopilot/test/spec/m2.yaml`; simulated world
+  `test/m2_sim.py`. The probe script is `tools/probes/m2_moveit_probe.py`
+  (needs MoveIt + the Panda config installed; run per distro, findings
+  committed as YAML).
 - **Done when:** full pure-Python sessions run against the renderer + fake IK
   in both modes within a test deadline and pass gates; probe halving, spares
   and "plan too weak" paths each have a test asserting their outcome; the

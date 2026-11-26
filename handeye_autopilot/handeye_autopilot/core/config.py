@@ -132,3 +132,64 @@ class SolverConfig:
         if unknown:
             raise ValueError(f'unknown solver config keys: {sorted(unknown)}')
         return cls(**d)
+
+
+@dataclass(frozen=True)
+class SessionConfig:
+    """Session flow, bootstrap and candidate planning (02-features §B-C).
+
+    All limits are placeholders until simulation sweeps (M2) and real runs (M5)
+    set them. SI units: m, rad; image quantities in px.
+    """
+
+    # seed (§B1)
+    min_seed_tilt: float = math.radians(10.0)     # board normal vs line of sight
+    frames_per_capture: int = 3
+    # bootstrap (§B2)
+    lever_max: float = 0.3                        # L_max, tool <-> moving object, m
+    first_rotation_step: float = math.radians(3.0)
+    first_translation_step: float = 0.01          # m
+    max_rotation_step: float = math.radians(20.0)
+    max_translation_step: float = 0.08
+    step_safety: float = 1.5                      # the check uses step * safety
+    image_margin_px: float = 20.0
+    max_halvings: int = 2                         # per move, after a lost board
+    estimate_change_rotation: float = math.radians(1.0)   # allows doubling
+    estimate_change_translation: float = 0.01
+    max_bootstrap_rounds: int = 6
+    bootstrap_min_captures: int = 13              # seed + one full round
+    # the preliminary solve only needs a usable rough estimate, not quality
+    bootstrap_min_rotation: float = math.radians(2.0)
+    bootstrap_min_pair_rotation: float = math.radians(1.0)
+    # centring (§B3)
+    centring_steps: int = 3
+    nominal_depth: float = 0.55                   # m, board distance for centring
+    # candidates (§C)
+    candidates: int = 400                         # Halton samples
+    depth_range: tuple[float, float] = (0.4, 0.75)
+    max_tilt: float = math.radians(35.0)
+    max_roll: float = math.radians(60.0)
+    image_border_frac: float = 0.25               # centre sampled inside this border
+    uncertainty_margin_px: float = 15.0           # visibility margin for estimate error,
+    #                                               plus 2x the estimate's worst reprojection
+    coverage: tuple[float, float] = (0.04, 0.6)   # projected board area / image area
+    min_corner_spacing_px: float = 8.0
+    min_marker_module_px: float = 2.0             # ChArUco marker bit size
+    # robot-agnostic limits (§C4, 01-architecture §3.4)
+    box_enabled: bool = False
+    # box pose in the base frame (the node resolves a named frame through TF):
+    # centre xyz (m) and rpy (rad, extrinsic xyz); size = full edge lengths (m)
+    box_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    box_rpy: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    box_size: tuple[float, float, float] = (2.0, 2.0, 2.0)
+    box_check_moving_object: bool = False    # also the board corners (e2h) / camera (eih)
+    envelope_radius: float = 0.4                  # tool origin from the seed, m
+    max_orientation_change: float = math.radians(60.0)   # tool rotation from the seed
+    # selection (§C6-7)
+    target_captures: int = 20
+    reserve_factor: float = 1.5
+    min_plan_singular_value: float = 1000.0       # scaled information, 1/m (full M2 plans
+    #                                               score ~4300; bootstrap alone ~400)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
