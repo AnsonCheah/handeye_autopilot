@@ -1,0 +1,103 @@
+# Codex review — M2 (planning core), 2026-11-26
+
+**M2 has merge blockers.** All 27 targeted planning and session tests passed in 46.47 s. The three-distro MoveIt probe remains unverified.
+
+### BLOCKER
+
+- **Bootstrap’s worst-case check can approve an unsafe step.** The lever offsets are sampled in camera coordinates, although §B2 defines them in tool coordinates. The seven sampled axes also miss oblique directions. Even for a pinhole camera, the translation that maximizes image shift at an off-axis point generally falls between those directions. Checking only the safety-factor endpoint also misses intermediate excursions. Use the forward tool motion for eye-to-hand and its inverse for eye-in-hand, define the lever bound about an explicit board or camera reference, and conservatively check unknown orientations and intermediate steps. Add independent off-axis cases for both modes. [bootstrap.py:40](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/core/bootstrap.py:40) · [bootstrap.py:66](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/core/bootstrap.py:66)
+- **Centring and recovery can issue unchecked moves.** Centring starts from the seed view even when the robot is elsewhere, checks only IK before moving, and leaves the robot at the rejected pose if capture fails. Bootstrap ignores a failed return to the seed and retries anyway. Apply motion limits before IK in every phase, start centring from the latest measured view, check each increment before sending it, and require a successful return to a verified pose before retrying. Represent a failed recovery explicitly. [session.py:258](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/core/session.py:258) · [session.py:297](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/core/session.py:297)
+- **The planner can certify poses the session never captures.** The information loop can promote more than `target_captures` and grow past the reserve budget, while execution still stops at the original target. Track the required informative poses explicitly, honor that requirement during execution, and keep the reserve budget consistent. Report `plan_weak` with advice before execution when the budget cannot achieve the threshold. [planning.py:242](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/core/planning.py:242) · [session.py:187](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/core/session.py:187)
+- **Valid ChArUco boards can crash planning or get the wrong size threshold.** I reproduced a `ValueError` with `DICT_APRILTAG_36h11`. The supported alias `5X5_100` is interpreted as a 100-bit width before the border is added. Read `markerSize` from the OpenCV dictionary and project actual marker modules at their board locations. Cover aliases, AprilTag dictionaries, and foreshortened markers. [planning.py:115](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/core/planning.py:115)
+- **The probe does not establish the outcomes required for M3.** `query_state()` reports wrapper state, and `cancel_execution()` reports a cancel request. Neither records the MoveGroup terminal status. Capture the goal acceptance, result status, and MoveIt error code. Trigger cancel after observing execution, bound the waits, and commit the Panda probe results for Jazzy, Lyrical, and Rolling. [m2_moveit_probe.py:36](/home/anson/workspaces/handeye_autopilot/tools/probes/m2_moveit_probe.py:36) · [03-milestones.md:112](/home/anson/workspaces/handeye_autopilot/docs/design/03-milestones.md:112)
+
+### SHOULD-FIX
+
+- **Bootstrap growth treats incomplete rounds as clean.** Skipped visibility checks and failed moves leave `round_ok` true. A failed solve after an estimate exists also permits doubling, and the next round forgets the successful halved step. Require a complete clean round, preserve the halved bound, and apply the documented no-estimate exception only before the first usable estimate. [session.py:254](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/core/session.py:254) · [session.py:282](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/core/session.py:282)
+- **Candidate filters and selection only partially implement §C.** The uncertainty margin stays fixed, coverage uses four corners despite curved distorted edges, and selection scores relative angle alone. Use the sampled outline for area, derive the margin from the current estimate, and score axis diversity alongside angle. Represent the §3.4 box as a posed box resolved into the base frame, with optional board-corner checks. Reconcile §3.4’s disabled-box wording with §C4’s envelope and orientation limits. [planning.py:105](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/core/planning.py:105) · [planning.py:131](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/core/planning.py:131) · [planning.py:174](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/core/planning.py:174)
+- **The driver protocol loses recovery and ordering information.** `on_motion(bool)` conflates a skippable planning rejection with uncertain execution, and seed ordering starts from a fresh IK solution that may be on a different branch. Supply measured joints and distinguish a safe skip from a failure requiring recovery or termination. Handle empty capture replies as a recorded failure so a camera timeout cannot unwind the session. [session.py:108](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/core/session.py:108) · [session.py:166](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/core/session.py:166)
+- **Several tests can pass without exercising the claimed behavior.** The simulator computes the physical chain independently of the mode adapter, but moves directly to `Move.tool_pose`, so incorrect joint goals pass. The planned-count assertions can count bootstrap captures, and the consensus assertion defaults to the expected value. Drive simulated motion through fake FK, associate captures with action purposes, and assert the actual consensus metric. Add rotation-axis, uncertainty, and failed-recovery regressions. [m2_sim.py:93](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/test/m2_sim.py:93) · [test_session.py:33](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/test/test_session.py:33) · [test_session.py:70](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/test/test_session.py:70)
+
+### NIT
+
+- **Reuse the existing outline sampler.** Bootstrap duplicates the dense-edge projection logic. Share it with capture gating and document the bootstrap approximation and its upgrade condition using the `shortcut:` convention if it remains. [bootstrap.py:51](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/core/bootstrap.py:51) · [gates.py:106](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/core/gates.py:106)
+
+---
+
+## Verification pass (after fixes)
+
+38 targeted tests passed. The MoveIt probe remains unrun on Jazzy, Lyrical, and Rolling.
+
+### Prior findings
+
+| Finding | Status |
+|---|---|
+| Bootstrap worst-case visibility | **PARTIAL**. Both modes use explicit lever references and have independent geometry tests. Finite axis, pivot, and time sampling still leaves gaps without a conservative error bound. |
+| Centring and recovery | **PARTIAL**. Centring checks increments and failed returns stop retries. Recovery bypasses limits, centring saves the commanded pose after capture, and bootstrap checks seed-to-target while issuing moves from the current pose. |
+| Planner certifies uncaptured poses | **PARTIAL**. Selected poses run first and execution uses the expanded target. Top-up can exceed the configured reserve budget, spare substitutions can invalidate the information score, and weak-plan advice arrives after execution. |
+| ChArUco marker sizing | **PARTIAL**. Aliases and AprilTag dictionaries work, and marker locations are projected. Edge length divided by cell count gives an average that can miss the smallest foreshortened module. |
+| MoveIt probe outcomes | **PARTIAL**. The script attempts to record terminal status and error code. It still cancels when the execution check times out, and wrapper state alone does not establish that Panda has begun moving. Distro results are pending. |
+| Bootstrap round growth | **PARTIAL**. Skips, rejections, and failed solves after an estimate block growth. Visibility-driven halving still counts as clean, and the capture-driven cap does not constrain subsequent checks until a clean round updates `step`. |
+| Candidate filters and selection | **PARTIAL**. Distorted coverage, estimate-derived margin, axis scoring, and posed-box handling are present. The optional carried-object box check is skipped during bootstrap. |
+| Driver protocol | **RESOLVED**. Explicit motion outcomes, measured joints, and recorded empty captures are supported. |
+| Test coverage | **RESOLVED**. Fake FK drives motion from joint goals, capture purposes scope the counts, and tests assert consensus, axis selection, uncertainty, and failed recovery. |
+| Shared outline sampler | **RESOLVED**. Bootstrap, planning, and capture gating share the sampler, and bootstrap documents its approximation. |
+
+### New problems
+
+- **SHOULD-FIX** [.github/workflows/probe.yml:45](/home/anson/workspaces/handeye_autopilot/.github/workflows/probe.yml:45) The job can pass with missing terminal results or a failed IK call. Validate the required observations and exit nonzero for an incomplete or inconclusive probe while preserving the YAML and logs.
+- **SHOULD-FIX** [planning.py:214](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/core/planning.py:214) A 180° relative rotation returns a zero axis and receives maximum novelty even about a previously used axis. Extract axes from SciPy rotation vectors and add a half-turn regression.
+- **NIT** [02-features.md:57](/home/anson/workspaces/handeye_autopilot/docs/design/02-features.md:57) §B2 specifies cube-corner sampling and recovery to the last good pose, then gives different rules in the as-built paragraph. Consolidate §B2 into one specification.
+## Second and third verification passes (2026-11-27)
+
+After the Jazzy probe run and the follow-up fixes. Status of the earlier
+PARTIAL items:
+
+| Finding | Status |
+|---|---|
+| Bootstrap worst-case visibility | Accepted shortcut with a measured bound: default sampling allows ≤ ~5 % more rotation / ~1 % more translation than a dense 512 × 129 × 8 check; a test asserts < 10 %, inside the 1.5 safety factor (02-features §B2). |
+| Centring and recovery | RESOLVED. Recovery applies limits; `at_verified` makes centring start from a view the robot is at (return to the seed otherwise); a recovery to the pose the robot is already at is not sent. |
+| Planner certifies uncaptured poses | Top-up capped at target × reserve, budget ⌈target × reserve²⌉, weak advice on `Plan` before execution. Spare substitution is not re-scored: documented `shortcut:`, the solver's observability gate decides. |
+| ChArUco marker sizing | RESOLVED. Every projected marker cell edge; foreshortening test. |
+| MoveIt probe outcomes | Jazzy RESOLVED (`docs/probes/`); Lyrical/Rolling run via `probe.yml` after merge. |
+| Bootstrap round growth | RESOLVED. |
+| Candidate filters and selection | RESOLVED. Pre-estimate box check uses the lever ball (+ half board diagonal for eye-to-hand corners). |
+| Probe validation | RESOLVED. Exits nonzero on missing outcomes, a failed reachable IK, a cancel that succeeded, or missing trajectory evidence. |
+| Half-turn axis, §B2 consolidation | RESOLVED. |
+
+Third-pass findings and fixes:
+
+- Box radius ignored eye-to-hand board corners → half diagonal added, test.
+- Centring could start from a view the robot was not at → `at_verified`, test.
+- Joint goals vs the checked straight path → `Move.cartesian` for bootstrap,
+  centring, recovery; driver plans a full Cartesian path (fraction 1.0,
+  refused before sending otherwise; probe), sets a jump threshold, checks the
+  TF end pose (01-architecture §3.2). PARTIAL until M3 implements the driver.
+- `not_started` evidence → ABORTED + empty planned trajectory + unchanged
+  joints (probe: `executed_trajectory` is always empty on Jazzy).
+- Redundant recovery could abort a run; double rounding of the move budget;
+  probe checks for the trajectory evidence → fixed with tests.
+
+## Re-review at `xhigh` reasoning effort (2026-11-27)
+
+Earlier passes ran at the model's default effort (unset in the Codex config).
+The maintainer set `model_reasoning_effort = "xhigh"` and asked for a
+comparison. Prompts and raw outputs: [`m2-xhigh/`](m2-xhigh/).
+
+The `xhigh` full review found 5 blockers and 5 should-fixes, nearly all new:
+config values that disable guards, the safety box at the seed and along
+paths, offset-TCP Cartesian paths, boolean motion outcomes, Cartesian
+cancellation, X+Z settling, underfilled plans, vacuous tests, probe evidence,
+IK error detail. Two verification passes followed; each further round found
+narrower issues (measured vs commanded pose, estimate margin, spare order,
+start-of-path and orientation between waypoints), all fixed with tests. The
+offset-TCP finding was confirmed in MoveIt: 4.52 mm TCP deviation with the end
+pose only vs 0.014 mm with dense converted waypoints (`docs/probes/`).
+Passes 2-10 each found narrower issues (all fixed with tests): measured vs
+commanded and per-frame poses, the carried-object box check (now always the
+L_max ball, never the estimate), orientation between waypoints, rotation
+steps past a half-turn, the printed side turning away, the commanded step
+between samples, and probe evidence that could pass vacuously.
+**Pass 11: "M2 merge: CLEAR"**; its two should-fixes (re-check a halved
+retry; verify the Cartesian end pose) are fixed in the merge commit.
+Remaining items are M3 driver-contract notes (01-architecture §3.2), the
+Lyrical/Rolling probe runs, and the bounded test-alarm delay in native code.

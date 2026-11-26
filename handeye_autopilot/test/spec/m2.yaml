@@ -1,0 +1,17 @@
+# M2 test spec (03-milestones M2 "done when", committed). Truth, camera,
+# board and robot noise come from spec/m1b.yaml.
+seed: {distance: 0.6, tilt: [20, -15], roll: 5, offset: [40, -30]}
+reach: [0.2, 1.6]                 # fake IK: tool origin distance from the base, m
+session:                          # SessionConfig overrides for the tests
+  target_captures: 20
+deadline_s: 120                   # one full session, both modes
+tolerance: {translation_m: 0.003, rotation_deg: 0.5}
+
+# 'L_max too small' (expected failure, code board_lost): the real lever arm is
+# much longer than declared, so bootstrap steps judged safe lose the board.
+lever_too_small:
+  eye_to_hand: {lever_max: 0.0, true_lever_scale: 8, first_rotation_deg: 10, max_halvings: 0}
+  eye_in_hand: {lever_max: 0.0, true_lever_scale: 30, first_rotation_deg: 15, max_halvings: 0}
+# weak plan: limits so tight only a few poses are usable (measured: 3 poses,
+# information ~900 < 1000); the plan is reported weak AND still executed.
+weak_plan: {envelope_radius: 0.15, max_orientation_change_deg: 15, max_bootstrap_rounds: 1}

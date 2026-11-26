@@ -132,3 +132,126 @@ class SolverConfig:
         if unknown:
             raise ValueError(f'unknown solver config keys: {sorted(unknown)}')
         return cls(**d)
+
+
+@dataclass(frozen=True)
+class SessionConfig:
+    """Session flow, bootstrap and candidate planning (02-features §B-C).
+
+    All limits are placeholders until simulation sweeps (M2) and real runs (M5)
+    set them. SI units: m, rad; image quantities in px.
+    """
+
+    # seed (§B1)
+    min_seed_tilt: float = math.radians(10.0)     # board normal vs line of sight
+    frames_per_capture: int = 3
+    # bootstrap (§B2)
+    lever_max: float = 0.3                        # L_max, tool <-> moving object, m
+    first_rotation_step: float = math.radians(3.0)
+    first_translation_step: float = 0.01          # m
+    max_rotation_step: float = math.radians(20.0)
+    max_translation_step: float = 0.08
+    step_safety: float = 1.5                      # the check uses step * safety
+    image_margin_px: float = 20.0
+    max_halvings: int = 2                         # per move, after a lost board
+    estimate_change_rotation: float = math.radians(1.0)   # allows doubling
+    estimate_change_translation: float = 0.01
+    max_bootstrap_rounds: int = 6
+    bootstrap_min_captures: int = 13              # seed + one full round
+    # the preliminary solve only needs a usable rough estimate, not quality
+    bootstrap_min_rotation: float = math.radians(2.0)
+    bootstrap_min_pair_rotation: float = math.radians(1.0)
+    # centring (§B3)
+    centring_steps: int = 3
+    nominal_depth: float = 0.55                   # m, board distance for centring
+    # candidates (§C)
+    candidates: int = 400                         # Halton samples
+    depth_range: tuple[float, float] = (0.4, 0.75)
+    max_tilt: float = math.radians(35.0)
+    max_roll: float = math.radians(60.0)
+    image_border_frac: float = 0.25               # centre sampled inside this border
+    uncertainty_margin_px: float = 15.0           # visibility margin for estimate error,
+    #                                               plus 2x the estimate's worst reprojection
+    coverage: tuple[float, float] = (0.04, 0.6)   # projected board area / image area
+    min_corner_spacing_px: float = 8.0
+    min_marker_module_px: float = 2.0             # ChArUco marker bit size
+    # robot-agnostic limits (§C4, 01-architecture §3.4)
+    box_enabled: bool = False
+    # box pose in the base frame (the node resolves a named frame through TF):
+    # centre xyz (m) and rpy (rad, extrinsic xyz); size = full edge lengths (m)
+    box_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    box_rpy: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    box_size: tuple[float, float, float] = (2.0, 2.0, 2.0)
+    box_check_moving_object: bool = False    # also the board corners (e2h) / camera (eih)
+    envelope_radius: float = 0.4                  # tool origin from the seed, m
+    max_orientation_change: float = math.radians(60.0)   # tool rotation from the seed
+    # selection (§C6-7)
+    target_captures: int = 20
+    reserve_factor: float = 1.5
+    min_plan_singular_value: float = 1000.0       # scaled information, 1/m (full M2 plans
+    #                                               score ~4300; bootstrap alone ~400)
+    # checked short moves: Cartesian waypoint spacing (01-architecture §3.2)
+    waypoint_max_angle: float = math.radians(1.0)    # <= 5 deg (validated)
+    waypoint_max_step: float = 0.005
+
+    def __post_init__(self) -> None:
+        """Reject values that would silently disable a motion guard (a zero
+        safety factor, a NaN radius, ...)."""
+        ints = {'frames_per_capture': 1, 'max_halvings': 0, 'max_bootstrap_rounds': 1,
+                'bootstrap_min_captures': 3, 'centring_steps': 1, 'candidates': 1,
+                'target_captures': 3}
+        for name, lo in ints.items():
+            v = getattr(self, name)
+            if isinstance(v, bool) or not isinstance(v, int) or v < lo:
+                raise ValueError(f'{name} must be an integer >= {lo}')
+        positive = ('first_rotation_step', 'first_translation_step', 'max_rotation_step',
+                    'max_translation_step', 'estimate_change_rotation',
+                    'estimate_change_translation', 'nominal_depth', 'envelope_radius',
+                    'max_orientation_change', 'waypoint_max_angle', 'waypoint_max_step',
+                    'bootstrap_min_rotation', 'bootstrap_min_pair_rotation')
+        non_negative = ('lever_max', 'image_margin_px', 'min_seed_tilt', 'max_tilt',
+                        'max_roll', 'uncertainty_margin_px', 'min_corner_spacing_px',
+                        'min_marker_module_px', 'min_plan_singular_value',
+                        'image_border_frac')
+        for name in positive + non_negative + ('step_safety', 'reserve_factor'):
+            v = getattr(self, name)
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+                raise ValueError(f'{name} must be a finite number')
+            if name in positive and v <= 0:
+                raise ValueError(f'{name} must be > 0')
+            if v < 0:
+                raise ValueError(f'{name} must be >= 0')
+        if self.max_rotation_step * self.step_safety > math.pi / 2:
+            # the checks interpolate rotation vectors: at a half-turn and beyond
+            # a step wraps (360 deg reads as no rotation); keep well below
+            raise ValueError('max_rotation_step x step_safety must be <= 90 deg')
+        if self.max_orientation_change >= math.pi:
+            raise ValueError('max_orientation_change must be < 180 deg')
+        if self.waypoint_max_angle > math.radians(5.0):
+            raise ValueError('waypoint_max_angle must be <= 5 deg (path sag between checks)')
+        if self.step_safety < 1:
+            raise ValueError('step_safety must be >= 1 (the check covers step x safety)')
+        if self.reserve_factor < 1:
+            raise ValueError('reserve_factor must be >= 1')
+        if self.image_border_frac >= 0.5:
+            raise ValueError('image_border_frac must be < 0.5')
+        for name, n in (('depth_range', 2), ('coverage', 2), ('box_xyz', 3), ('box_rpy', 3),
+                        ('box_size', 3)):
+            v = getattr(self, name)
+            if not isinstance(v, (tuple, list)) or len(v) != n:
+                raise ValueError(f'{name} must have {n} values')
+            if not all(isinstance(x, (int, float)) and not isinstance(x, bool) and
+                       math.isfinite(x) for x in v):
+                raise ValueError(f'{name} must hold finite numbers')
+        if not 0 < self.depth_range[0] < self.depth_range[1]:
+            raise ValueError('depth_range must be 0 < near < far')
+        if not 0 <= self.coverage[0] < self.coverage[1] <= 1:
+            raise ValueError('coverage must be 0 <= low < high <= 1')
+        if min(self.box_size) <= 0:
+            raise ValueError('box_size must be positive')
+        if self.first_rotation_step > self.max_rotation_step or \
+                self.first_translation_step > self.max_translation_step:
+            raise ValueError('first bootstrap steps must not exceed the max steps')
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
