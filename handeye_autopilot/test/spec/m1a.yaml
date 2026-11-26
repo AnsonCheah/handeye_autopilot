@@ -1,0 +1,147 @@
+# M1a test spec (03-milestones M1a "done when", committed).
+# Angles in degrees here for readability; the code converts to radians.
+# Fixture images under test/fixtures/m1a/ are generated from this file by
+#   python3 test/m1a_scenes.py --write
+# and committed, so OpenCV 4.6 and 4.10 detect the very same pixels.
+
+seed: 7
+noise_sigma: 2.0                 # gray levels
+tolerances:
+  corner_max_px: 0.25            # detected vs true projected corner, any fixture
+  corner_mean_px: 0.10
+  ids_exact: true                # IDs and board coordinates must match exactly
+
+cameras:
+  wide:                          # 640x480, noticeable barrel distortion
+    K: [[600, 0, 320], [0, 600, 240], [0, 0, 1]]
+    D: [-0.15, 0.05, 0.0005, -0.0005, 0.0]
+    width: 640
+    height: 480
+    distortion_model: plumb_bob
+  wide_rational:
+    K: [[610, 0, 318], [0, 605, 243], [0, 0, 1]]
+    D: [-0.1, 0.02, 0.0005, -0.0005, 0.0, 0.05, 0.0, 0.0]
+    width: 640
+    height: 480
+    distortion_model: rational_polynomial
+  strong_barrel:                 # used only to render; detected with D = 0 (reprojection gate)
+    K: [[600, 0, 320], [0, 600, 240], [0, 0, 1]]
+    D: [-0.4, 0.15, 0.0, 0.0, 0.0]
+    width: 640
+    height: 480
+    distortion_model: plumb_bob
+  tele:                          # long focal length: weak perspective -> planar ambiguity
+    K: [[6000, 0, 320], [0, 6000, 240], [0, 0, 1]]
+    D: [0, 0, 0, 0, 0]
+    width: 640
+    height: 480
+    distortion_model: plumb_bob
+
+boards:
+  charuco: {kind: charuco, squares_x: 7, squares_y: 5, square_length: 0.04,
+            marker_length: 0.03, dictionary: DICT_5X5_100}
+  charuco_long: {kind: charuco, squares_x: 15, squares_y: 5, square_length: 0.02,
+                 marker_length: 0.015, dictionary: DICT_5X5_100}
+  charuco_even_rows: {kind: charuco, squares_x: 7, squares_y: 6, square_length: 0.035,
+                      marker_length: 0.026, dictionary: DICT_4X4_50}
+  checker: {kind: checkerboard, squares_x: 7, squares_y: 6, square_length: 0.03}
+  checker_swapped: {kind: checkerboard, squares_x: 6, squares_y: 7, square_length: 0.03}
+
+# Pose of the board centre on a ray: distance (m), tilts about board x/y,
+# roll about the optical axis, centre offset from the principal point (px).
+# Occluders are grey cards 3 cm in front of the board covering a board-frame
+# rectangle (m). Strays are loose 6 cm marker cards with an on-board ID.
+# expect_ids: all = every corner of the board must be detected (full view).
+fixtures:
+  charuco_tilted:     {camera: wide, board: charuco, distance: 0.55, tilt: [25, -20], roll: 10,
+                       expect: accepted, expect_ids: all}
+  charuco_offcentre:  {camera: wide_rational, board: charuco, distance: 0.5, tilt: [15, 30],
+                       roll: -5, offset: [100, -60], expect: accepted, expect_ids: all}
+  charuco_even_rows:  {camera: wide, board: charuco_even_rows, distance: 0.55, tilt: [25, -20],
+                       roll: 10, expect: accepted, expect_ids: all}
+  checker_tilted:     {camera: wide, board: checker, distance: 0.5, tilt: [20, -25], roll: 15,
+                       expect: accepted, expect_ids: all}
+  checker_rot180:     {camera: wide, board: checker, distance: 0.5, tilt: [20, -25], roll: 195,
+                       expect: accepted, expect_ids: all}
+  checker_swapped:    {camera: wide, board: checker_swapped, distance: 0.5, tilt: [25, -20],
+                       roll: 10, expect: accepted, expect_ids: all}
+  checker_swapped_rot180: {camera: wide, board: checker_swapped, distance: 0.5, tilt: [25, -20],
+                           roll: 190, expect: accepted, expect_ids: all}
+  stray_masked:       {camera: wide, board: charuco, distance: 0.55, tilt: [25, -20], roll: 10,
+                       stray: {id: 5, distance: 1.1, tilt: [-10, 30], roll: 40,
+                               offset: [-250, -180]},
+                       expect: accepted, expect_ids: all, same_as: charuco_tilted}
+  stray_duplicates:   {camera: wide, board: charuco, distance: 0.55, tilt: [25, -20], roll: 10,
+                       strays: [{id: 5, distance: 1.1, tilt: [-10, 30], roll: 40,
+                                 offset: [-250, -180]},
+                                {id: 9, distance: 0.9, tilt: [20, 10], roll: -30,
+                                 offset: [240, 170]},
+                                {id: 5, distance: 1.3, tilt: [0, -20], roll: 80,
+                                 offset: [-240, 170]}],
+                       expect: accepted, expect_ids: all, same_as: charuco_tilted}
+  stray_rejected:     {camera: wide, board: charuco, distance: 0.55, tilt: [25, -20], roll: 10,
+                       occluders: [{x: [0.06, 0.26], y: [-0.02, 0.18]}],
+                       stray: {id: 5, distance: 1.1, tilt: [-10, 30], roll: 40,
+                               offset: [-250, -180]},
+                       expect: marker_support}          # too few markers to fit at all
+  marker_cluster:     {camera: wide, board: charuco_long, distance: 0.45, tilt: [15, -10],
+                       roll: 0,
+                       occluders: [{x: [0.07, 0.32], y: [-0.02, 0.12]},
+                                   {x: [-0.02, 0.071], y: [0.07, 0.12]}],
+                       stray: {id: 20, distance: 1.0, tilt: [-10, 30], roll: 40,
+                               offset: [-250, -180]},
+                       expect: marker_support}          # fits, but inliers cover too little
+  two_boards:         {camera: wide, board: charuco, distance: 0.75, tilt: [20, -15], roll: 5,
+                       offset: [-140, -30],
+                       second_board: {distance: 0.75, tilt: [-20, 25], roll: -8,
+                                      offset: [150, 40]},
+                       expect: two_boards}              # all IDs duplicated: fit on all copies
+  two_boards_partial: {camera: wide, board: charuco, distance: 0.75, tilt: [20, -15], roll: 5,
+                       offset: [-140, -30],
+                       second_board: {distance: 0.75, tilt: [-20, 25], roll: -8,
+                                      offset: [260, 60]},
+                       expect: two_boards}              # unique-ID fit, then second RANSAC
+  ambiguous:          {camera: tele, board: charuco, distance: 4.0, tilt: [10, 0], roll: 3,
+                       expect: ambiguous_pose}
+  faceon_unambiguous: {camera: tele, board: charuco, distance: 4.0, tilt: [1, 0], roll: 3,
+                       expect: accepted, expect_ids: all}
+
+# Rendered at test time (not stored): one scene per remaining gate.
+gate_scenes:
+  few_features: {camera: wide, board: charuco, distance: 0.45, tilt: [10, -10], roll: 0,
+                 offset: [300, 0]}
+  blurry:       {camera: wide, board: checker, distance: 0.5, tilt: [20, -25], roll: 15,
+                 blur_sigma: 2.4}
+  near_border:  {camera: wide, board: checker, distance: 0.5, tilt: [5, -5], roll: 0,
+                 offset: [225, 0]}
+  cropped:      {camera: wide, board: charuco, distance: 0.45, tilt: [10, -10], roll: 0,
+                 offset: [240, 0]}                      # corners clear, outline leaves image
+  reprojection: {camera: strong_barrel, board: checker, distance: 0.5, tilt: [20, -25],
+                 roll: 15, offset: [200, 140]}
+  long_board:   {camera: wide, board: charuco_long, distance: 0.45, tilt: [15, -10], roll: 0}
+  one_row:      {camera: wide, board: charuco_long, distance: 0.45, tilt: [15, -10], roll: 0,
+                 occluders: [{x: [-0.02, 0.32], y: [-0.02, 0.03]},
+                             {x: [-0.02, 0.32], y: [0.07, 0.12]}]}   # one corner row left
+  # Found by the sweep: findChessboardCornersSB returns a grid turned by 90 degrees
+  # that uses the board edge as a corner row; the square-pattern check rejects it.
+  checker_false_grid: {camera: wide, board: checker, distance: 0.5037243621266918,
+                       tilt: [-1.8655101946509198, 24.368060333733638],
+                       roll: 71.0499919450672,
+                       offset: [-25.708694281208757, -77.29964558440034], render_seed: 1007}
+  consensus_shift_m: 0.005
+
+# Pose sweep (fixed seed, committed ranges): every view is either accepted with
+# corners within the tolerances above, or rejected with an allowed code.
+sweep:
+  seed: 11
+  views: 16
+  boards: [charuco, checker]
+  camera: wide
+  distance: [0.5, 0.75]
+  tilt: [-30, 30]            # each of the two tilt angles
+  roll: [-180, 180]
+  offset: [-60, 60]          # px, each axis
+  corner_max_px: 0.4        # wider than the fixtures: far, steep views have small markers
+  corner_mean_px: 0.10
+  allowed_rejects: [near_border, ambiguous_pose, no_board]   # no_board: see checker_false_grid
+  min_accepted_fraction: 0.8

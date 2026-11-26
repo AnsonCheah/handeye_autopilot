@@ -18,5 +18,7 @@ setup(
     license='Apache-2.0',
     # colcon runs pytest when it is listed here (tests_require is gone in new setuptools)
     extras_require={'test': ['pytest']},
-    entry_points={'console_scripts': []},
+    entry_points={'console_scripts': [
+        'board_image = handeye_autopilot.cli.board_image:main',
+    ]},
 )

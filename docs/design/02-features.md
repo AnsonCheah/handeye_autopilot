@@ -113,7 +113,9 @@ The state machine is one plain class in `handeye_autopilot.core`; the node drive
 
 ## D. Capture and detection
 
-**Reuse:** `findChessboardCornersSB` (already subpixel; no `cornerSubPix`),
+**Reuse:** `findChessboardCornersSB` (already subpixel; no `cornerSubPix`;
+its starting corner varies, so corners are put in board order by handedness
+and the colour of the first square),
 OpenCV ChArUco detector (its own board-consistency checks), `solvePnPGeneric`
 with `SOLVEPNP_IPPE`, `solvePnPRefineLM`.
 
@@ -123,21 +125,35 @@ Symmetric checkerboards are rejected at config validation with a message
 recommending ChArUco.
 
 1. **Settle and per-frame TF** as in checkpoint 1 §8.
-2. **Consensus:** take N frames *(tune)*, each with its own TF. Reject the
-   capture if the frames' board poses disagree beyond a threshold. Keep **one**
-   frame as the measurement (the one closest to the median pose), not an
-   average, so every measurement is a real exposure paired with its own robot
-   pose and correlated frames are not counted as independent data.
-3. **Per-capture gates**, each with a reason code:
+2. **Consensus:** take N frames *(tune)*, each with its own TF. Frame losses
+   are bounded: at most `max_frames_without_tf` frames may lack TF at their
+   stamp (else `TF_UNAVAILABLE`), and at most `max_failed_frames` may fail a
+   gate (else the capture is rejected with the most common frame reason); at
+   least `consensus_min_frames` must remain. Reject the capture if **any pair**
+   of remaining frames disagrees beyond the translation/rotation limits (a
+   bound from the median alone would allow pairs twice the limit apart). Keep
+   **one** frame as the measurement (the medoid pose), not an average, so
+   every measurement is a real exposure paired with its own robot pose and
+   correlated frames are not counted as independent data.
+3. **Per-capture gates**, each with a reason code. Order: the gates that need
+   no pose (features, spread, collinearity, sharpness) run first, then PnP
+   (a failed or non-finite fit is a `reprojection` rejection, never an
+   exception), then reprojection, board outline, ambiguity:
    - enough features, spread over the board (convex-hull area fraction) and not
      collinear;
    - image sharpness in the board region (variance of Laplacian) *(tune)*;
-   - board inside the image with a border margin;
+   - **whole board** inside the image with a border margin: the board's
+     outer outline, sampled densely and projected with the fitted pose and
+     distortion (not just the detected corners, which can stay inside while
+     the board is cropped);
    - mean and worst-corner reprojection of the PnP fit, **after**
      `solvePnPRefineLM`;
    - **pose ambiguity:** IPPE gives two poses. Reject when the runner-up's error
      is within a noise-scaled factor of the best **and** the two poses differ by
-     more than a pose threshold (nearly identical poses are not ambiguous).
+     more than a pose threshold (rotation **or** translation; nearly
+     identical poses are not ambiguous). The comparison uses the two **raw**
+     IPPE solutions' RMS errors; only the best is then refined with
+     `solvePnPRefineLM` (refining both can pull them into one minimum).
      Applies in every phase; no exemptions. Its M1a fixture must be a view
      that **meets both conditions** (verified in the test, not assumed from
      "near face-on"); a near-face-on view that fails either condition is a
@@ -151,8 +167,11 @@ recommending ChArUco.
    Order of operations:
    1. **Detect markers only** (ArUco detector), not the full board.
    2. **Duplicate IDs:** if an ID appears more than once, keep none of its
-      copies for the RANSAC fit; after the fit, keep at most the one copy that
-      is an inlier, else drop all.
+      copies for the RANSAC fit; after the fit, keep at most one inlier copy
+      (the lowest-error one), else drop all. If fewer than `min_markers`
+      unique IDs remain (e.g. two complete boards: every ID twice), fit on
+      **all** copies instead; RANSAC treats the wrong copies as outliers.
+      Fewer than `min_markers` detections in total: `marker_support`.
    3. **RANSAC:** `cv2.solvePnPRansac` on all marker corners against their
       board coordinates. Markers with any outlier corner are dropped. This
       tests **projection consistency** with one board pose: a stray marker
@@ -162,10 +181,19 @@ recommending ChArUco.
    4. **Support checks:** reject the capture if the inlier markers are too
       few or not spread over the board (convex-hull fraction), or if a
       **second** RANSAC on the outliers finds a consistent group of comparable
-      size (two boards in view).
+      size, counted in **distinct IDs** (two boards in view). The second fit
+      uses only markers that do **not** fit the first pose (extra copies that
+      do are repeats of the same board). `two_boards` is
+      only returned on that geometric evidence, never on duplicate IDs alone,
+      so scattered stray copies of board IDs are masked, not mistaken for a
+      second board.
    5. **Interpolate ChArUco corners from the inlier markers only**, passing
       them explicitly so the detector does not re-detect the dropped markers
       (with an empty inlier set the capture is rejected before this call).
+      Then `cornerSubPix` once more with a window kept inside the white border
+      around the markers (~0.8 of its width): OpenCV's interpolated corners
+      are ~0.5 px off on 4.6 and 4.10, and a window reaching into the marker
+      bits biases them by 0.2–0.3 px (M1a measurement on rendered boards).
    6. Continue with the normal gates (§D3).
    **Expected outcomes, one fixture each (M1a):**
    - *masking succeeds:* one isolated stray marker, enough board markers left
@@ -184,16 +212,23 @@ recommending ChArUco.
    - `ids`: corner IDs in ascending order; `object_points` (N×3, board frame,
      m) and `image_points` (N×2, px) in the same order;
    - `tool_pose`: `base_T_tool` paired with this frame's stamp (4×4);
-   - both IPPE poses (`camera_T_board`, 4×4) and their reprojection errors;
+   - `camera_T_board`: the refined board pose of the kept frame (4×4), the
+     measurement the solver uses;
+   - `ippe_poses`: both raw IPPE poses (4×4, best first) and `ippe_errors_px`
+     (their RMS reprojection errors);
    - `accepted` and, if rejected, the `REJECT_*` code and detail.
-   Accepted records must have every field. Rejected records keep what
-   existed when the capture was rejected; later fields are `null` (e.g. no
-   board → empty `ids` and null poses; TF unavailable → null `tool_pose`).
-   The solver reads accepted records only.
+   Accepted records must have every field, with exactly two IPPE poses
+   (checked on construction and on load). Rejected records keep what existed
+   for the frame that decided the rejection; later fields are `null`. `ids`
+   is always a list (`[]` when no board was found); `object_points`,
+   `image_points`, `camera_T_board`, `ippe_*` are `null` when they were never
+   computed; `tool_pose` is `null` when TF was missing. The solver reads
+   accepted records only.
    The **observations YAML** is a list of capture records plus run metadata
-   (mode, board definition, frames) and a top-level `schema_version: 1`
-   (integer, bumped on any incompatible change; the loader refuses unknown
-   versions).
+   (`mode`; `frames` with `base_frame`, `tool_frame`, `camera_frame`; the
+   board definition) and a top-level `schema_version: 1` (an integer, bumped
+   on any incompatible change; the loader refuses unknown or non-integer
+   versions and missing metadata).
 
 ## E. Solver
 
@@ -311,10 +346,23 @@ board, and an annotated image with the rejection reason.
 ## J. Targets and printing
 
 ChArUco (OpenCV dictionaries) and parity-asymmetric checkerboards in v1.
-Board images: OpenCV `CharucoBoard.generateImage` for ChArUco; a short NumPy
-function for checkerboards. YAML distinguishes **square counts** from
-**inner-corner counts** explicitly. Docs: measure a printed square with
-calipers.
+Checkerboards need at least 4 squares per side (the detector fails on a
+2-corner side). Board images: OpenCV `CharucoBoard.generateImage` for ChArUco;
+a short NumPy function for checkerboards; the `board_image` tool writes the
+print resolution into the PNG (`pHYs`) so a 100 % print has the stated square
+size. YAML distinguishes **square counts** from **inner-corner counts**
+explicitly. Docs: measure a printed square with calipers.
+
+A detected checkerboard grid is accepted only if (≥ 97 % of) its corners are
+true X-junctions with the board's colours: the four squares touching each
+corner are sampled close to it (¼ square along each diagonal; samples outside
+the image don't count). The M1a pose sweep found `findChessboardCornersSB`
+occasionally returning a grid turned by 90° that uses the board edge against
+the white margin as a corner row (those L-shaped "corners" fail: 83 % in the
+fixture); this check rejects it as `no_board` instead of passing wrongly
+ordered corners. A first version checked every square's centre, outer ring
+included; real OpenCV sample prints, whose outer squares are cut short,
+failed it, hence sampling next to the corners.
 
 ## L. Exposure: point the driver's auto-exposure at the board (off by default)
 

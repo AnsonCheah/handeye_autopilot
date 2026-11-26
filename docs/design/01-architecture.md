@@ -40,14 +40,14 @@ Solving uses OpenCV + SciPy. Interop (v1.1): export observations in
 | Need | Use (exists) | We write |
 |---|---|---|
 | Image conversion | `cv_bridge` | Nothing |
-| Camera model, raw vs rectified | `image_geometry` `PinholeCameraModel` | Validation of `CameraInfo` (§7) |
-| Board detection | OpenCV `findChessboardCornersSB`, ArUco/ChArUco detectors | Compatibility shim for OpenCV 4.6 (24.04) and 4.10 (26.04) |
+| Camera model, raw vs rectified | `image_geometry` `PinholeCameraModel` (ROS layer); in `core`, K/D as NumPy with OpenCV `projectPoints`/`undistortPoints` (no ROS) | Validation of `CameraInfo` (§7); a small `CameraModel` holder in `core` |
+| Board detection | OpenCV `findChessboardCornersSB`, ArUco/ChArUco detectors, `cornerSubPix` | Compatibility shim for OpenCV 4.6 (24.04) and 4.10 (26.04); canonical checkerboard corner order; a final `cornerSubPix` on ChArUco corners (OpenCV's interpolation returns them ~0.5 px off on both versions, measured in M1a) |
 | Board pose per frame, both planar solutions | OpenCV `solvePnPGeneric` with `SOLVEPNP_IPPE` | Nothing |
-| Board printouts | OpenCV `CharucoBoard.generateImage` (ChArUco) | A short NumPy function for checkerboards |
+| Board printouts | OpenCV `CharucoBoard.generateImage` (ChArUco) | A short NumPy function for checkerboards; `cli/board_image.py` (exact scale, PNG `pHYs`) |
 | Intrinsics | `camera_calibration` (image_pipeline) | Nothing |
 | Initial hand-eye solve | OpenCV `calibrateHandEye`, `calibrateRobotWorldHandEye` | Nothing |
 | Refinement and uncertainty | SciPy `least_squares` (robust loss, Jacobian) | Residual function |
-| Rotations | SciPy `Rotation` | Nothing |
+| Rotations | SciPy `Rotation`, OpenCV `Rodrigues` | `core/transforms.py`: 4×4 helpers (make, inverse, angle) over them |
 | Quasi-random sampling | SciPy `qmc.Halton` | Nothing |
 | Image + camera info | Image subscription; latest `CameraInfo` cached (§7) | Cache + consistency check |
 | Robot pose at a stamp | `tf2_ros` Buffer, async wait with deadline | Nothing |
@@ -409,6 +409,10 @@ M3.
   passed as `ref` to both); dependency gate (§4); `ruff`; `mypy --strict` on
   `handeye_autopilot.core`. The `pymoveit2` API smoke test runs (not skips) on
   every leg (`HANDEYE_AUTOPILOT_REQUIRE_DEPS=1`).
+- **Core on several OpenCV versions:** a pip-based job runs the ROS-free
+  tests on OpenCV 4.10 and 4.12 (4.12 ships in no distro yet), so detection
+  changes are checked against every API variant without waiting for ROS
+  images. Test-only; the released packages still use apt OpenCV.
 - **Downstream consumer (CI only):** `ci/interface_consumer/` is a minimal
   package outside the released set (an ignore marker keeps bloom and colcon
   away from `ci/`). After the main build, CI builds it in a separate workspace
