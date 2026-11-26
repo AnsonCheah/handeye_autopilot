@@ -179,6 +179,7 @@ def offset_tcp_path(cart, fk, link8, offset: float, degrees: float, dense: bool)
     pts = res.solution.joint_trajectory.points
     names = res.solution.joint_trajectory.joint_names
     worst = 0.0
+    last = None
     for pt in pts:
         f = GetPositionFK.Request()
         f.header.frame_id = 'panda_link0'
@@ -190,9 +191,13 @@ def offset_tcp_path(cart, fk, link8, offset: float, degrees: float, dense: bool)
             return {'done': False, 'fk_failed': True}
         tcp = _mat(r.pose_stamped[0].pose) @ off
         worst = max(worst, float(np.linalg.norm(tcp[:3, 3] - tcp0[:3, 3])))
+        last = tcp
     return {'done': True, 'waypoints': len(steps), 'fraction': float(res.fraction),
             'points': len(pts), 'error_code': int(res.error_code.val),
-            'tcp_max_deviation_mm': round(worst * 1000, 3)}
+            'tcp_max_deviation_mm': round(worst * 1000, 3),
+            # the trajectory really performs the rotation (not a stationary path)
+            'tcp_rotation_deg': None if last is None else round(float(np.degrees(
+                Rotation.from_matrix(tcp0[:3, :3].T @ last[:3, :3]).magnitude())), 3)}
 
 
 def ik_call(node, client, pose, timeout: Duration) -> dict:
@@ -303,6 +308,12 @@ def main() -> None:
     # the not_started rule rests on these (01-architecture §3.2)
     if found['planning_failure'].get('planned_points') != 0:
         missing.append('planning_failure.planned_points_not_zero')
+    # ... and the arm did not move (the not_started evidence)
+    before = found['success'].get('joints_after')
+    after = found['planning_failure'].get('joints_after')
+    if before is None or after is None or \
+            max(abs(a - b) for a, b in zip(before, after, strict=True)) > 0.01:
+        missing.append('planning_failure.arm_moved')
     if not found['cancel_mid_motion'].get('planned_points'):
         missing.append('cancel_mid_motion.planned_points_missing')
     if found.get('cartesian_ok', {}).get('status') != 4:
@@ -315,7 +326,8 @@ def main() -> None:
         r = found.get(k, {})
         if r.get('fraction') != 1.0 or r.get('error_code') != 1 or \
                 (r.get('points') or 0) < 2 or \
-                r.get('tcp_max_deviation_mm') is None:
+                r.get('tcp_max_deviation_mm') is None or \
+                abs((r.get('tcp_rotation_deg') or 0.0) - 20.0) > 0.5:
             missing.append(k)
     # the evidence itself: dense waypoints keep the TCP on its path (sub-mm) and
     # clearly better than the end pose alone

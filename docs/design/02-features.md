@@ -72,7 +72,8 @@ Intrinsics are fixed (from `CameraInfo`), not refined.
      Sampling error, measured against a dense 512 × 129 × 8 check: the default
      allows at most ~5 % more rotation and ~1 % more translation (a test
      asserts < 10 %); the safety factor covers that several times over.
-   - **Box before an estimate:** when the box also checks the carried object,
+   - **Box and the carried object (always, not only before an estimate):** when
+     the box also checks the carried object,
      its reference point (board centre / camera origin) can be anywhere
      within √3·`L_max` of the tool origin, plus half the board diagonal for
      the board corners in eye-to-hand; that whole ball must lie inside the box.

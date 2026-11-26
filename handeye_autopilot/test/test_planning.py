@@ -265,7 +265,6 @@ def test_tiny_relative_rotation_is_not_zero():
                                  dict(box_size=(2.0,)), dict(box_xyz=(0.0, 0.0)),
                                  dict(coverage=(0.1, 0.2, 0.3)),
                                  dict(waypoint_max_angle=math.radians(25)),
-                                 dict(estimate_box_margin=-0.01),
                                  dict(max_rotation_step=math.radians(120), step_safety=3.0),
                                  dict(max_rotation_step=math.radians(70)),
                                  dict(max_orientation_change=math.pi)])
@@ -412,17 +411,16 @@ def test_move_budget_has_a_single_rounding():
     assert len(p.poses) <= math.ceil(3 * 1.5 ** 2)
 
 
-def test_planning_applies_the_estimate_box_margin():
-    """Candidates within the estimate margin of the box face are rejected at
-    planning time, as execution would skip them."""
+def test_planning_checks_the_carried_object_with_the_lever_ball():
+    """Candidates whose lever ball leaves the box are rejected at planning time,
+    as execution would skip them."""
     X, Z = truth('eye_to_hand')
     seed_tool = X @ board_pose() @ tf.inv(Z)
     box = dict(box_enabled=True, box_check_moving_object=True,
-               box_xyz=tuple(seed_tool[:3, 3]), box_size=(0.9, 0.9, 0.9))
-    loose = _plan_with(SessionConfig(**box, estimate_box_margin=0.0))
-    tight = _plan_with(SessionConfig(**box, estimate_box_margin=0.15))
-    assert tight.rejections[planning.OUTSIDE_BOX] > loose.rejections[planning.OUTSIDE_BOX]
-
+               box_xyz=tuple(seed_tool[:3, 3]), box_size=(1.2, 1.2, 1.2))
+    small = _plan_with(SessionConfig(**box, lever_max=0.0))
+    big = _plan_with(SessionConfig(**box, lever_max=0.15))
+    assert big.rejections[planning.OUTSIDE_BOX] > small.rejections[planning.OUTSIDE_BOX]
 
 
 def test_rotation_check_refuses_turning_the_printed_side_away():
@@ -435,16 +433,19 @@ def test_rotation_check_refuses_turning_the_printed_side_away():
     assert not bs.rotation_is_safe('eye_to_hand', C, BOARD, CAMERA, math.radians(4), cfg)
 
 
-def test_translation_check_refuses_showing_the_back_of_a_steep_board():
+def test_translation_check_refuses_showing_the_back_of_a_steep_board(monkeypatch):
     """A steeply tilted board shifted sideways (no rotation) can be seen from
-    behind; the outline may stay in the image."""
+    behind while its outline stays in the image: the facing check must cut the
+    step the outline check alone would allow."""
     cfg = SessionConfig(image_margin_px=0.0)
-    C = board_pose(distance=0.45, tilt=(65, 0), roll=0)
-    v = bs.safe_step(lambda x: bs.translation_is_safe(C, BOARD, CAMERA, x, cfg), 0.25, 0.001)
-    w, h = BOARD.size_m
-    centre = tf.apply(C, np.array([[w / 2, h / 2, 0]]))[0]
-    for d in bs.DIRECTIONS:                       # every allowed shift keeps the front
-        assert bs._faces_camera(C[:3, 2], centre + d * v * cfg.step_safety)
+    C = board_pose(distance=0.6, tilt=(85, 0), roll=0)       # measured: 36 mm vs 81 mm
+
+    def step():
+        return _largest(lambda x: bs.translation_is_safe(C, BOARD, CAMERA, x, cfg), 0.3, 16)
+    with_facing = step()
+    monkeypatch.setattr(bs, '_faces_camera', lambda n, c: True)
+    outline_only = step()
+    assert 0 < with_facing < 0.6 * outline_only
 
 
 def test_estimate_margin_applies_to_the_carried_object_not_the_tool():

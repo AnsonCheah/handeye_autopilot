@@ -149,12 +149,13 @@ MoveIt brand implicitly.
   planner interpolates the IK link; with only the end pose given, a rotation
   about an offset TCP would cut a chord, ~4.6 mm at mid-path for 20° at
   300 mm; measured 4.5 mm vs 0.014 mm with 1° waypoints, probe). The core
-  checks the limits at every waypoint with a box margin for the arc a carried
-  point bulges out between waypoints (`r·(1 − cos(Δθ/2))`) plus, when the
-  carried object's position comes from the rough estimate, a fixed estimate
-  margin *(tune; `shortcut:` no covariance)*, so the carried object cannot
-  cross a box face between two good end poses. Waypoint spacing is capped at
-  5°.
+  checks the limits at every waypoint and at the start. The carried object's
+  box check always uses the `L_max` ball around the tool origin (plus half the
+  board diagonal in eye-to-hand), never the rough estimate (a bootstrap
+  estimate misplaced a 100 mm camera offset by 40 mm in review). That ball is
+  unchanged by rotation about the tool origin and sweeps a convex hull along
+  the straight tool path, so the waypoint check is exact for the convex box.
+  Waypoint spacing is capped at 5°.
 - The driver reports the measured TF tool pose with every completed motion;
   the next move is checked from that pose, and a measured pose outside the
   limits stops the run (`motion_failed`). Orientation from the seed can exceed

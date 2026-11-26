@@ -169,9 +169,8 @@ def limits(G: Mat, seed_tool: Mat, cfg: SessionConfig,
     seed. The envelope and orientation limits always apply; the box adds a
     user-placed volume on top (01-architecture §3.4).
 
-    Margins: ``box_margin`` applies to the carried object's points only (arc
-    sag between waypoints, estimate error); the tool origin moves on a straight
-    path and is exact, so it gets none. ``orientation_margin``: orientation
+    Margins: ``box_margin`` applies to the carried object's points only; the
+    tool origin is exact. ``orientation_margin``: orientation
     from the seed can exceed the endpoints' by half a segment angle."""
     p = G[:3, 3]
     if cfg.box_enabled:
@@ -202,14 +201,6 @@ def lever_ball_points(mode: str, G: Mat, cfg: SessionConfig, board: BoardSpec) -
         r += 0.5 * float(np.hypot(*board.size_m))
     offsets = np.vstack([B.T * r, -B.T * r])               # rows: +-r along each box axis
     return np.asarray(G[:3, 3] + offsets, dtype=np.float64)
-
-
-def moving_points_base(mode: str, G: Mat, X: Mat, Z: Mat, board: BoardSpec) -> Mat:
-    """Base-frame points of the carried object: board corners (eye_to_hand) or the
-    camera origin (eye_in_hand), for the optional box check."""
-    if mode == 'eye_to_hand':
-        return tf.apply(G @ Z, board.outline)
-    return (G @ X)[:3, 3][None]
 
 
 # -- 6. information --------------------------------------------------------
@@ -336,11 +327,9 @@ def plan(mode: str, X: Mat, Z: Mat, camera: CameraModel, board: BoardSpec, seed_
         c.reject, c.detail = visibility(C, camera, board, cfg, uncertainty_px)
         if c.reject is None:
             c.tool_pose = handeye.tool_pose_for(mode, X, Z, C)
-            # the carried object comes from the estimate: same margin as execution
+            # carried object: the lever-bound ball, as at execution (not the estimate)
             c.reject, c.detail = limits(c.tool_pose, seed_tool, cfg,
-                                        moving_points_base(mode, c.tool_pose, X, Z, board),
-                                        cfg.estimate_box_margin
-                                        if cfg.box_check_moving_object else 0.0)
+                                        lever_ball_points(mode, c.tool_pose, cfg, board))
         if c.reject is None:
             res = ik(c.tool_pose)
             if res.joints is None:

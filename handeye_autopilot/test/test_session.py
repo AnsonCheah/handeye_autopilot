@@ -223,28 +223,6 @@ def test_checked_moves_carry_dense_waypoints_on_the_straight_path():
         assert m.waypoints == []
 
 
-def test_box_is_checked_along_a_checked_path_not_only_at_its_ends():
-    """eye_in_hand, camera 200 mm from the tool: a +-10 deg swing keeps the camera
-    inside the box at both ends but crosses the face at 0 deg in between."""
-    from m1b_sim import BOARD, CAMERA
-    c = cfg(box_enabled=True, box_check_moving_object=True, box_xyz=(0.0, 0.0, 0.0),
-            box_size=(2.0, 2.0, 2 * 0.198), envelope_radius=1.0)
-    s = session.Session('eye_in_hand', BOARD, CAMERA, FakeIK(0, 3), cfg=c)
-    X = tf.make(np.eye(3), [0.0, 0.0, 0.2])                    # camera 200 mm along tool z
-    s._st.X, s._st.Z = X, np.eye(4)
-    s._st.seed_tool = np.eye(4)
-
-    def tool(deg):                                             # swing about tool x
-        return tf.make(Rotation.from_euler('x', deg, degrees=True), np.zeros(3))
-    for end in (-10, 10):                                      # ends: camera z = 0.197
-        assert abs((tool(end) @ X)[2, 3]) < 0.198
-    s._st.at_pose = tool(-10)
-    gen = s._move(tool(10), 'centring')
-    with pytest.raises(StopIteration) as stop:
-        next(gen)                                              # refused before any Move
-    assert stop.value.value is False and s._st.skipped == 1
-
-
 def test_bootstrap_growth_needs_both_x_and_z_settled():
     from handeye_autopilot.core.session import settled_estimate
     from handeye_autopilot.core.solver import Solution
@@ -280,34 +258,6 @@ def _refused(s, start, target):
     except StopIteration as stop:
         return stop.value is False
     return False
-
-
-def test_box_margin_covers_the_arc_between_waypoints():
-    """5 deg waypoints from -12.5 to +12.5 deg skip 0 deg, where the camera
-    (on the arc) is highest: the sag margin must refuse it."""
-    half = 0.1999
-    s = _eih_box_session(box_size=(2.0, 2.0, 2 * half), waypoint_max_angle=math.radians(5),
-                         estimate_box_margin=0.0)
-    for deg in (-7.5, -2.5, 2.5, 7.5, 12.5):                # the waypoints themselves pass
-        assert (_swing(deg) @ s._st.X)[2, 3] < half
-    assert _refused(s, _swing(-12.5), _swing(12.5))
-
-
-def test_estimate_margin_on_the_carried_object():
-    """1 cm predicted clearance: allowed with no estimate margin, refused with 2 cm."""
-    for margin, refused in ((0.0, False), (0.02, True)):
-        s = _eih_box_session(box_size=(2.0, 2.0, 2 * 0.21), estimate_box_margin=margin)
-        assert _refused(s, _swing(0), _swing(0.5)) is refused
-
-
-def test_measured_pose_outside_the_limits_stops_the_run():
-    s = _eih_box_session(box_size=(2.0, 2.0, 2 * 0.25))
-    s._st.at_pose = np.eye(4)
-    gen = s._move(_swing(1), 'centring')
-    assert isinstance(next(gen), Move)
-    drifted = tf.make(np.eye(3), [0.0, 0.0, 0.2])            # camera would be at 0.4 m
-    with pytest.raises(session._Abort, match='measured tool pose'):
-        gen.send(('ok', None, drifted))
 
 
 def test_skip_reasons_keep_the_ik_error():
@@ -356,16 +306,6 @@ def test_orientation_limit_holds_between_waypoints():
     assert _refused(s, yaw(170), yaw(171)) is False          # well inside: allowed
 
 
-def test_path_start_is_checked_with_the_margins():
-    """The robot is at a pose inside the box but within the estimate margin of a
-    face: a checked move away from it is refused (its first segment could bulge out)."""
-    s = _eih_box_session(box_size=(4.0, 4.0, 2 * 0.205), estimate_box_margin=0.02)
-    start = tf.make(np.eye(3), [0.0, 0.0, -0.01])            # camera at z = 0.19
-    target = tf.make(np.eye(3), [0.0, 0.0, -0.05])           # camera at z = 0.15, fine
-    assert _refused(s, start, target)
-    assert _refused(s, target, tf.make(np.eye(3), [0.0, 0.0, -0.06])) is False
-
-
 def test_not_started_reply_updates_the_joints():
     s = _eih_box_session(box_size=(4.0, 4.0, 4.0))
     s._st.at_pose = np.eye(4)
@@ -375,3 +315,36 @@ def test_not_started_reply_updates_the_joints():
     with pytest.raises(StopIteration):
         gen.send(('not_started', fresh, None))
     assert np.array_equal(s._st.joints, fresh)
+
+
+def test_carried_object_box_check_uses_the_lever_bound_not_the_estimate():
+    """The estimate says the camera sits on the tool (offset 0), but L_max = 0.1 m:
+    near a box face the lever ball pokes out, so the move is refused; a rough
+    estimate must never relax the box."""
+    s = _eih_box_session(box_size=(4.0, 4.0, 2 * 0.25), lever_max=0.1)
+    s._st.X = np.eye(4)                                      # (wrong) estimate: no offset
+    r = math.sqrt(3) * 0.1
+    near = tf.make(np.eye(3), [0.0, 0.0, 0.25 - r + 0.01])
+    far = tf.make(np.eye(3), [0.0, 0.0, 0.25 - r - 0.01])
+    assert _refused(s, np.eye(4), near)
+    assert _refused(s, np.eye(4), far) is False
+
+
+def test_path_start_is_checked():
+    """A Cartesian move from a pose whose lever ball already pokes out of the box
+    is refused."""
+    s = _eih_box_session(box_size=(4.0, 4.0, 2 * 0.25), lever_max=0.1)
+    r = math.sqrt(3) * 0.1
+    start = tf.make(np.eye(3), [0.0, 0.0, 0.25 - r + 0.01])
+    assert _refused(s, start, tf.make(np.eye(3), [0.0, 0.0, 0.0]))
+
+
+@pytest.mark.parametrize('outcome', ['ok', 'not_started'])
+def test_measured_pose_outside_the_limits_stops_the_run(outcome):
+    s = _eih_box_session(box_size=(4.0, 4.0, 2 * 0.25), lever_max=0.05)
+    s._st.at_pose = np.eye(4)
+    gen = s._move(_swing(1), 'centring')
+    assert isinstance(next(gen), Move)
+    drifted = tf.make(np.eye(3), [0.0, 0.0, 0.2])           # ball now pokes out
+    with pytest.raises(session._Abort, match='measured tool pose'):
+        gen.send((outcome, None, drifted))

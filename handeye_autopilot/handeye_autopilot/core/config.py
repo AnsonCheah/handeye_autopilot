@@ -193,9 +193,6 @@ class SessionConfig:
     # checked short moves: Cartesian waypoint spacing (01-architecture §3.2)
     waypoint_max_angle: float = math.radians(1.0)    # <= 5 deg (validated)
     waypoint_max_step: float = 0.005
-    # box clearance for the carried object when its position comes from the
-    # rough estimate (shortcut: a fixed margin, no covariance; revisit in M5)
-    estimate_box_margin: float = 0.02             # m
 
     def __post_init__(self) -> None:
         """Reject values that would silently disable a motion guard (a zero
@@ -215,7 +212,7 @@ class SessionConfig:
         non_negative = ('lever_max', 'image_margin_px', 'min_seed_tilt', 'max_tilt',
                         'max_roll', 'uncertainty_margin_px', 'min_corner_spacing_px',
                         'min_marker_module_px', 'min_plan_singular_value',
-                        'image_border_frac', 'estimate_box_margin')
+                        'image_border_frac')
         for name in positive + non_negative + ('step_safety', 'reserve_factor'):
             v = getattr(self, name)
             if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):

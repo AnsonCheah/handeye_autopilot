@@ -34,7 +34,7 @@ from .boards import BoardSpec
 from .camera import CameraModel
 from .capture import CaptureRecord, Frame, capture
 from .config import CaptureConfig, SessionConfig, SolverConfig
-from .planning import IKFunction, Plan, lever_ball_points, limits, moving_points_base, plan
+from .planning import IKFunction, Plan, lever_ball_points, limits, plan
 from .quality import Calibration, calibrate
 from .solver import Solution, SolveError, solve
 
@@ -219,6 +219,13 @@ class Session:
         if outcome == MOTION_NOT_STARTED:
             if measured is not None:        # fresh joints still order the next spare
                 st.joints = np.asarray(measured, dtype=np.float64)
+            if measured_pose is not None:   # and the measured pose is where it really is
+                st.at_pose = np.asarray(measured_pose, dtype=float)
+                if check_limits and st.seed_tool is not None and \
+                        self._limit_reason(st.at_pose) is not None:
+                    raise _Abort(MOTION_FAILED_REASON, 'the measured tool pose is outside '
+                                 f'the limits ({self._limit_reason(st.at_pose)}); '
+                                 'check the robot')
             return self._skip('not_started')
         st.at_verified = False
         st.at_pose = target if measured_pose is None else np.asarray(measured_pose, dtype=float)
@@ -236,22 +243,18 @@ class Session:
         return False
 
     def _limit_reason(self, G: Mat, sag_angle: float = 0.0) -> str | None:
-        """Limits at tool pose G. The box margin covers (a) the arc a carried
-        point bulges out between two checked waypoints sag_angle apart, and (b)
-        the rough estimate's error when the carried object comes from it."""
+        """Limits at tool pose G.
+
+        Carried object (optional box check): always the lever-bound ball, never
+        the estimate (a rough estimate can misplace a 100 mm camera offset by
+        40 mm; L_max is the user's guarantee). The ball is centred on the tool
+        origin, so it is unchanged by rotation and sweeps a convex hull along
+        the straight tool path: checking the waypoints is exact for the box.
+        Orientation from the seed can exceed the endpoints' by half a segment."""
         st = self._st
         assert st.seed_tool is not None
-        margin = 0.0
-        if st.X is not None and st.Z is not None:
-            pts = moving_points_base(self.mode, G, st.X, st.Z, self.board)
-            margin += self.cfg.estimate_box_margin
-        else:          # no estimate yet: anywhere within the lever bound (§B2)
-            pts = lever_ball_points(self.mode, G, self.cfg, self.board)
-        r = float(np.max(np.linalg.norm(pts - G[:3, 3], axis=1)))
-        margin += r * (1.0 - np.cos(sag_angle / 2.0))
-        if not self.cfg.box_check_moving_object:
-            margin = 0.0               # the tool origin itself moves on the straight path
-        return limits(G, st.seed_tool, self.cfg, pts, margin, sag_angle / 2.0)[0]
+        pts = lever_ball_points(self.mode, G, self.cfg, self.board)
+        return limits(G, st.seed_tool, self.cfg, pts, 0.0, sag_angle / 2.0)[0]
 
     def _recover(self, target: Mat, purpose: str) -> Generator[Action, object, None]:
         # the target is a verified pose that already passed the limits (or the seed)
