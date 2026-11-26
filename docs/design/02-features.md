@@ -353,11 +353,16 @@ print resolution into the PNG (`pHYs`) so a 100 % print has the stated square
 size. YAML distinguishes **square counts** from **inner-corner counts**
 explicitly. Docs: measure a printed square with calipers.
 
-A detected checkerboard grid is accepted only if the colour of **every**
-square, outer ring included, matches the board model (≥ 97 %). The M1a pose
-sweep found `findChessboardCornersSB` occasionally returning a grid turned by
-90° that uses the board edge against the white margin as a corner row; this
-check rejects it as `no_board` instead of passing wrongly ordered corners.
+A detected checkerboard grid is accepted only if (≥ 97 % of) its corners are
+true X-junctions with the board's colours: the four squares touching each
+corner are sampled close to it (¼ square along each diagonal; samples outside
+the image don't count). The M1a pose sweep found `findChessboardCornersSB`
+occasionally returning a grid turned by 90° that uses the board edge against
+the white margin as a corner row (those L-shaped "corners" fail: 83 % in the
+fixture); this check rejects it as `no_board` instead of passing wrongly
+ordered corners. A first version checked every square's centre, outer ring
+included; real OpenCV sample prints, whose outer squares are cut short,
+failed it, hence sampling next to the corners.
 
 ## L. Exposure: point the driver's auto-exposure at the board (off by default)
 

@@ -20,7 +20,8 @@ class CaptureConfig:
     min_collinearity: float = 0.15         # sigma2/sigma1 of corner board coords
     min_pattern_agreement: float = 0.97    # checkerboard squares matching the model
     # image quality
-    min_sharpness: float = 400.0           # variance of Laplacian in the board region
+    min_sharpness: float = 150.0           # variance of Laplacian in the board region;
+    #                                        usable real OpenCV sample images score 290-1100
     border_margin_px: float = 8.0
     # PnP fit after solvePnPRefineLM
     max_reprojection_mean_px: float = 1.0

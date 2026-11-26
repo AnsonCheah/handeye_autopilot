@@ -75,34 +75,47 @@ def _detect_checkerboard(gray: NDArray[np.uint8], spec: BoardSpec, camera: Camer
 
 
 def square_pattern_agreement(gray: NDArray[np.uint8], px: NDArray[np.float64],
-                             spec: BoardSpec, camera: CameraModel) -> float:
-    """Fraction of ALL squares (outer ring included) whose colour matches the board.
+                             spec: BoardSpec, camera: CameraModel,
+                             offset: float = 0.25) -> float:
+    """Fraction of corners that are true X-junctions with the board's colours.
 
-    The plane-to-image map comes from the detected corners (a homography in
-    undistorted coordinates, re-distorted with the camera model), so a grid
-    that is shifted or turned by one square disagrees on the outer ring.
+    Around every inner corner the four touching squares are sampled close to
+    the corner (``offset`` squares along each diagonal) and must show the
+    board's dark/light pattern. A grid that uses the board edge against the
+    white margin as a corner row fails at those L-shaped "corners"; a real
+    print whose outer squares are cut short still passes, because the samples
+    stay next to the corner. The plane-to-image map is a homography from the
+    detected corners in undistorted coordinates, re-distorted with the camera.
     """
     norm = camera.normalized(px)
     H, _ = cv2.findHomography(spec.corner_points[:, :2], norm)
     if H is None:
         return 0.0
-    j, i = np.mgrid[0:spec.squares_y, 0:spec.squares_x]
-    centres = np.stack([(i.ravel() + 0.5), (j.ravel() + 0.5)], 1) * spec.square_length
-    xy = cv2.perspectiveTransform(centres.reshape(-1, 1, 2), H).reshape(-1, 2)
+    cols, rows = spec.inner_corners
+    sq = spec.square_length
+    r, c = np.divmod(np.arange(cols * rows), cols)
+    pts, black = [], []
+    for dx, dy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
+        # the square touching corner (c, r) in this quadrant is square (c + (dx>0), r + (dy>0))
+        sx, sy = c + (dx > 0), r + (dy > 0)
+        pts.append(np.stack([(c + 1 + dx * offset) * sq, (r + 1 + dy * offset) * sq], 1))
+        black.append((sx + sy) % 2 == 0)
+    plane = np.concatenate(pts)
+    is_black = np.concatenate(black)
+    xy = cv2.perspectiveTransform(plane.reshape(-1, 1, 2), H).reshape(-1, 2)
     img_px = camera.project(np.c_[xy, np.ones(len(xy))])
     h, w = gray.shape
-    inside = (img_px[:, 0] >= 1) & (img_px[:, 0] < w - 2) & \
-        (img_px[:, 1] >= 1) & (img_px[:, 1] < h - 2)
-    if inside.sum() < 0.5 * len(img_px):
-        return 0.0
+    inside = (img_px[:, 0] >= 0) & (img_px[:, 0] <= w - 1) & \
+        (img_px[:, 1] >= 0) & (img_px[:, 1] <= h - 1)
     vals = cv2.remap(gray.astype(np.float32), img_px[:, 0].astype(np.float32).reshape(1, -1),
                      img_px[:, 1].astype(np.float32).reshape(1, -1),
-                     cv2.INTER_LINEAR).ravel()[inside]
-    black = ((i.ravel() + j.ravel()) % 2 == 0)[inside]
-    if black.all() or not black.any():
-        return 0.0
-    threshold = 0.5 * (np.median(vals[black]) + np.median(vals[~black]))
-    return float(np.mean((vals < threshold) == black))
+                     cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE).ravel()
+    threshold = 0.5 * (np.median(vals[is_black & inside]) + np.median(vals[~is_black & inside]))
+    # Samples outside the image are unknown, not wrong; a corner counts if it
+    # has at least two samples in view and all of those match.
+    ok = (((vals < threshold) == is_black) | ~inside).reshape(4, -1).all(axis=0)
+    seen = inside.reshape(4, -1).sum(axis=0) >= 2
+    return float(ok[seen].mean()) if seen.any() else 0.0
 
 
 def canonical_checkerboard_order(grid: NDArray[np.float64], gray: NDArray[np.uint8]
