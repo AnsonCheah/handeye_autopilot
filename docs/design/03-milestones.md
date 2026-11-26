@@ -1,4 +1,4 @@
-# Checkpoint 3 — Milestones and release (rev 3, after final Codex review)
+# Checkpoint 3 — Milestones and release (rev 3.1, after pre-implementation Codex review)
 
 **Assumption for estimates:** ~10 hours/week with an AI coding assistant.
 Effort is listed separately from **waits** (hardware access, reviewers, build
@@ -22,7 +22,8 @@ farm sync), which don't shrink with more effort. Re-estimate after M1a.
 
 - Final repo/package names chosen (collision-checked), lowercase. Packages:
   `handeye_autopilot`, `handeye_autopilot_interfaces`, `handeye_autopilot_demos`.
-- Metadata: real maintainer name + email, Apache-2.0 in every `package.xml`,
+- Metadata: maintainer `Anson Cheah <ansoncta.sg@gmail.com>` (decided
+  2026-11-26), Apache-2.0 in every `package.xml`,
   matching versions in `package.xml` and `setup.py` (`0.1.0`), one
   `CHANGELOG.rst` per package, `docs/design/` with the three checkpoints,
   `AGENTS.md`/`CLAUDE.md` (clean-room + ponytail + reuse-map rule),
@@ -30,26 +31,31 @@ farm sync), which don't shrink with more effort. Re-estimate after M1a.
   `X.Y.Z`, created by bloom/catkin_prepare_release, and never moved or
   deleted once pushed.
 - Interface package with generator/runtime deps and `member_of_group`; the
-  action and message defined.
+  `Calibrate` action and the `QualityReport` and `GateResult` messages defined.
 - CI: `ros-tooling/action-ros-ci` on Jazzy (24.04), Lyrical (26.04), Rolling;
   `ruff`, `mypy` (core), the import-purity test.
-- **Dependency gate:** in a clean container per OS, `rosdep install
-  --from-paths src -iry` resolves every runtime, test, launch and demo
-  dependency through **apt keys** (no pip). `pymoveit2` binary installs and
-  its used API (`MoveIt2`, cancel) is smoke-tested on each distro.
+- **Dependency gate** (checkpoint 1 §4): in a clean container per OS, every
+  key declared so far (the M0 table: skeleton + demo robot configs) resolves
+  to an **apt** package with an install candidate, checked per key before
+  installing (no pip). The same gate reruns on every PR as later milestones
+  add dependencies. `pymoveit2` binary installs and its used API (`MoveIt2`,
+  cancel) is smoke-tested (not skipped) on each distro.
 - **Release paperwork starts now:** PR adding the repo to rosdistro as a
   *source* entry (gets name review early); request a release repository
   (Rolling requires it under `ros2-gbp`) **and write access to it for the
   maintainer**; set up bloom config. These are external approvals and must not
   sit on the M6 critical path: M5 cannot close until write access is
   confirmed.
-- Reserve access to a real arm + camera for M5 (date booked).
+- Real arm + camera for M5: **deferred by the maintainer (2026-11-26)** until
+  simulation results (M1b–M4) are in; booked then. Moves the hardware wait
+  onto M5's critical path, accepted.
 - *Learn:* workspaces, colcon, `package.xml`/rosdep, ament_python vs
   ament_cmake, interface packages, REP 149.
 - **Done when:** the test command passes on all three distros in CI; the
-  dependency gate passes in clean containers; a downstream test package
-  imports and constructs `Calibrate` goal/result/feedback and
-  `QualityReport`; rosdistro source PR is open.
+  dependency gate passes in clean containers; the CI-only downstream package
+  (`ci/interface_consumer/`, checkpoint 1 §12) imports, constructs and
+  serialization-round-trips (asserting the fields of) `Calibrate` goal/result/feedback,
+  `QualityReport` and `GateResult`; rosdistro source PR is open.
 
 ## M1a — Detection and synthetic data (effort 2 wk)
 
@@ -59,23 +65,32 @@ farm sync), which don't shrink with more effort. Re-estimate after M1a.
   stray-marker masking.
 - **Probe ahead:** record ~20 real board images with any camera (no robot
   needed) into `test/fixtures/` for detection tests.
+- **Output:** the capture record (checkpoint 2 §D5), which M1b consumes.
 - **Done when (committed in a test spec file):** fixed seeds and pose ranges;
-  detection fixture tests give identical IDs/coordinates on 4.6 and 4.10; each
-  gate has a test that triggers its specific rejection code (including a
-  synthetic stray marker and an ambiguous near-face-on view); real-image
-  fixtures detect.
+  detection fixture tests on 4.6 and 4.10 give **identical** corner IDs and
+  board-frame coordinates and image corners within a committed pixel
+  tolerance; each gate has a test that triggers its specific rejection code;
+  the three stray-marker fixtures (masking succeeds → accepted; rejected after
+  masking; two boards) and the ambiguity pair (meets both conditions →
+  rejected; near face-on but unambiguous → accepted) have the outcomes in
+  checkpoint 2 §D; real-image fixtures detect.
 
 ## M1b — Solver and verification (effort 2–3 wk)
 
 - Mode adapter (with the OpenCV mapping tests), initial guess, refinement,
   outlier rejection, observability, k-fold verification and fold sensitivity,
   gates, observations YAML, offline re-solve CLI.
+- Input: capture records (from the renderer + M1a detection, or loaded
+  from an observations YAML). No bootstrap, TF or clocks here.
 - **Done when:** for the committed sweep, both modes recover ground truth
-  within committed translation/rotation tolerances; expected-failure cases
-  (checkpoint 2 §H) fail with their committed codes; known-blind-spot cases
-  pass the gates and their measured bias is recorded in the test output;
-  observations save → reload → re-solve gives an identical result;
-  transform-direction tests pass.
+  within committed translation/rotation tolerances; the M1b-owned
+  expected-failure case (parallel rotation axes) fails with its committed
+  code; known-blind-spot cases pass the gates and their measured bias is
+  recorded in the test output; observations save → reload → re-solve gives
+  the same result within a committed numerical tolerance (`schema_version`
+  checked, unknown versions refused); the observability definitions
+  (checkpoint 2 §E4) are committed with the sweep; transform-direction tests
+  pass.
 - First public post ("offline solver works") is possible here.
 
 ## M2 — Planning core (effort 2 wk)
@@ -86,10 +101,13 @@ farm sync), which don't shrink with more effort. Re-estimate after M1a.
   simulated robot.
 - **Probe ahead:** a throwaway script drives the Panda mock-hardware demo via
   pymoveit2: plan, execute, cancel mid-motion, and calls `compute_ik` with
-  `is_diff=true` on all three distros. Findings feed M4.
+  `is_diff=true` on all three distros. It records the MoveGroup terminal
+  status and error code for success, planning failure and cancel, so the
+  M3 interface freeze is based on observed outcomes. Findings feed M4.
 - **Done when:** full pure-Python sessions run against the renderer + fake IK
   in both modes within a test deadline and pass gates; probe halving, spares
-  and "plan too weak" paths each have a test asserting their outcome.
+  and "plan too weak" paths each have a test asserting their outcome; the
+  too-small-`L_max` case fails with its committed code.
 
 ## M3 — ROS node, manual mode (effort 3 wk)
 
@@ -102,9 +120,11 @@ farm sync), which don't shrink with more effort. Re-estimate after M1a.
 - *Learn:* nodes, parameters, executors/callback groups, actions, TF2, QoS,
   launch, `launch_testing`.
 - **Done when:** `launch_testing` completes a manual-mode calibration with the
-  synthetic camera and scripted captures; tests for delayed TF, frozen joint
+  synthetic camera and scripted captures; tests for delayed TF, bad/mismatched
+  timestamps (clock preflight aborts with `TF_UNAVAILABLE`), frozen joint
   states, clock jump, TF-ownership conflict and cancel during capture each
-  assert their outcome.
+  assert their outcome; admission rejections (busy, invalid mode, unknown
+  profile, latched fault) are tested as `accepted = false`.
 
 ## M4 — MoveIt mode + Panda and UR demos (effort 3–4 wk)
 
