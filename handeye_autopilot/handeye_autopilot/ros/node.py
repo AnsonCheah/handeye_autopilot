@@ -1512,8 +1512,9 @@ class StillWatch:
     ended? Fed from /joint_states under the node's lock. Messages stamped before
     the start are ignored (a replayed or queued old message is not evidence);
     every watched value in any message, partial or full, must be at ``ref``;
-    full messages must arrive at most STILL_MAX_GAP s apart (receive time),
-    from the start to the end."""
+    full messages must carry strictly increasing stamps (a re-sent message
+    does not count twice) and arrive at most STILL_MAX_GAP s apart in both
+    receive time and stamp, from the start to the end."""
     ref: dict[str, float]
     tol: float
     last: float                 # monotonic time of the last full sample (or the start)
@@ -1521,6 +1522,7 @@ class StillWatch:
     max_gap: float = 0.0
     moved: bool = False
     samples: int = 0
+    last_stamp: float = -math.inf    # stamp of the last full sample
 
     def sample(self, now: float, stamp: float, msg: Any) -> None:
         if stamp < self.start_stamp:
@@ -1531,9 +1533,10 @@ class StillWatch:
             return
         if any(not math.isfinite(v) or abs(v - self.ref[n]) > self.tol for n, v in pos.items()):
             self.moved = True
-        if len(pos) == len(self.ref):
-            self.max_gap = max(self.max_gap, now - self.last)
-            self.last = now
+        if len(pos) == len(self.ref) and stamp > self.last_stamp:
+            prev = self.start_stamp if self.samples == 0 else self.last_stamp
+            self.max_gap = max(self.max_gap, now - self.last, stamp - prev)
+            self.last, self.last_stamp = now, stamp
             self.samples += 1
 
     def end(self, now: float) -> None:

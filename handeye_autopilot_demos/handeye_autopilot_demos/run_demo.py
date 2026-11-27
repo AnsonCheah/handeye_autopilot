@@ -34,6 +34,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from scipy.spatial.transform import Rotation
 from std_msgs.msg import Bool
+from std_srvs.srv import Trigger
 
 from handeye_autopilot_demos.scene import load
 from handeye_autopilot_interfaces.action import Calibrate
@@ -52,6 +53,10 @@ class Runner(Node):
         self.moveit = MoveItClient(self, cb)
         self.action = ActionClient(self, Calibrate, '/handeye_autopilot/calibrate',
                                    callback_group=cb)
+        # stops whatever run is active, whoever started it: the fallback when a
+        # goal reply or a cancel reply is lost
+        self.cancel_any = self.create_client(Trigger, '/handeye_autopilot/cancel',
+                                             callback_group=cb)
         self.scene_ready = threading.Event()
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(Bool, '/demo/scene_ready',
@@ -93,14 +98,19 @@ class Runner(Node):
         self.log(f'calibrating ({self.mode}, execution: moveit)')
         send = self.action.send_goal_async(
             Calibrate.Goal(mode=self.mode, execution='moveit'), feedback_callback=self._fb)
-        if not wait_future(send, 30.0) or not send.result().accepted:
+        if not wait_future(send, 30.0):
+            self.get_logger().error('no reply to the calibration goal; cancelling any run')
+            self._cancel_any()
+            return 1
+        if not send.result().accepted:
             self.get_logger().error('the calibration goal was rejected')
             return 1
         res_fut = send.result().get_result_async()
         if not wait_future(res_fut, self.timeout):
             self.get_logger().error('the calibration did not finish in time; cancelling it')
             wait_future(send.result().cancel_goal_async(), 10.0)
-            wait_future(res_fut, 60.0)           # the node stops the robot first
+            if not wait_future(res_fut, 60.0):   # the node stops the robot first
+                self._cancel_any()
             return 1
         res = res_fut.result()
         r_ = res.result
@@ -120,6 +130,17 @@ class Runner(Node):
                      f'result_file:={r_.result_file}')
         return 0 if ok else 1
 
+    def _cancel_any(self) -> None:
+        """~/cancel: the node cancels its active run and stops the robot."""
+        if not self.cancel_any.wait_for_service(timeout_sec=10.0):
+            self.get_logger().error('~/cancel is not available: stop the robot yourself')
+            return
+        fut = self.cancel_any.call_async(Trigger.Request())
+        if not wait_future(fut, 60.0):
+            self.get_logger().error('~/cancel did not reply: stop the robot yourself')
+        else:
+            self.get_logger().info(f'~/cancel: {fut.result().message}')
+
     def _log_contacts(self, r: dict) -> None:
         """Which bodies collide, at the current state and at the seed (MoveIt's
         check_state_validity): the sweep counts a seed failure as a mount problem
@@ -135,7 +156,7 @@ class Runner(Node):
             if not wait_future(fut, 10.0):
                 self.get_logger().error(f'contacts at the {label}: no reply')
                 continue
-            pairs = sorted({' | '.join(sorted((c.contact_body_1, c.contact_body_2)))
+            pairs = sorted({' <-> '.join(sorted((c.contact_body_1, c.contact_body_2)))
                             for c in fut.result().contacts})
             self.get_logger().error(f'contacts at the {label}: {"; ".join(pairs) or "none"}')
 

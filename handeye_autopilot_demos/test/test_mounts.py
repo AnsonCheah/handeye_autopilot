@@ -83,14 +83,20 @@ def test_parse_reads_the_runner_output():
     assert r['verdict'] == 'passed' and r['error_mm'] == 0.02 and r['accepted'] == 60
     assert parse(ok.replace('PASSED', 'FAILED'), 1)['verdict'] == 'failed'
     seed = ('could not reach the seed: status 6, START_STATE_IN_COLLISION \n'
-            'contacts at the current state: calibration_board | panda_link6\n'
+            'contacts at the current state: calibration_board <-> panda_link6\n'
             'contacts at the seed: none\n')
     r = parse(seed, 1)
-    assert r['verdict'] == 'setup' and 'calibration_board | panda_link6' in r['message']
-    assert parse(seed.replace('START_STATE_IN_COLLISION', 'GOAL_IN_COLLISION'), 1)[
+    assert r['verdict'] == 'setup' and 'calibration_board <-> panda_link6' in r['message']
+    # GOAL_IN_COLLISION is explained by the seed's contacts, not the current state's
+    goal = seed.replace('START_STATE_IN_COLLISION', 'GOAL_IN_COLLISION')
+    assert parse(goal, 1)['verdict'] == 'failed'
+    assert parse(goal.replace('seed: none', 'seed: camera <-> wrist_1_link'), 1)[
         'verdict'] == 'setup'
-    # a collision the mount is not part of (robot and table) is a failure
-    assert parse(seed.replace('calibration_board | panda_link6', 'panda_link6 | table'), 1)[
+    # a collision the mount is not part of (robot and table) is a failure, even if
+    # the board collides at the other state
+    other = seed.replace('calibration_board <-> panda_link6', 'panda_link6 <-> table')
+    assert parse(other, 1)['verdict'] == 'failed'
+    assert parse(other.replace('seed: none', 'seed: calibration_board <-> panda_link6'), 1)[
         'verdict'] == 'failed'
     assert parse(seed.split('contacts')[0], 1)['verdict'] == 'failed'    # no contacts
     # no collision evidence, or a timeout: a failure, never excluded as setup

@@ -64,6 +64,23 @@ def test_a_gap_between_samples_or_at_the_end_is_not_evidence():
     assert not w.still()
 
 
+def test_a_re_sent_message_does_not_bridge_a_gap():
+    """The same stationary message delivered again and again (stamp unchanged)
+    while the real samples stop: the stamps show the gap."""
+    w = _watch()
+    _feed(w, [(0.02, 100.02, REF)] + [(0.02 + 0.1 * i, 100.02, REF) for i in range(1, 8)]
+          + [(0.8, 100.8, REF)])
+    w.end(0.82)
+    assert not w.still() and 'gap' in w.why()
+
+
+def test_stamps_must_also_be_dense():
+    w = _watch()
+    _feed(w, [(0.02, 100.02, REF), (0.04, 100.6, REF), (0.06, 100.62, REF)])
+    w.end(0.08)
+    assert not w.still()
+
+
 def test_partial_messages_alone_do_not_cover_the_time():
     w = _watch()
     _feed(w, [(0.02 * i, 100.0 + 0.02 * i, {'a': 0.0}) for i in range(1, 20)])

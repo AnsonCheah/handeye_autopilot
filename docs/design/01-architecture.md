@@ -650,7 +650,8 @@ snapshotted at admission; every capture's images must match the run's
   operator would measure (tool → board centre in eye-to-hand, tool → camera
   in eye-in-hand: the references of the bootstrap bound, 02-features §B). A
   run is `setup`, not a failure, only when MoveIt reports the start or seed
-  state in collision and its contact list includes the board or the camera.
+  state in collision and the contact list of that state includes the board or
+  the camera.
   `shortcut:` no 3D occlusion and the carried object may overlap its
   touch links (the attached box ignores them), so a few cases are physically
   implausible mounts; the results table records them, upgrade if a real mount

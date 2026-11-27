@@ -45,6 +45,8 @@ SEED_COLLISION = re.compile(r'could not reach the seed: status \d+, '
                             r'(START_STATE_IN_COLLISION|GOAL_IN_COLLISION)')
 CONTACTS = re.compile(r'contacts at the (current state|seed): (.*)')
 MOUNTED = ('calibration_board', 'camera')   # scene.py's ids for the board and the camera
+# which probe's contacts explain MoveIt's code (run_demo._log_contacts)
+FAILED_STATE = {'START_STATE_IN_COLLISION': 'current state', 'GOAL_IN_COLLISION': 'seed'}
 STOP = threading.Event()                 # Ctrl-C: launch nothing more
 _running: set[subprocess.Popen] = set()  # launches to stop on Ctrl-C
 _running_lock = threading.Lock()
@@ -62,9 +64,14 @@ def seed_tool_pose(robot: str, cfg: dict[str, Any], domain: int) -> Any:
     ctx = rclpy.Context()
     proc = None
     try:
-        proc = subprocess.Popen(['ros2', 'launch', 'handeye_autopilot_demos', r['launch']],
-                                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                start_new_session=True)
+        # Ctrl-C held off while the child starts, so proc is set whenever it runs
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+        try:
+            proc = subprocess.Popen(['ros2', 'launch', 'handeye_autopilot_demos', r['launch']],
+                                    env=env, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL, start_new_session=True)
+        finally:
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
         rclpy.init(context=ctx, domain_id=domain)
         node = rclpy.create_node('sweep_fk', context=ctx)
         ex = MultiThreadedExecutor(num_threads=2, context=ctx)
@@ -146,8 +153,10 @@ def parse(text: str, code: int | None) -> dict[str, Any]:
     if code == 0 and 'DEMO PASSED' in text:
         out['verdict'] = 'passed'
     elif code is not None and (m := SEED_COLLISION.search(text)) and (
-            pairs := [p for c in CONTACTS.finditer(text) for p in c.group(2).split('; ')
-                      if any(o in p.split(' | ') for o in MOUNTED)]):
+            pairs := [p for c in CONTACTS.finditer(text)
+                      if c.group(1) == FAILED_STATE[m.group(1)]
+                      for p in c.group(2).split('; ')
+                      if any(o in p.split(' <-> ') for o in MOUNTED)]):
         # MoveIt's collision verdict on the robot's start or seed state, with the
         # board or the camera as one of the colliding bodies: nobody could start a
         # calibration with this mount

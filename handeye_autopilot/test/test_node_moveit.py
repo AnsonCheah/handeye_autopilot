@@ -185,6 +185,8 @@ def test_invalid_plan_after_moving_is_a_failure_not_a_skip(moveit_world, kind):
     assert out.status == 6                                    # ABORTED
     assert out.result.error_code == R.MOTION_FAILED, out.result.message
     assert 'INVALID_MOTION_PLAN' in out.result.message
+    if kind == 'invalid_roundtrip':      # caught by the watch seeing the motion, not a gap
+        assert 'a sample left the start' in out.result.message, out.result.message
     assert w.moveit.goals[-1][0] == 'move'
 
 
