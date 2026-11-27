@@ -317,6 +317,46 @@ def test_ok_needs_fresh_joints_after_the_motion(moveit_world):
     assert 'joint_states' in out.result.message
 
 
+def test_cancel_service_stops_a_run_without_its_goal_handle(moveit_world):
+    """~/cancel stops the active run from anywhere (an action client whose goal
+    reply was lost has no handle): the motion goal is cancelled and the goal
+    ends ABORTED with error_code CANCELED (the action protocol allows CANCELED
+    only after an action cancel request)."""
+    w = moveit_world()
+    w.moveit.motion_time = 6.0
+    d = w.driver
+    assert not d.call(d.cancel).success                  # nothing to cancel yet
+    h = d.send(execution='moveit')
+    _wait(lambda: w.moveit.goals, 120.0, 'no motion goal')
+    time.sleep(0.3)
+    t0 = time.monotonic()
+    assert d.call(d.cancel).success
+    out = w.result(h, timeout=30.0)
+    assert time.monotonic() - t0 < 4.0
+    assert out.status == 6 and out.result.error_code == R.CANCELED, out.result.message
+    assert w.moveit.cancels
+
+
+def test_validity_is_checked_between_trajectory_points(moveit_world):
+    """The scene re-check covers the path between returned points: a state
+    that is invalid only between two valid points is found."""
+    from handeye_autopilot.ros.moveit_client import MoveItClient
+    from moveit_msgs.msg import RobotTrajectory
+    from rclpy.callback_groups import ReentrantCallbackGroup
+    from trajectory_msgs.msg import JointTrajectoryPoint
+    w = moveit_world()
+    client = MoveItClient(w.client, ReentrantCallbackGroup())
+    traj = RobotTrajectory()
+    traj.joint_trajectory.joint_names = list(JOINTS)
+    traj.joint_trajectory.points = [
+        JointTrajectoryPoint(positions=[0.0, 0.0, 0.5, 0.0, 0.0, 0.0]),
+        JointTrajectoryPoint(positions=[0.2, 0.0, 0.5, 0.0, 0.0, 0.0])]
+    w.moveit.invalid_fn = lambda q: 0.09 < q[0] < 0.11      # an obstacle midway
+    assert 'no longer valid' in client.invalid_state(traj, 'arm', 10.0)
+    w.moveit.invalid_fn = lambda q: 0.3 < q[0]               # off the path
+    assert client.invalid_state(traj, 'arm', 10.0) == ''
+
+
 def test_camera_change_during_a_motion_stops_it(moveit_world):
     """§6-7: the run becomes invalid while a goal runs: the goal is cancelled at
     once (not only noticed after it ends) and the run ends NO_CAMERA_INFO."""

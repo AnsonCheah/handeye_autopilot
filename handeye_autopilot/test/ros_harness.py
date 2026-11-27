@@ -106,6 +106,7 @@ class Driver:
         self.finish = node.create_client(Trigger, f'{ns}/finish')
         self.clear_fault = node.create_client(Trigger, f'{ns}/clear_fault')
         self.inject_fault = node.create_client(Trigger, f'{ns}/inject_fault')
+        self.cancel = node.create_client(Trigger, f'{ns}/cancel')
         self.feedback: list = []
         self.debug = None          # optional callable describing the node's state
 
@@ -246,6 +247,7 @@ class FakeMoveIt(Node):
         self.cart_swing = False          # Cartesian paths that swing 5 cm off the line
                                          # in small steps (no single jump)
         self.invalid_states = False      # check_state_validity says invalid
+        self.invalid_fn = None           # positions -> True if that state is invalid
         self.publish_joints = True       # False: /joint_states stops
         self.cart_fraction = None        # override the reported path fraction
         self.plans = 0                   # plan-only MoveGroup requests
@@ -322,7 +324,9 @@ class FakeMoveIt(Node):
         return res
 
     def _valid(self, req, res):
-        res.valid = not self.invalid_states
+        q = list(req.robot_state.joint_state.position)
+        res.valid = not self.invalid_states and not (
+            self.invalid_fn is not None and self.invalid_fn(q))
         return res
 
     def _scene(self, req, res):

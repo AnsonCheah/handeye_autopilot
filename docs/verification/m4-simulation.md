@@ -36,12 +36,22 @@ What to look for in RViz:
 - at the end the terminal prints the quality report and the error against the
   truth.
 
-Publish a result to TF and look at it:
+Publish a result to TF and look at it. The publisher re-checks the camera
+driver's live TF subtree, so the camera must still be running: start the demo
+with `auto:=false`, send the goal yourself, then publish (README "Try it",
+step 4):
 
 ```bash
-ros2 launch handeye_autopilot result.launch.py result_file:=<printed result.yaml>
-ros2 run tf2_ros tf2_echo panda_link0 camera_link      # (UR: base_link camera_link)
+ros2 launch handeye_autopilot_demos demo.launch.py robot:=panda mode:=eye_to_hand auto:=false rviz:=true
+ros2 action send_goal --feedback /handeye_autopilot/calibrate \
+  handeye_autopilot_interfaces/action/Calibrate "{mode: eye_to_hand, execution: moveit}"
+ros2 launch handeye_autopilot result.launch.py result_file:=<result.yaml from the goal's result>
+ros2 run tf2_ros tf2_echo panda_link0 camera_link
 ```
+
+In RViz the camera frames now hang off the robot's base at the calibrated
+pose. Stop a run from any terminal with
+`ros2 service call /handeye_autopilot/cancel std_srvs/srv/Trigger`.
 
 ## Results (Jazzy, this machine)
 

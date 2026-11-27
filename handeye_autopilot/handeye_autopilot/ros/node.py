@@ -125,6 +125,7 @@ class RunState:
     max_now: float = 0.0                # latest node time seen (sampled jump check)
     records: list[CaptureRecord] = field(default_factory=list)
     motion_note: str = ''               # why the last motion was not 'ok' (for the message)
+    action_cancel: bool = False         # the cancel came through the action (not ~/cancel)
 
 
 class CalibrationNode(Node):
@@ -213,6 +214,10 @@ class CalibrationNode(Node):
                             callback_group=MutuallyExclusiveCallbackGroup())
         self.create_service(Trigger, '~/clear_fault', self._srv_clear_fault,
                             callback_group=self._server)
+        # stops the active run from anywhere: an action client whose goal reply
+        # was lost (DDS discovery under load) has no goal handle to cancel with
+        self.create_service(Trigger, '~/cancel', self._srv_cancel,
+                            callback_group=MutuallyExclusiveCallbackGroup())
         if self.get_parameter('testing.allow_fault_injection').value:
             self.get_logger().warning('testing.allow_fault_injection is ON: ~/inject_fault '
                                       'can latch a motion fault (tests only)')
@@ -303,6 +308,7 @@ class CalibrationNode(Node):
             if self._run is not None:
                 if self._run.finalizing:
                     return CancelResponse.REJECT
+                self._run.action_cancel = True
                 self._run.cancelled.set()
         return CancelResponse.ACCEPT
 
@@ -332,6 +338,21 @@ class CalibrationNode(Node):
             else:
                 run.finish_request.set()
                 res.success, res.message = True, 'solving after the current capture'
+        return res
+
+    def _srv_cancel(self, req: Trigger.Request, res: Trigger.Response) -> Trigger.Response:
+        """Cancel the active run, as an action cancel would (refused once the run
+        is finalizing); its goal ends CANCELED (or MOTION_FAULT if a motion's stop
+        cannot be confirmed)."""
+        with self._lock:
+            run = self._run
+            if run is None:
+                res.success, res.message = False, 'no active run'
+            elif run.finalizing:
+                res.success, res.message = False, 'the run is finalizing; its outcome is decided'
+            else:
+                run.cancelled.set()
+                res.success, res.message = True, 'cancelling the active run'
         return res
 
     def _srv_inject_fault(self, req: Trigger.Request, res: Trigger.Response
@@ -458,9 +479,11 @@ class CalibrationNode(Node):
                 (Path(result.result_file).parent / PUBLISHABLE).touch()
             except OSError as e:
                 self.get_logger().error(f'result kept but not publishable: {e}')
-        if result.error_code == R.CANCELED:
+        run = self._run
+        if result.error_code == R.CANCELED and (run is None or run.action_cancel):
             # the cancel callback runs before rclpy moves the goal to CANCELING:
-            # wait for that transition so canceled() is legal
+            # wait for that transition so canceled() is legal (a cancel through
+            # ~/cancel has no such transition: that goal ends ABORTED / CANCELED)
             t0 = time.monotonic()
             while not goal_handle.is_cancel_requested and time.monotonic() - t0 < 2.0:
                 time.sleep(0.01)

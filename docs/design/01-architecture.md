@@ -211,8 +211,9 @@ MoveIt brand implicitly.
 - Before any `ExecuteTrajectory` goal (Cartesian moves, box-checked planned
   moves) every trajectory point is re-checked against the current planning
   scene (`check_state_validity` at the points and between them, joints
-  interpolated at ≤ 0.01 rad, all requests sent at once so the check spans one
-  scene snapshot as far as possible): unlike a `MoveGroup` goal, an
+  interpolated at ≤ 0.01 rad, at most 8 requests in flight: a service keeps
+  only ~10 queued requests and drops the rest unanswered, seen with the real
+  `move_group` in M4): unlike a `MoveGroup` goal, an
   `ExecuteTrajectory` goal does not re-check a path planned earlier.
   `shortcut:` MoveIt does not monitor scene changes during an
   `ExecuteTrajectory` execution, and a scene update that arrives during the
@@ -395,7 +396,12 @@ One node, `handeye_autopilot` (`ros2 run handeye_autopilot calibrate_node`).
 reason), `~/markers` (`MarkerArray`: board outline at the last accepted
 capture, in the optical frame).
 **Action:** `~/calibrate` (`Calibrate`). **Services:** `~/capture`,
-`~/finish`, `~/clear_fault` (`std_srvs/Trigger`).
+`~/finish`, `~/clear_fault`, `~/cancel` (M4) (`std_srvs/Trigger`).
+`~/cancel` stops the active run like an action cancel, from any terminal: an
+action client whose goal-accepted reply was lost (DDS discovery under load,
+seen in M4 tests) has no goal handle to cancel with. Such a goal ends
+`ABORTED` with `error_code` `CANCELED` (the action protocol allows the
+`CANCELED` state only after an action cancel request).
 
 **Parameters** (defaults in `config/default.yaml`, all snapshotted at goal
 acceptance):

@@ -61,6 +61,7 @@ ERROR_NAMES = {v: k for k, v in vars(MoveItErrorCodes).items()
 SUCCESS = MoveItErrorCodes.SUCCESS
 TERMINAL = (GoalStatus.STATUS_SUCCEEDED, GoalStatus.STATUS_ABORTED, GoalStatus.STATUS_CANCELED)
 GOAL_REPLY_TIMEOUT = 10.0   # s for the server to accept or reject a goal
+VALIDITY_WINDOW = 8         # check_state_validity requests in flight at once
 MAX_OUTSTANDING_IK = 4      # timed-out IK calls still running on the server (§3.1)
 
 
@@ -359,7 +360,7 @@ class MoveItClient:
         included), right before execution: ExecuteTrajectory, unlike a MoveGroup
         goal, does not re-check a trajectory planned earlier. Checked at its points
         and between them (joints interpolated at <= 0.01 rad). All requests go out
-        at once, so the check spans one scene snapshot as far as possible.
+        in small concurrent batches, so the check is short (tens of ms).
         ``shortcut:`` a scene update that arrives during these few tens of ms is
         treated like one arriving just after dispatch: not handled (MoveIt does
         not monitor ExecuteTrajectory motions either). '' if valid, else why."""
@@ -367,21 +368,25 @@ class MoveItClient:
         q = np.array([list(p.positions) for p in jt.points], dtype=float)
         if len(q) == 0 or not np.all(np.isfinite(q)):
             return 'the trajectory has no or invalid points'
-        futs = []
-        for sample in dense_samples(q):
-            req = GetStateValidity.Request()
-            req.group_name = group
-            req.robot_state.is_diff = True
-            req.robot_state.joint_state.name = list(jt.joint_names)
-            req.robot_state.joint_state.position = [float(v) for v in sample]
-            futs.append(self.validity.call_async(req))
+        # a bounded window of requests in flight: a service keeps only a few queued
+        # requests (QoS depth 10 by default) and drops the rest unanswered
+        samples = dense_samples(q)
         deadline = time.monotonic() + timeout
-        for k, fut in enumerate(futs):
-            if not wait_future(fut, max(0.0, deadline - time.monotonic()), cancelled):
-                return 'check_state_validity did not reply'
-            if not fut.result().valid:
-                return f'the trajectory (sample {k}) is no longer valid in the current ' \
-                       'planning scene'
+        for start in range(0, len(samples), VALIDITY_WINDOW):
+            futs = []
+            for sample in samples[start:start + VALIDITY_WINDOW]:
+                req = GetStateValidity.Request()
+                req.group_name = group
+                req.robot_state.is_diff = True
+                req.robot_state.joint_state.name = list(jt.joint_names)
+                req.robot_state.joint_state.position = [float(v) for v in sample]
+                futs.append(self.validity.call_async(req))
+            for k, fut in enumerate(futs):
+                if not wait_future(fut, max(0.0, deadline - time.monotonic()), cancelled):
+                    return 'check_state_validity did not reply'
+                if not fut.result().valid:
+                    return f'the trajectory (sample {start + k}) is no longer valid in the ' \
+                           'current planning scene'
         return ''
 
     def attached_links(self, timeout: float) -> set[str] | None:

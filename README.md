@@ -44,25 +44,30 @@ same run works headless (this is what CI runs).
 
 **3. Look at the result.** The run writes `result.yaml` (transforms, every
 quality gate, the configuration) and `observations.yaml` to
-`~/.ros/handeye_autopilot/demo_<robot>_<mode>/<time>/`. Publish the
-calibrated camera mount to TF:
+`~/.ros/handeye_autopilot/demo_<robot>_<mode>/<time>/`.
 
-```bash
-ros2 launch handeye_autopilot result.launch.py result_file:=<path to result.yaml>
-```
-
-It refuses a result whose quality gates failed, or one whose camera frames
-are already owned by something else in TF.
-
-**4. Drive it yourself.** `auto:=false` starts everything but sends no goal.
-The robot must start where the board is fully visible and tilted; the Panda
-starts there already (its ready pose is the demo's seed). Then:
+**4. Drive it yourself, and publish the result to TF.** `auto:=false` starts
+everything but sends no goal, and keeps running. The robot must start where
+the board is fully visible and tilted; the Panda starts there already (its
+ready pose is the demo's seed). In a second terminal:
 
 ```bash
 ros2 action send_goal --feedback /handeye_autopilot/calibrate \
   handeye_autopilot_interfaces/action/Calibrate "{mode: eye_to_hand, execution: moveit}"
 ```
 
+When it finishes, publish the calibrated camera mount (the camera driver, here
+the synthetic camera, must still be running: the publisher re-checks its TF
+subtree):
+
+```bash
+ros2 launch handeye_autopilot result.launch.py result_file:=<path to result.yaml>
+ros2 run tf2_ros tf2_echo panda_link0 camera_link
+```
+
+It refuses a result whose quality gates failed, or one whose camera frames
+are already owned by something else in TF. To stop a run from any terminal:
+`ros2 service call /handeye_autopilot/cancel std_srvs/srv/Trigger`.
 `execution: manual` instead lets you jog the robot yourself and call
 `ros2 service call /handeye_autopilot/capture std_srvs/srv/Trigger` at each
 pose.
