@@ -1175,6 +1175,7 @@ def test_a_queued_old_resolution_frame_does_not_abort_preflight(world_factory):
     w.camera.timer.cancel()                       # pause the stream ...
     time.sleep(0.2)
     h = w.driver.send()
+    w.driver.wait_phase(FB.PHASE_PREFLIGHT)
     w.node._on_image(old)                         # ... so preflight sees the stale frame
     time.sleep(0.5)
     assert w.node._run.phase == FB.PHASE_PREFLIGHT  # still waiting, not aborted
@@ -1185,20 +1186,38 @@ def test_a_queued_old_resolution_frame_does_not_abort_preflight(world_factory):
 
 
 def test_new_resolution_image_before_its_camera_info(world_factory):
-    """Camera changes resolution: the new image arrives before its CameraInfo.
-    Preflight must re-read CameraInfo and pin the matching pair."""
-    w = world_factory()
+    """Camera changes resolution: the new image arrives first, its CameraInfo
+    150 ms later. Preflight must pin the NEW pair (the unfixed code pinned the
+    old CameraInfo and aborted)."""
     from sensor_msgs.msg import Image
-    w.camera.timer.cancel()
-    old_info = w.node._info
-    big = Image(encoding='mono8', width=8, height=8, step=8, data=bytes(64))
-    big.header.frame_id = 'camera_optical_frame'
-    big.header.stamp = w.node.get_clock().now().to_msg()
+    w = world_factory()
+    w.camera.timer.cancel()                        # only our injected stream from here
+    time.sleep(1.0)                                # (let in-flight 640x480 frames drain)
+    new = w.camera.info(w.node.get_clock().now().to_msg())
+    new.width, new.height = 320, 240               # the camera switched resolution
+    new.k = [300.0, 0.0, 159.5, 0.0, 300.0, 119.5, 0.0, 0.0, 1.0]
+    new.p = [300.0, 0.0, 159.5, 0.0, 0.0, 300.0, 119.5, 0.0, 0.0, 0.0, 1.0, 0.0]
     h = w.driver.send()
-    w.node._on_image(big)                         # new-size image, old CameraInfo cached
-    time.sleep(0.3)
-    w.node._on_info(old_info)                     # (old info still current)
-    w.camera.timer.reset()                        # the real stream resumes (matching pairs)
+    w.driver.wait_phase(FB.PHASE_PREFLIGHT)
+    stop = threading.Event()
+
+    def stream():                                   # image first, CameraInfo 150 ms later
+        sent_info = False
+        t0 = time.monotonic()
+        while not stop.is_set():
+            img = Image(encoding='mono8', width=320, height=240, step=320,
+                        data=bytes(320 * 240))
+            img.header.frame_id = 'camera_optical_frame'
+            img.header.stamp = w.node.get_clock().now().to_msg()
+            w.node._on_image(img)
+            if not sent_info and time.monotonic() - t0 > 0.15:
+                w.node._on_info(new)
+                sent_info = True
+            time.sleep(0.05)
+    t = threading.Thread(target=stream, daemon=True)
+    t.start()
     w.driver.wait_phase(FB.PHASE_MANUAL_CAPTURE, timeout=15.0)
+    assert w.node._run.info.width == 320           # the new pair was pinned
+    stop.set()
     w.driver.wait(h.cancel_goal_async())
     w.result(h)

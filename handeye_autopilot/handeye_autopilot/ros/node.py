@@ -586,6 +586,10 @@ class CalibrationNode(Node):
             clock_error = None
             found = self._lookup_cancellable(goal_handle, run, base, tool, img.stamp_ns,
                                              t.tf_timeout)      # full latency budget per frame
+            with self._info_lock:
+                newer = self._info
+            if found is not None and newer is not None and not same_info(newer, info):
+                found = None                 # CameraInfo changed during the TF wait: retry
         self._check_jump(start)              # a reset during the last lookup, too
         if found is None and clock_error is not None:
             raise clock_error
