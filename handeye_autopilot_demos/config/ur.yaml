@@ -35,6 +35,11 @@ calibration:
     box_enabled: true
     box_xyz: [0.5, 0.0, 0.45]
     box_size: [1.0, 1.2, 0.9]
+  timing:
+    # MoveIt, ros2_control, the camera and the node share one machine here: on a
+    # loaded 2-core CI runner an image can arrive 0.6 s after the pose it shows.
+    # Still far below a real clock-domain mismatch (seconds or more).
+    clock_tolerance: 2.0
   moveit:
     velocity_scaling: 0.5
     acceleration_scaling: 0.5
