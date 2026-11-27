@@ -150,7 +150,11 @@ MoveIt brand implicitly.
   robot can leave and return within that), and measured joints unchanged from
   the start (within tolerance). A plan that moved the robot and brought it back
   is therefore `failed`. The watch guards only this skip; the empty-plan and
-  plan-only rules are as before. Anything else,
+  plan-only rules are as before. Full samples count only with strictly
+  increasing stamps and gaps within 0.25 s in both stamp and receive time, so
+  duplicated, queued or replayed messages can't stand in for missing ones. A
+  publisher forging new stamped joint states is out of scope: it would defeat
+  every measured-joint check here. Anything else,
   or joints unknown, = `failed` (a motion that moved and came back must not
   pass as a safe skip). The result's `executed_trajectory` is always empty on
   Jazzy (probe), so it is not used.
