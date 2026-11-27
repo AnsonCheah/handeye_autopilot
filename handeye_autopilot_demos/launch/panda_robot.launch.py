@@ -34,6 +34,7 @@ def generate_launch_description():
         .sensors_3d(file_path=os.path.join(demos, 'config', 'sensors_3d.yaml'))
         .to_moveit_configs()
     )
+    controllers = os.path.join(panda, 'config', 'ros2_controllers.yaml')
     octomap = {'octomap_frame': 'panda_link0', 'octomap_resolution': 0.02,
                'max_range': 3.0}
     return LaunchDescription([
@@ -45,10 +46,15 @@ def generate_launch_description():
         Node(package='moveit_ros_move_group', executable='move_group', output='log',
              parameters=[moveit_config.to_dict(), octomap]),
         Node(package='controller_manager', executable='ros2_control_node', output='log',
-             parameters=[os.path.join(panda, 'config', 'ros2_controllers.yaml')],
+             parameters=[controllers],
              remappings=[('/controller_manager/robot_description', '/robot_description')]),
+        # newer ros2_control (Lyrical, Rolling) no longer hands the controller
+        # manager's file to each controller: pass it to the spawners (as the
+        # Panda config's own demo.launch.py does on those distros)
         Node(package='controller_manager', executable='spawner', output='log',
-             arguments=['joint_state_broadcaster', '-c', '/controller_manager']),
+             arguments=['joint_state_broadcaster', '-c', '/controller_manager',
+                        '--param-file', controllers]),
         Node(package='controller_manager', executable='spawner', output='log',
-             arguments=['panda_arm_controller', '-c', '/controller_manager']),
+             arguments=['panda_arm_controller', '-c', '/controller_manager',
+                        '--param-file', controllers]),
     ])
