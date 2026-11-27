@@ -211,10 +211,16 @@ def camera_subtree(tree: dict[str, str], static: StaticLinks, optical: str, pare
                            f'ancestor of the optical frame {optical!r} (chain: '
                            f'{" -> ".join(up)})')
         chain = up[:up.index(root_param) + 1]
+    elif parent in up[1:]:
+        # the camera already hangs below ``parent`` (a previous calibration's
+        # broadcaster, or a URDF joint): the subtree is everything below it
+        chain = up[:up.index(parent)]
     else:
         chain = up
     root = chain[-1]
-    if root in tree:
+    # parent -> root existing already is the mount this calibration replaces;
+    # publish_result refuses at publish time while its publisher is still live
+    if root in tree and tree[root] != parent:
         return Subtree(root, chain, f'{root!r} already has a parent ({tree[root]!r}), from '
                        'a URDF mounting joint, a driver or a previous calibration; remove '
                        'that transform, or set camera_root_frame to a frame below it')

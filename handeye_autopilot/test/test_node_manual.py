@@ -270,9 +270,13 @@ def test_tf_ownership_conflict_is_refused_but_the_result_kept(world_factory, cas
     over = {'camera_root_frame': 'camera_link'} if case == 'root_has_parent' else {}
     w = world_factory(node_over=over)
     b = tf2_ros.StaticTransformBroadcaster(w.client)
-    parent = 'old_mount' if case == 'root_has_parent' else 'base_link'
-    b.sendTransform(tf_tools.to_msg(tf.make(np.eye(3), [0, 0, 1.0]), parent, 'camera_link',
-                                    w.client.get_clock().now().to_msg()))
+    if case == 'root_has_parent':
+        msg = tf_tools.to_msg(tf.make(np.eye(3), [0, 0, 1.0]), 'old_mount', 'camera_link',
+                              w.client.get_clock().now().to_msg())
+    else:                                   # base_link hangs below the camera: a cycle
+        msg = tf_tools.to_msg(tf.make(np.eye(3), [0, 0, 1.0]), 'camera_link', 'base_link',
+                              w.client.get_clock().now().to_msg())
+    b.sendTransform(msg)
     time.sleep(0.5)
     res = _finish_run(w)
     assert res.error_code == R.NONE and res.transform_valid      # calibration kept
@@ -345,6 +349,7 @@ def test_profiles_override_and_validate(world_factory, tmp_path):
     d.wait_phase(FB.PHASE_MANUAL_CAPTURE)
     run_captures(w, len(w.poses), accepted_target=5)
     res = w.result(h).result                       # solves after 5 (profile), not 10
+    assert res.message                             # the real result, not rclpy's default
     assert res.quality.captures_accepted == 5
 
 
@@ -986,3 +991,54 @@ def test_too_few_inliers_maps_to_not_enough_samples(world_factory, monkeypatch):
     monkeypatch.setattr(node_mod, 'calibrate', fail)
     res = _finish_run(w)
     assert res.error_code == R.NOT_ENOUGH_SAMPLES and not res.transform_valid
+
+
+# -- review fixes (M3 xhigh pass 8-9) ------------------------------------------------
+
+def test_recalibration_of_an_attached_camera_is_publishable_after_the_old_one_stops():
+    """parent -> camera_link already exists (an earlier result): the node accepts
+    it as the mount being replaced; publish_result checks liveness at publish."""
+    from handeye_autopilot.ros import tf_tools
+    from tf2_msgs.msg import TFMessage
+    static = tf_tools.StaticLinks()
+    static.add(TFMessage(transforms=[tf_tools.to_msg(np.eye(4), 'camera_link', 'opt')]))
+    tree = {'opt': 'camera_link', 'camera_link': 'base_link'}
+    sub = tf_tools.camera_subtree(tree, static, 'opt', 'base_link', '')
+    assert sub.error == '' and sub.root == 'camera_link'
+    from handeye_autopilot.ros.publish_result import check
+    assert 'already has a parent' in check(tree, 'base_link', 'camera_link')   # still live
+
+
+def test_cancel_keeps_the_capture_counts(world_factory):
+    w = world_factory()
+    d = w.driver
+    h = d.send()
+    d.wait_phase(FB.PHASE_MANUAL_CAPTURE)
+    run_captures(w, 2)
+    d.wait(h.cancel_goal_async())
+    q = w.result(h).result.quality
+    assert q.captures_accepted + q.captures_rejected == 2
+
+
+def test_preflight_waits_the_full_tf_latency(world_factory):
+    """TF arriving 0.4 s late (inside the 0.5 s tf_timeout) at a 10 Hz camera."""
+    w = world_factory(cam_over={'stamp_from_clock': True})
+    w.robot.delay = 0.4
+    time.sleep(0.8)
+    h = w.driver.send()
+    w.driver.wait_phase(FB.PHASE_MANUAL_CAPTURE, timeout=15.0)
+    w.driver.wait(h.cancel_goal_async())
+    w.result(h)
+
+
+def test_a_client_waiting_early_gets_the_real_result(world_factory):
+    """Request the result BEFORE the run ends: rclpy sends whatever the terminal
+    transition carried, so it must carry the real result (not a default one)."""
+    w = world_factory()
+    d = w.driver
+    h = d.send()
+    fut = h.get_result_async()                     # waiting from the start
+    d.wait_phase(FB.PHASE_MANUAL_CAPTURE)
+    run_captures(w, len(w.poses), accepted_target=10)
+    res = d.wait(fut, 120.0).result
+    assert res.error_code == R.NONE and res.message and res.quality.captures_accepted >= 10

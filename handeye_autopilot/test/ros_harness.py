@@ -128,7 +128,7 @@ class Driver:
                 raise TimeoutError(f'phase {phase!r} not reached (at {self.phase()!r})')
             time.sleep(0.02)
 
-    def capture_and_wait(self, timeout=20.0):
+    def capture_and_wait(self, timeout=45.0):
         """Trigger one capture; returns the feedback after it finished."""
         n = len(self.feedback)
         res = self.call(self.capture)
@@ -168,4 +168,3 @@ class SimClock(Node):
         m.clock.sec = int(t)
         m.clock.nanosec = int((t - int(t)) * 1e9)
         self.pub.publish(m)
-

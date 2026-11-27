@@ -371,6 +371,11 @@ class CalibrationNode(Node):
         finally:
             self.last_run_records = list(run.records)
             self.last_result = locals().get('result')       # for diagnostics and tests
+            if self.last_result is not None:
+                r = self.last_result
+                log = self.get_logger().info if r.error_code == R.NONE else \
+                    self.get_logger().warning
+                log(f'run ended: code {r.error_code}: {r.message}')
             with self._lock:
                 self._run = None
 
@@ -388,12 +393,14 @@ class CalibrationNode(Node):
             t0 = time.monotonic()
             while not goal_handle.is_cancel_requested and time.monotonic() - t0 < 2.0:
                 time.sleep(0.01)
+        # pass the result: rclpy's succeed()/abort()/canceled() without one send a
+        # DEFAULT (empty) result to any client already waiting for it
         if result.error_code == R.CANCELED and goal_handle.is_cancel_requested:
-            goal_handle.canceled()
+            goal_handle.canceled(result)
         elif result.error_code == R.NONE:
-            goal_handle.succeed()
+            goal_handle.succeed(result)
         else:
-            goal_handle.abort()
+            goal_handle.abort(result)
 
     def _final_verdict(self, run: RunState, result: Calibrate.Result) -> Calibrate.Result:
         """Decide the outcome once, under the lock: from here no cancel is accepted
@@ -412,17 +419,20 @@ class CalibrationNode(Node):
             self._mark_unpublishable(result.result_file,
                                      'cancelled' if cancel else 'clock jumped back' if jumped
                                      else 'CameraInfo changed')
+        new = None
         if cancel and result.error_code != R.CANCELED:
-            return self._result(R.CANCELED, 'cancelled' + kept,
-                                result_file=result.result_file)
-        if result.error_code == R.NONE and jumped:
-            return self._result(R.TF_UNAVAILABLE, 'the node clock jumped back during the '
-                                'run; the result is not trusted' + kept,
-                                result_file=result.result_file)
-        if result.error_code == R.NONE and info_changed:
-            return self._result(R.NO_CAMERA_INFO, 'CameraInfo changed during the run; the '
-                                'result is not trusted' + kept, result_file=result.result_file)
-        return result
+            new = self._result(R.CANCELED, 'cancelled' + kept, result_file=result.result_file)
+        elif result.error_code == R.NONE and jumped:
+            new = self._result(R.TF_UNAVAILABLE, 'the node clock jumped back during the '
+                               'run; the result is not trusted' + kept,
+                               result_file=result.result_file)
+        elif result.error_code == R.NONE and info_changed:
+            new = self._result(R.NO_CAMERA_INFO, 'CameraInfo changed during the run; the '
+                               'result is not trusted' + kept, result_file=result.result_file)
+        if new is None:
+            return result
+        new.quality = result.quality          # the counts and metrics measured stay reported
+        return new
 
     def _mark_unpublishable(self, path: str, why: str) -> None:
         try:
@@ -442,10 +452,13 @@ class CalibrationNode(Node):
         goal_handle.publish_feedback(fb)
 
     def _result(self, code: int, message: str, cal: Calibration | None = None,
-                frames: dict[str, str] | None = None, result_file: str = '') -> Calibrate.Result:
+                frames: dict[str, str] | None = None, result_file: str = '',
+                counts: tuple[int, int] | None = None) -> Calibrate.Result:
         r = R()
         r.error_code, r.message, r.result_file = code, message, result_file
         r.quality = quality_msg(cal)
+        if cal is None and counts is not None:       # captures taken before the run ended
+            r.quality.captures_accepted, r.quality.captures_rejected = counts
         if cal is not None and cal.solution is not None and frames is not None:
             r.transform_valid, r.passed = True, cal.passed
             stamp = (self._solve_end or self.get_clock().now()).to_msg()   # §5: solve end
@@ -501,7 +514,7 @@ class CalibrationNode(Node):
             self._check_cancel(goal_handle, run)
             self._check_jump(t_solve)
         except RunAbort as e:
-            return self._result(e.code, str(e))
+            return self._result(e.code, str(e), counts=(run.accepted, run.rejected))
         self._feedback(goal_handle, run, FB.PHASE_VERIFYING)
         path = self._write_results(goal.mode, cfg, records, cal, frames)
         if cal.solution is None:
@@ -556,7 +569,7 @@ class CalibrationNode(Node):
             img = self.images.latest() or img
             self._check_clock(img.stamp, img.received, cfg)
             found = self._lookup_cancellable(goal_handle, run, base, tool, img.stamp_ns,
-                                             min(0.2, t.tf_timeout))
+                                             t.tf_timeout)      # full latency budget per frame
         if found is None:
             if tf_tools.latest(self.tf_buffer, base, tool) is None:
                 why = 'is the robot driver (robot_state_publisher) running?'
