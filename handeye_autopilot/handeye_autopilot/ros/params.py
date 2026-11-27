@@ -19,6 +19,7 @@ import math
 from pathlib import Path
 from typing import Any
 
+from rclpy.exceptions import ParameterUninitializedException
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 import yaml
@@ -162,8 +163,11 @@ def declare(node: Node) -> None:
 def _group_values(node: Node, prefix: str, names: list[str]) -> dict[str, Any]:
     out = {}
     for n in names:
-        v = node.get_parameter(f'{prefix}.{n}').value
-        if v is None:                    # declared by type only, never set
+        try:
+            v = node.get_parameter(f'{prefix}.{n}').value
+        except ParameterUninitializedException:     # declared by type only, never set
+            v = ()
+        if v is None:
             v = ()
         out[n] = tuple(v) if isinstance(v, (list, tuple)) else v
     return out

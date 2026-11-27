@@ -63,14 +63,14 @@ from ..core import session as S
 from ..core import transforms as tf
 from ..core.camera import CameraModel
 from ..core.capture import CaptureRecord, Frame, capture
-from ..core.planning import IKResult
+from ..core.planning import IKResult, box_contains, lever_ball_points
 from ..core.quality import Calibration, calibrate
 from ..core.results import result_dict, transform_dict
 from ..core.solver import TOO_FEW_CAPTURES
 from . import params as P
 from . import tf_tools, viz
 from .camera_input import CameraInfoError, ImageBuffer, camera_model, same_info
-from .moveit_client import SUCCESS, GoalOutcome, MoveItClient, error_name
+from .moveit_client import SUCCESS, TERMINAL, GoalOutcome, MoveItClient, error_name
 from .publish_result import PUBLISHABLE
 
 R = Calibrate.Result
@@ -175,6 +175,7 @@ class CalibrationNode(Node):
         self.last_result: Calibrate.Result | None = None
         self._solve_end: Any = None          # node time the last final solve finished
         self._joints: list[tuple[float, JointState]] = []
+        self._joint_names_seen: set[str] = set()   # every joint ever reported
         self.create_subscription(JointState, '/joint_states', self._on_joints, 10,
                                  callback_group=self._sensors)
         # MoveIt services and actions (§3): their replies arrive on this group
@@ -240,6 +241,7 @@ class CalibrationNode(Node):
         with self._lock:
             self._joints.append((time.monotonic(), msg))
             self._joints = self._joints[-200:]
+            self._joint_names_seen.update(msg.name)
 
     # -- admission (§5): rejected goals get no result -----------------------------
     def _admit(self, goal: Calibrate.Goal) -> GoalResponse:
@@ -363,10 +365,11 @@ class CalibrationNode(Node):
                 if not series:
                     res.success, res.message = False, 'joint_states carry no positions'
                     return res
-                # every joint the robot has reported recently (also before the
-                # call) needs its own fresh evidence: 5 samples spanning the window
+                # every joint the robot has ever reported (also before the call,
+                # even if its stream stopped) needs its own fresh evidence: 5
+                # samples spanning the window
                 with self._lock:
-                    known = {n for _, m in self._joints for n in m.name}
+                    known = set(self._joint_names_seen)
                 thin = [n for n in known | set(series) if n not in series or
                         len(series[n]) < min_msgs or
                         max(t for t, _ in series[n]) - min(t for t, _ in series[n]) < window]
@@ -379,6 +382,12 @@ class CalibrationNode(Node):
                 if span > vmax * window:
                     res.success, res.message = False, 'joint positions are still changing'
                     return res
+                if self.moveit.active():         # a late goal appeared meanwhile
+                    res.success, res.message = False, 'a motion goal from this node is active'
+                    return res
+                # goals that ended without a terminal status are covered by this
+                # stillness evidence
+                self.moveit.forget_unconfirmed()
                 with self._lock:
                     self._fault_latched = False
                 self.get_logger().info('motion fault cleared')
@@ -537,15 +546,14 @@ class CalibrationNode(Node):
             cfg = P.load_run_config(self, goal.profile, run.snapshot, run.profile_text)
         except ValueError as e:
             return self._result(R.INVALID_GOAL, str(e))
-        if cfg.session.box_enabled:
-            try:
-                centre = tf.make(Rotation.from_euler('xyz', cfg.session.box_rpy),
-                                 np.asarray(cfg.session.box_xyz, float))
-                self.pub_markers.publish(viz.box_marker(
-                    centre, cfg.session.box_size, cfg.frames['base_frame'],
-                    self.get_clock().now().to_msg()))
-            except Exception as e:  # noqa: BLE001 - visualisation must never end a run
-                self.get_logger().warning(f'safety box marker failed: {e!r}')
+        try:                # the box this run uses (a disabled box is removed)
+            centre = tf.make(Rotation.from_euler('xyz', cfg.session.box_rpy),
+                             np.asarray(cfg.session.box_xyz, float))
+            self.pub_markers.publish(viz.box_marker(
+                centre, cfg.session.box_size, cfg.frames['base_frame'],
+                self.get_clock().now().to_msg(), cfg.session.box_enabled))
+        except Exception as e:  # noqa: BLE001 - visualisation must never end a run
+            self.get_logger().warning(f'safety box marker failed: {e!r}')
         with self._lock:
             # ~/finish needs enough captures for every k-fold training split
             run.min_captures = P.least_captures(cfg.solver.min_captures, cfg.solver.folds)
@@ -768,7 +776,7 @@ class CalibrationNode(Node):
                 self._feedback(goal_handle, run)
             if isinstance(action, S.Move):
                 outcome, joints, pose = self._motion(goal_handle, run, cfg, action, ik_link,
-                                                     tool_T_ik, path)
+                                                     tool_T_ik, path, mode)
                 session.on_motion(outcome, joints, pose)
                 continue
             frames, images, _, detail = self._collect(goal_handle, run, cfg, info)
@@ -825,45 +833,57 @@ class CalibrationNode(Node):
     def _joints_now(self, names: Any, after: float, timeout: float, run: RunState
                     ) -> Any:
         """Measured joints (in ``names`` order) from /joint_states received after
-        ``after`` (monotonic), newest per joint; None if not all arrive in time."""
+        ``after`` (monotonic) AND stamped after the call (a replayed or queued old
+        message is not evidence), newest per joint; None if not all arrive in
+        time or a value is not finite."""
         deadline = time.monotonic() + timeout
+        call_now = self.now()
         while True:
             with self._lock:
-                msgs = [m for t, m in self._joints if t > after]
+                msgs = [m for t, m in self._joints if t > after and
+                        m.header.stamp.sec + m.header.stamp.nanosec * 1e-9 >= call_now - 0.1]
             pos: dict[str, float] = {}
             for m in msgs:                      # oldest first: newer values win
                 pos.update(zip(m.name, m.position, strict=False))
             if all(n in pos for n in names):
-                return np.array([pos[n] for n in names], dtype=float)
+                q = np.array([pos[n] for n in names], dtype=float)
+                if np.all(np.isfinite(q)):
+                    return q
             if time.monotonic() > deadline or run.cancelled.is_set():
                 return None
             time.sleep(0.02)
 
     def _motion(self, goal_handle: Any, run: RunState, cfg: P.RunConfig, a: S.Move,
-                ik_link: str, tool_T_ik: Any, path: Any) -> tuple[str, Any, Any]:
+                ik_link: str, tool_T_ik: Any, path: Any, mode: str) -> tuple[str, Any, Any]:
         """One Move (§3.2) -> (outcome, measured joints, measured tool pose).
 
         ok: goal accepted, SUCCEEDED with SUCCESS, and the measured TF tool pose
         (and, for joint goals, the joints) at the target after settling: a
         planning-only move_group or a clamped joint goal reports success without
         getting there. not_started: provably nothing moved (a refused Cartesian
-        path; an ABORTED MoveGroup goal with an empty planned trajectory and
-        unchanged joints). Anything else is failed. A cancel ends the run
-        (CANCELED), or MOTION_FAULT when the stop is not confirmed (§6)."""
+        path; a refused plan; an ABORTED MoveGroup goal with an empty planned
+        trajectory and unchanged joints). Anything else is failed. A cancel ends
+        the run (CANCELED), or MOTION_FAULT when the stop is not confirmed (§6).
+
+        With the box also guarding the carried object, a planned move is planned
+        only, its whole path is checked (the L_max ball inside the box, through
+        FK), and only then executed (01-architecture §3.2)."""
         mi = cfg.moveit
         base, tool = cfg.frames['base_frame'], cfg.frames['tool_frame']
         with self._lock:
             run.motion_note = ''
+        t_start = self.now()
         before = self._joints_now(mi.joint_names, time.monotonic(), 2.0, run)
-        self._check_cancel(goal_handle, run)
+        check_path = cfg.session.box_enabled and cfg.session.box_check_moving_object
         if a.cartesian:
             plan = self.moveit.plan_cartesian(
                 [W @ tool_T_ik for W in a.waypoints], base, mi.group_name, ik_link,
                 mi.cartesian_max_step, mi.revolute_jump_threshold, mi.velocity_scaling,
                 mi.acceleration_scaling, mi.service_timeout + 10.0, run.cancelled)
-            self._check_cancel(goal_handle, run)
             if not plan.ok:                       # nothing was sent (probe finding 7)
+                self._check_cancel(goal_handle, run)
                 return self._not_started(run, cfg, plan.note, before)
+            self._still_valid(goal_handle, run, t_start)     # right before anything moves
             out = self.moveit.run(self.moveit.execute,
                                   self.moveit.execute_goal(plan.trajectory),
                                   mi.motion_timeout, mi.cancel_timeout, run.cancelled)
@@ -871,15 +891,40 @@ class CalibrationNode(Node):
             goal = self.moveit.joint_goal(a.joints, mi.joint_names, mi.group_name, base,
                                           mi.planning_time, mi.velocity_scaling,
                                           mi.acceleration_scaling, path)
-            out = self.moveit.run(self.moveit.move, goal, mi.planning_time + mi.motion_timeout,
-                                  mi.cancel_timeout, run.cancelled)
+            if check_path:
+                goal.planning_options.plan_only = True
+                self._still_valid(goal_handle, run, t_start)
+                out = self.moveit.run(self.moveit.move, goal, mi.planning_time + 10.0,
+                                      mi.cancel_timeout, run.cancelled)
+                self._stopped(out, run)
+                after = self._joints_now(mi.joint_names, time.monotonic(), 2.0, run)
+                moved = not _same(before, after, mi.joint_tolerance)
+                if not out.accepted or moved:     # a plan-only goal must not move anything
+                    return self._failed(run, out.note or 'the robot moved during a plan-only '
+                                        'request', after)
+                if out.status != GoalStatus.STATUS_SUCCEEDED or out.error_code != SUCCESS or \
+                        out.planned is None or not out.planned.joint_trajectory.points:
+                    return self._not_started(run, cfg, 'planning failed '
+                                             f'({error_name(out.error_code)})', after)
+                why = self._path_outside_box(out.planned, cfg, ik_link, tool_T_ik, mode, run)
+                self._check_cancel(goal_handle, run)
+                if why:
+                    return self._not_started(run, cfg, why, after)
+                self._still_valid(goal_handle, run, t_start)
+                out = self.moveit.run(self.moveit.execute,
+                                      self.moveit.execute_goal(out.planned),
+                                      mi.motion_timeout, mi.cancel_timeout, run.cancelled)
+            else:
+                self._still_valid(goal_handle, run, t_start)
+                out = self.moveit.run(self.moveit.move, goal,
+                                      mi.planning_time + mi.motion_timeout,
+                                      mi.cancel_timeout, run.cancelled)
         self._stopped(out, run)                   # raises on a cancel or an unconfirmed stop
         after = self._joints_now(mi.joint_names, time.monotonic(), 2.0, run)
         if not out.accepted:
             return self._failed(run, out.note, after)
-        if not a.cartesian and out.status == GoalStatus.STATUS_ABORTED and \
-                out.planned_points == 0 and before is not None and after is not None and \
-                float(np.max(np.abs(after - before))) <= mi.joint_tolerance:
+        if not a.cartesian and not check_path and out.status == GoalStatus.STATUS_ABORTED and \
+                out.planned_points == 0 and _same(before, after, mi.joint_tolerance):
             return self._not_started(run, cfg, f'planning failed ({error_name(out.error_code)})',
                                      after)
         if out.status != GoalStatus.STATUS_SUCCEEDED or out.error_code != SUCCESS:
@@ -897,22 +942,63 @@ class CalibrationNode(Node):
         after = self._joints_now(mi.joint_names, time.monotonic(), 2.0, run)
         dt = tf.translation_distance(s.pose, a.tool_pose)
         dr = tf.rotation_angle(s.pose, a.tool_pose)
-        if dt > mi.pose_tolerance_translation or dr > mi.pose_tolerance_rotation:
+        if not (dt <= mi.pose_tolerance_translation and dr <= mi.pose_tolerance_rotation):
             return self._failed(run, f'MoveIt reported success but the measured tool pose is '
                                 f'{dt * 1000:.1f} mm / {math.degrees(dr):.2f} deg from the '
                                 'target', after, s.pose)
-        if not a.cartesian and (after is None or float(np.max(np.abs(
-                after - np.asarray(a.joints)))) > mi.joint_tolerance):
+        if not a.cartesian and not _same(after, np.asarray(a.joints), mi.joint_tolerance):
             return self._failed(run, 'MoveIt reported success but the measured joints are not '
                                 'at the goal', after, s.pose)
         return S.MOTION_OK, after, s.pose
 
+    def _still_valid(self, goal_handle: Any, run: RunState, since: float) -> None:
+        """Right before a goal that can move the robot: the run is still valid
+        (not cancelled, no clock reset, CameraInfo unchanged)."""
+        self._check_cancel(goal_handle, run)
+        self._check_jump(since)
+        self._check_info(run)
+
+    def _path_outside_box(self, traj: Any, cfg: P.RunConfig, ik_link: str, tool_T_ik: Any,
+                          mode: str, run: RunState) -> str:
+        """The carried object's L_max ball stays inside the box along the planned
+        path: joints interpolated linearly between trajectory points (what the
+        controller follows), FK at every sample. '' if inside, else why.
+        ``shortcut:`` sampled at <= 0.01 rad joint steps, not swept; tighten if a
+        real box face is ever touched between samples."""
+        jt = traj.joint_trajectory
+        q = np.array([list(p.positions) for p in jt.points], dtype=float)
+        if not np.all(np.isfinite(q)):
+            return 'the planned trajectory has invalid joint values'
+        samples = [q[0]]
+        for a, b in zip(q[:-1], q[1:], strict=True):
+            n = max(1, int(np.ceil(float(np.max(np.abs(b - a))) / 0.01)))
+            samples += [a + (b - a) * k / n for k in range(1, n + 1)]
+        poses = self.moveit.fk_poses(list(jt.joint_names), samples, ik_link,
+                                     cfg.frames['base_frame'], cfg.moveit.service_timeout,
+                                     run.cancelled)
+        if poses is None:
+            return 'compute_fk failed while checking the planned path'
+        ik_T_tool = tf.inv(tool_T_ik)
+        for P_ik in poses:
+            G = P_ik @ ik_T_tool
+            pts = lever_ball_points(mode, G, cfg.session, cfg.board)
+            if not box_contains(G[:3, 3][None], cfg.session) or \
+                    not box_contains(pts, cfg.session):
+                return 'the planned path takes the carried object (within L_max) out of ' \
+                       'the safety box'
+        return ''
+
     def _stopped(self, out: GoalOutcome, run: RunState) -> None:
-        """A goal we had to cancel: CANCELED when its stop is confirmed, else a fault."""
-        if out.sent and not out.accepted and out.note == 'no reply to the goal request':
-            raise RunAbort(R.MOTION_FAULT, 'MoveIt did not answer a motion goal, which may be '
-                           'running without a handle to stop it; check the robot')
+        """A goal we could not see to its end: CANCELED when its stop is confirmed,
+        else a fault."""
+        if out.sent and not out.answered:
+            raise RunAbort(R.MOTION_FAULT, 'MoveIt did not answer a motion goal in time; it '
+                           'may still accept and run it (it is cancelled if it does); check '
+                           'the robot')
         if not out.stopped:
+            if out.accepted and out.status not in TERMINAL:
+                raise RunAbort(R.MOTION_FAULT, f'a motion goal ended without a terminal status '
+                               f'(status {out.status}); check the robot')
             return
         if not out.stop_confirmed:
             raise RunAbort(R.MOTION_FAULT, f'motion {out.stopped}: the stop was not confirmed '
@@ -1126,6 +1212,14 @@ class CalibrationNode(Node):
                 # the camera subtree at calibration time: publish_result refuses if
                 # the live one differs (a driver restart with other extrinsics)
                 'subtree': transform_dict(T_root_opt, sub.root, optical)}
+
+
+def _same(a: Any, b: Any, tol: float) -> bool:
+    """Both joint vectors known, finite, and within ``tol`` (NaN is never 'same')."""
+    if a is None or b is None:
+        return False
+    d = np.abs(np.asarray(a, float) - np.asarray(b, float))
+    return bool(np.all(np.isfinite(d)) and float(np.max(d, initial=0.0)) <= tol)
 
 
 def reject_record(cid: int, camera: CameraModel, code: str, detail: str) -> CaptureRecord:

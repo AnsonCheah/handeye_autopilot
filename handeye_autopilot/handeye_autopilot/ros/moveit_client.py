@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+import math
 import threading
 import time
 from typing import Any
@@ -35,7 +36,7 @@ from moveit_msgs.msg import (
     PositionConstraint,
     RobotTrajectory,
 )
-from moveit_msgs.srv import GetCartesianPath, GetPositionIK
+from moveit_msgs.srv import GetCartesianPath, GetPositionFK, GetPositionIK
 import numpy as np
 from numpy.typing import NDArray
 from rclpy.action import ActionClient
@@ -44,12 +45,15 @@ from scipy.spatial.transform import Rotation
 from shape_msgs.msg import SolidPrimitive
 
 from ..core.planning import IKResult
+from .tf_tools import pose_to_matrix
 
 Mat = NDArray[np.float64]
 
 ERROR_NAMES = {v: k for k, v in vars(MoveItErrorCodes).items()
                if k.isupper() and isinstance(v, int)}
 SUCCESS = MoveItErrorCodes.SUCCESS
+TERMINAL = (GoalStatus.STATUS_SUCCEEDED, GoalStatus.STATUS_ABORTED, GoalStatus.STATUS_CANCELED)
+GOAL_REPLY_TIMEOUT = 10.0   # s for the server to accept or reject a goal
 MAX_OUTSTANDING_IK = 4      # timed-out IK calls still running on the server (§3.1)
 
 
@@ -83,10 +87,12 @@ class GoalOutcome:
     after our cancel (a cancel acknowledgement alone is not proof, §6)."""
 
     sent: bool = False             # the goal request went out
+    answered: bool = False         # the server accepted or rejected it in time
     accepted: bool = False
     status: int = GoalStatus.STATUS_UNKNOWN
     error_code: int = 0
     planned_points: int = -1       # MoveGroup only: points in planned_trajectory
+    planned: RobotTrajectory | None = None   # MoveGroup only: the planned trajectory
     stopped: str = ''
     stop_confirmed: bool = False
     note: str = ''
@@ -107,11 +113,14 @@ class MoveItClient:
         self.ik = node.create_client(GetPositionIK, 'compute_ik', callback_group=cb)
         self.cartesian = node.create_client(GetCartesianPath, 'compute_cartesian_path',
                                             callback_group=cb)
+        self.fk = node.create_client(GetPositionFK, 'compute_fk', callback_group=cb)
         self.move = ActionClient(node, MoveGroup, 'move_action', callback_group=cb)
         self.execute = ActionClient(node, ExecuteTrajectory, 'execute_trajectory',
                                     callback_group=cb)
         self._lock = threading.Lock()
         self._active: list[tuple[Any, Any]] = []      # (goal handle, result future)
+        self._late: list[Any] = []       # goal requests we gave up waiting for (§6)
+        self._unconfirmed = 0            # goals that ended without a terminal status
         self._ik_pending: list[Any] = []
 
     # -- discovery ----------------------------------------------------------------
@@ -120,6 +129,7 @@ class MoveItClient:
         checks: list[tuple[str, Callable[[], bool]]] = [
             ('compute_ik', self.ik.service_is_ready),
             ('compute_cartesian_path', self.cartesian.service_is_ready),
+            ('compute_fk', self.fk.service_is_ready),
             ('move_action', self.move.server_is_ready),
             ('execute_trajectory', self.execute.server_is_ready)]
         deadline = time.monotonic() + timeout
@@ -132,10 +142,40 @@ class MoveItClient:
 
     # -- goals still running (the fault latch, §6) ------------------------------------
     def active(self) -> int:
-        """Motion goals sent by this node whose terminal status has not arrived."""
+        """Motion goals sent by this node that may still run: accepted goals whose
+        result has not arrived, and goal requests we stopped waiting for (the
+        server may still accept them; they are cancelled as soon as it does)."""
         with self._lock:
+            for _h, f in self._active:
+                if f.done() and int(f.result().status) not in TERMINAL:
+                    self._unconfirmed += 1          # counted once, then dropped below
             self._active = [(h, f) for h, f in self._active if not f.done()]
-            return len(self._active)
+            self._late = [f for f in self._late if not f.done()]
+            return len(self._active) + len(self._late)
+
+    def unconfirmed(self) -> int:
+        """Goals that ended without a terminal status (e.g. the server lost them):
+        only measured stillness can clear them (``~/clear_fault``)."""
+        self.active()
+        with self._lock:
+            return self._unconfirmed
+
+    def forget_unconfirmed(self) -> None:
+        with self._lock:
+            self._unconfirmed = 0
+
+    def _on_late_reply(self, fut: Any) -> None:
+        """A goal request answered after we gave up: cancel it at once and track it."""
+        try:
+            handle = fut.result()
+        except Exception:  # noqa: BLE001 - nothing to cancel
+            return
+        if handle is None or not handle.accepted:
+            return
+        res = handle.get_result_async()
+        with self._lock:
+            self._active.append((handle, res))
+        handle.cancel_goal_async()
 
     # -- IK (§3.1) ----------------------------------------------------------------------
     def solve_ik(self, base_T_ik: Mat, base_frame: str, group: str, ik_link: str,
@@ -246,10 +286,43 @@ class MoveItClient:
         res = fut.result()
         code = int(res.error_code.val)
         frac = float(res.fraction)
-        if code != SUCCESS or frac < 1.0 - 1e-9:
+        if code != SUCCESS or not math.isfinite(frac) or frac < 1.0 - 1e-9:
             return CartesianPlan(False, frac, note=f'Cartesian path {frac * 100:.0f} % planned '
                                  f'({error_name(code)})')
+        # our own jump check: some releases accept the threshold field but do not
+        # apply it, and a wrist branch flip between two path points is a large,
+        # unchecked swing of the carried object
+        pts = res.solution.joint_trajectory.points
+        q = np.array([list(p.positions) for p in pts], dtype=float)
+        if len(pts) < 1 or not np.all(np.isfinite(q)):
+            return CartesianPlan(False, frac, note='Cartesian path with no or invalid points')
+        if jump > 0 and len(q) > 1:
+            worst = float(np.max(np.abs(np.diff(q, axis=0))))
+            if worst > jump:
+                return CartesianPlan(False, frac, note=f'Cartesian path has a joint jump of '
+                                     f'{worst:.2f} rad between points (> {jump} rad)')
         return CartesianPlan(True, frac, res.solution)
+
+    def fk_poses(self, names: Sequence[str], joints: Sequence[Sequence[float]], link: str,
+                 base_frame: str, timeout: float,
+                 cancelled: threading.Event | None = None) -> list[Mat] | None:
+        """``link`` poses in ``base_frame`` for each joint vector (one request each)."""
+        out = []
+        for q in joints:
+            req = GetPositionFK.Request()
+            req.header.frame_id = base_frame
+            req.fk_link_names = [link]
+            req.robot_state.is_diff = True        # other joints: the current state
+            req.robot_state.joint_state.name = list(names)
+            req.robot_state.joint_state.position = [float(v) for v in q]
+            fut = self.fk.call_async(req)
+            if not wait_future(fut, timeout, cancelled):
+                return None
+            res = fut.result()
+            if int(res.error_code.val) != SUCCESS or not res.pose_stamped:
+                return None
+            out.append(pose_to_matrix(res.pose_stamped[0].pose))
+        return out
 
     def execute_goal(self, trajectory: RobotTrajectory) -> ExecuteTrajectory.Goal:
         return ExecuteTrajectory.Goal(trajectory=trajectory)
@@ -262,10 +335,17 @@ class MoveItClient:
         terminal status that proves it stopped."""
         out = GoalOutcome(sent=True)
         send = client.send_goal_async(goal)
-        if not wait_future(send, 10.0):
-            # the goal may be running on the server with no handle to cancel it
+        wait_future(send, GOAL_REPLY_TIMEOUT)
+        with self._lock:                  # decided once: a reply after this is 'late'
+            late = not send.done()
+            if late:
+                self._late.append(send)
+        if late:
+            # the server may still accept it: then it is cancelled and tracked at once
+            send.add_done_callback(self._on_late_reply)
             out.note = 'no reply to the goal request'
             return out
+        out.answered = True
         handle = send.result()
         if not handle.accepted:
             out.note = 'goal rejected by the server'
@@ -279,7 +359,8 @@ class MoveItClient:
         if not wait_future(res_fut, timeout, cancelled):
             out.stopped = 'cancel' if cancelled.is_set() else 'timeout'
             handle.cancel_goal_async()
-            out.stop_confirmed = wait_future(res_fut, cancel_timeout)
+            out.stop_confirmed = wait_future(res_fut, cancel_timeout) and \
+                int(res_fut.result().status) in TERMINAL
             if not out.stop_confirmed:
                 out.note = f'no terminal status within {cancel_timeout:.1f} s of the cancel'
                 return out
@@ -289,4 +370,5 @@ class MoveItClient:
         traj = getattr(res.result, 'planned_trajectory', None)
         if traj is not None:
             out.planned_points = len(traj.joint_trajectory.points)
+            out.planned = traj
         return out

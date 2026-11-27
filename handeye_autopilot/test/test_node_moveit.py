@@ -148,31 +148,41 @@ def test_moveit_calibration_recovers_the_true_mount(moveit_world, mode, tcp):
         assert traj.points
 
 
-def test_planning_only_success_is_caught_by_the_tf_check(moveit_world):
-    """03-milestones M4: a move_group that reports success without moving."""
+@pytest.mark.parametrize('kind', ['execute', 'move'])
+def test_planning_only_success_is_caught_by_the_tf_check(moveit_world, kind):
+    """03-milestones M4: a move_group that reports success without moving, for
+    Cartesian moves (ExecuteTrajectory, bootstrap) and planned joint goals
+    (MoveGroup, after bootstrap and centring)."""
     w = moveit_world()
     w.moveit.planning_only = True
+    w.moveit.fault_kinds = {kind}
     h = w.driver.send(execution='moveit')
     assert h.accepted
-    out = w.result(h, timeout=120.0)
+    out = w.result(h, timeout=300.0)
     assert out.status == 6                                    # ABORTED
     assert out.result.error_code == R.MOTION_FAILED, out.result.message
     assert 'measured tool pose' in out.result.message
+    assert w.moveit.goals[-1][0] == kind                      # the faulty action was hit
 
 
-def test_cancel_without_terminal_state_latches_a_motion_fault(moveit_world):
-    """03-milestones M4: the MoveGroup goal never terminates after the cancel ->
-    ABORTED / MOTION_FAULT; new goals are rejected until ~/clear_fault succeeds."""
+@pytest.mark.parametrize('kind', ['execute', 'move'])
+def test_cancel_without_terminal_state_latches_a_motion_fault(moveit_world, kind):
+    """03-milestones M4: the MoveGroup (or ExecuteTrajectory) goal never
+    terminates after the cancel -> ABORTED / MOTION_FAULT; new goals are
+    rejected until ~/clear_fault succeeds."""
     w = moveit_world()
     w.moveit.hang = True
+    w.moveit.fault_kinds = {kind}
     d = w.driver
     h = d.send(execution='moveit')
     assert h.accepted
-    _wait(lambda: w.moveit.goals, 120.0, 'no motion goal sent')
+    _wait(lambda: any(k == kind for k, _ in w.moveit.goals), 300.0, f'no {kind} goal sent')
+    time.sleep(0.3)
     d.wait(h.cancel_goal_async(), 10.0)
     out = w.result(h, timeout=30.0)
     assert out.status == 6, out.result.message               # ABORTED, not CANCELED
     assert out.result.error_code == R.MOTION_FAULT, out.result.message
+    assert w.moveit.goals[-1][0] == kind
     assert not d.send(execution='moveit').accepted            # latched
     res = d.call(d.clear_fault)
     assert not res.success and 'still active' in res.message
@@ -201,6 +211,117 @@ def test_cancel_during_motion_is_canceled(moveit_world):
     assert out.result.error_code == R.CANCELED
     assert d.send(execution='moveit').accepted is True        # no latch
     # (the second goal is cancelled by the fixture's close)
+
+
+def test_late_goal_reply_is_a_fault_and_the_goal_is_cancelled(moveit_world, monkeypatch):
+    """A goal the server accepts only after we stopped waiting may run with no
+    handle: MOTION_FAULT, and the late goal is cancelled and tracked, so
+    ~/clear_fault refuses while it is active."""
+    from handeye_autopilot.ros import moveit_client
+    monkeypatch.setattr(moveit_client, 'GOAL_REPLY_TIMEOUT', 1.0)
+    w = moveit_world()
+    w.moveit.accept_delay = 3.0
+    w.moveit.motion_time = 6.0
+    w.moveit.fault_kinds = {'execute'}
+    d = w.driver
+    h = d.send(execution='moveit')
+    out = w.result(h, timeout=120.0)
+    assert out.result.error_code == R.MOTION_FAULT, out.result.message
+    _wait(lambda: w.node.moveit.active(), 10.0, 'late goal not tracked')
+    res = d.call(d.clear_fault)
+    assert not res.success and 'active' in res.message
+    _wait(lambda: not w.node.moveit.active(), 15.0, 'late goal not cancelled')
+    res = d.call(d.clear_fault)
+    assert res.success, res.message
+
+
+def test_box_guards_the_carried_object_on_planned_paths(moveit_world):
+    """01-architecture §3.2: with box_check_moving_object, a planned move is
+    planned only, its path is checked (L_max ball inside the box via FK) and
+    only then executed. Plans that leave the box are never executed (a spare
+    replaces them); the run still succeeds."""
+    w = moveit_world(node_over={'session.box_enabled': True,
+                                'session.box_check_moving_object': True})
+    # a box around the work area (seed tool +- 1 m), far smaller than the 1.5 m detour
+    G0 = w.robot.G
+    w.node.set_parameters([rclpy.parameter.Parameter(
+        'session.box_xyz', value=[float(v) for v in G0[:3, 3]]),
+        rclpy.parameter.Parameter('session.box_size', value=[2.0, 2.0, 2.0])])
+    w.moveit.detour = lambda n: n <= 2
+    h = w.driver.send(execution='moveit')
+    out = w.result(h, timeout=400.0)
+    assert out.result.error_code == R.NONE, out.result.message
+    assert w.moveit.plans >= 3
+    detoured = [t for t in w.moveit.executed if len(t) == 3 and
+                t[1][2] - t[2][2] > 1.0]
+    assert not detoured, 'a plan leaving the box was executed'
+    planned_and_run = [t for t in w.moveit.executed if len(t) == 2]
+    assert planned_and_run, 'no checked plan was executed'
+
+
+@pytest.mark.parametrize('fault', ['jump', 'nan_fraction'])
+def test_bad_cartesian_paths_are_never_executed(moveit_world, fault):
+    """A path with a joint jump (some releases ignore the threshold field) or a
+    NaN fraction is refused before anything is sent: not_started, nothing runs."""
+    w = moveit_world()
+    if fault == 'jump':
+        w.moveit.cart_jump = True
+    else:
+        w.moveit.cart_fraction = float('nan')
+    out = w.result(w.driver.send(execution='moveit'), timeout=120.0)
+    assert out.result.error_code == R.NOT_ENOUGH_SAMPLES, out.result.message
+    assert 'bootstrap_failed' in out.result.message
+    assert not [k for k, _ in w.moveit.goals if k == 'execute']
+
+
+def test_joint_evidence_needs_fresh_finite_stamps(moveit_world):
+    """Replayed (old-stamped) or NaN joint states are not measurements."""
+    from sensor_msgs.msg import JointState
+    w = moveit_world(fake=False)
+    pub = w.client.create_publisher(JointState, '/joint_states', 10)
+    run = type('Run', (), {'cancelled': threading.Event()})()
+
+    def send(stamp_offset, value):
+        m = JointState(name=list(JOINTS), position=[value] * 6)
+        m.header.stamp = tf_tools.stamp_to_time(w.node.now() + stamp_offset).to_msg()
+        pub.publish(m)
+    t0 = time.monotonic()
+    threading.Timer(0.3, send, (-30.0, 0.1)).start()          # a replay from the past
+    assert w.node._joints_now(JOINTS, t0, 1.0, run) is None
+    t0 = time.monotonic()
+    threading.Timer(0.3, send, (0.0, float('nan'))).start()
+    assert w.node._joints_now(JOINTS, t0, 1.0, run) is None
+    t0 = time.monotonic()
+    threading.Timer(0.3, send, (0.0, 0.2)).start()
+    q = w.node._joints_now(JOINTS, t0, 2.0, run)
+    assert q is not None and np.allclose(q, 0.2)
+
+
+def test_clear_fault_needs_every_joint_ever_seen(moveit_world):
+    """The arm's stream stopped and only a gripper keeps publishing: the fault
+    must not clear on the gripper's stillness alone."""
+    from sensor_msgs.msg import JointState
+    w = moveit_world(fake=False)
+    pub = w.client.create_publisher(JointState, '/joint_states', 10)
+    d = w.driver
+    assert d.call(d.inject_fault).success
+    pub.publish(JointState(name=list(JOINTS), position=[0.0] * 6))      # the arm, once
+    time.sleep(0.3)
+    stop = threading.Event()
+
+    def gripper():
+        while not stop.is_set():
+            m = JointState(name=['finger'], position=[0.0], velocity=[0.0])
+            m.header.stamp = w.node.get_clock().now().to_msg()
+            for _ in range(250):          # flood: the arm message leaves the buffer
+                pub.publish(m)
+            time.sleep(0.05)
+    threading.Thread(target=gripper, daemon=True).start()
+    try:
+        res = d.call(d.clear_fault, timeout=15.0)
+    finally:
+        stop.set()
+    assert not res.success and 'j1' in res.message
 
 
 def test_cancel_during_ik_is_prompt(moveit_world):

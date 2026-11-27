@@ -205,10 +205,17 @@ class FakeMoveIt(Node):
     """compute_ik, compute_cartesian_path, move_action and execute_trajectory over
     a FakeRobot whose published frame is the IK link. Behaviour switches:
 
-    - ``planning_only``: goals SUCCEED without moving the robot;
+    - ``planning_only``: goals of the kinds in ``fault_kinds`` SUCCEED without
+      moving the robot;
     - ``plan_fails(joints) -> bool``: that MoveGroup goal ABORTS with FAILURE and an
       empty planned trajectory, nothing moves;
-    - ``hang``: goals never reach a terminal state, cancels are accepted and ignored;
+    - ``hang``: goals of the kinds in ``fault_kinds`` never reach a terminal state;
+      cancels are accepted and ignored;
+    - ``fault_kinds``: {'move', 'execute'} by default (MoveGroup / ExecuteTrajectory);
+    - ``accept_delay``: seconds before a goal of a kind in ``fault_kinds`` is
+      accepted (a slow server);
+    - ``detour(n) -> bool``: the n-th plan-only MoveGroup plan passes through a
+      point 1.5 m above the goal;
     - ``motion_time``: seconds a motion takes (cancellable unless ``hang``);
     - ``reach``: (r_min, r_max) of the IK-link origin from the base;
     - ``ik_collision(G) -> bool``: compute_ik answers NO_IK_SOLUTION (collision);
@@ -218,14 +225,21 @@ class FakeMoveIt(Node):
     def __init__(self, robot, **kw):
         super().__init__('fake_moveit', **kw)
         from moveit_msgs.action import ExecuteTrajectory, MoveGroup
-        from moveit_msgs.srv import GetCartesianPath, GetPositionIK
-        from rclpy.action import ActionServer, CancelResponse
+        from moveit_msgs.srv import GetCartesianPath, GetPositionFK, GetPositionIK
+        from rclpy.action import ActionServer, CancelResponse, GoalResponse
         from rclpy.callback_groups import ReentrantCallbackGroup
         from sensor_msgs.msg import JointState
         self.robot = robot
         self.planning_only = False
         self.plan_fails = None
         self.hang = False
+        self.fault_kinds = {'move', 'execute'}
+        self.accept_delay = 0.0
+        self.detour = None
+        self.cart_jump = False           # Cartesian paths with a 1 rad joint jump
+        self.cart_fraction = None        # override the reported path fraction
+        self.plans = 0                   # plan-only MoveGroup requests
+        self.executed: list = []         # trajectories actually executed (joint lists)
         self.motion_time = 0.15
         self.reach = (0.05, 3.0)
         self.ik_collision = None
@@ -237,12 +251,23 @@ class FakeMoveIt(Node):
         self.create_service(GetPositionIK, 'compute_ik', self._ik, callback_group=cb)
         self.create_service(GetCartesianPath, 'compute_cartesian_path', self._cart,
                             callback_group=cb)
+        self.create_service(GetPositionFK, 'compute_fk', self._fk, callback_group=cb)
+
         def accept(_req):
             return CancelResponse.ACCEPT
+
+        def admit(kind):
+            def cb_(_goal):
+                if self.accept_delay and kind in self.fault_kinds:
+                    time.sleep(self.accept_delay)
+                return GoalResponse.ACCEPT
+            return cb_
         self._move = ActionServer(self, MoveGroup, 'move_action', self._move_exec,
-                                  cancel_callback=accept, callback_group=cb)
+                                  goal_callback=admit('move'), cancel_callback=accept,
+                                  callback_group=cb)
         self._exec = ActionServer(self, ExecuteTrajectory, 'execute_trajectory',
-                                  self._traj_exec, cancel_callback=accept, callback_group=cb)
+                                  self._traj_exec, goal_callback=admit('execute'),
+                                  cancel_callback=accept, callback_group=cb)
         self.js = self.create_publisher(JointState, '/joint_states', 10)
         self.create_timer(0.02, self._joints, callback_group=cb)
         self._JointState = JointState
@@ -278,6 +303,23 @@ class FakeMoveIt(Node):
             res.solution.joint_state.position = [float(v) for v in encode(G)] + [0.0]
         return res
 
+    def _fk(self, req, res):
+        js = req.robot_state.joint_state
+        pos = dict(zip(js.name, js.position, strict=True))
+        G = decode([pos[j] for j in JOINTS])
+        p = tf_tools.to_msg(G, req.header.frame_id, req.fk_link_names[0])
+        from geometry_msgs.msg import PoseStamped
+        out = PoseStamped()
+        out.header.frame_id = req.header.frame_id
+        t = p.transform
+        out.pose.position.x, out.pose.position.y, out.pose.position.z = (
+            t.translation.x, t.translation.y, t.translation.z)
+        out.pose.orientation = t.rotation
+        res.pose_stamped = [out]
+        res.fk_link_names = list(req.fk_link_names)
+        res.error_code.val = 1
+        return res
+
     def _cart(self, req, res):
         from trajectory_msgs.msg import JointTrajectoryPoint
         pts = []
@@ -286,28 +328,32 @@ class FakeMoveIt(Node):
             if not self._reachable(G):
                 break
             pts.append(JointTrajectoryPoint(positions=[float(v) for v in encode(G)]))
+        if self.cart_jump and len(pts) > 1:
+            pts[len(pts) // 2].positions[5] += 1.0
         res.fraction = len(pts) / max(1, len(req.waypoints))
+        if self.cart_fraction is not None:
+            res.fraction = self.cart_fraction
         res.solution.joint_trajectory.joint_names = list(JOINTS)
         res.solution.joint_trajectory.points = pts
         res.error_code.val = 1
         return res
 
-    def _run_motion(self, goal_handle, target, result):
+    def _run_motion(self, goal_handle, target, result, kind):
         """Move the robot to ``target`` over motion_time; honour cancel/hang."""
-        from action_msgs.msg import GoalStatus  # noqa: F401
+        hang = self.hang and kind in self.fault_kinds
         t0 = time.monotonic()
-        while time.monotonic() - t0 < self.motion_time or self.hang:
+        while time.monotonic() - t0 < self.motion_time or hang:
             if self._release.is_set():
                 break
-            if goal_handle.is_cancel_requested and not self.hang:
+            if goal_handle.is_cancel_requested and not hang:
                 result.error_code.val = -7                 # PREEMPTED
                 goal_handle.canceled(result)
                 return result
             time.sleep(0.01)
-        if self._release.is_set() and self.hang:
+        if self._release.is_set() and hang:
             goal_handle.abort(result)
             return result
-        if target is not None and not self.planning_only:
+        if target is not None and not (self.planning_only and kind in self.fault_kinds):
             self.robot.move_to(target)
         result.error_code.val = 1
         goal_handle.succeed(result)
@@ -325,15 +371,28 @@ class FakeMoveIt(Node):
             res.error_code.val = 99999                     # FAILURE, nothing planned
             goal_handle.abort(res)
             return res
+        start = list(encode(self.robot.G))
+        pts = [start, list(joints)]
+        if goal_handle.request.planning_options.plan_only:
+            self.plans += 1
+            if self.detour is not None and self.detour(self.plans):
+                up = list(joints)
+                up[2] += 1.5                               # 1.5 m above the goal
+                pts = [start, up, list(joints)]
+        res.planned_trajectory.joint_trajectory.joint_names = list(JOINTS)
         res.planned_trajectory.joint_trajectory.points = [
-            JointTrajectoryPoint(positions=list(encode(self.robot.G))),
-            JointTrajectoryPoint(positions=list(joints))]
-        return self._run_motion(goal_handle, decode(joints), res)
+            JointTrajectoryPoint(positions=[float(v) for v in p]) for p in pts]
+        if goal_handle.request.planning_options.plan_only:
+            res.error_code.val = 1
+            goal_handle.succeed(res)
+            return res
+        return self._run_motion(goal_handle, decode(joints), res, 'move')
 
     def _traj_exec(self, goal_handle):
         from moveit_msgs.action import ExecuteTrajectory
         traj = goal_handle.request.trajectory.joint_trajectory
         self.goals.append(('execute', traj))
+        self.executed.append([list(p.positions) for p in traj.points])
         res = ExecuteTrajectory.Result()
         target = decode(traj.points[-1].positions) if traj.points else None
-        return self._run_motion(goal_handle, target, res)
+        return self._run_motion(goal_handle, target, res, 'execute')

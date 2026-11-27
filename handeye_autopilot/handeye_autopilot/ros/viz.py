@@ -66,10 +66,15 @@ def board_markers(rec: CaptureRecord, board: BoardSpec, frame_id: str, stamp: ob
 
 
 def box_marker(centre: NDArray[np.float64], size: tuple[float, float, float], frame_id: str,
-               stamp: object) -> MarkerArray:
-    """The safety box (01-architecture §3.4), translucent. ``shortcut: not editable
-    in RViz, add an interactive marker if users ask``."""
+               stamp: object, enabled: bool = True) -> MarkerArray:
+    """The safety box (01-architecture §3.4), translucent; ``enabled`` false
+    deletes a box shown by an earlier run. ``shortcut: not editable in RViz, add
+    an interactive marker if users ask``."""
     m = Marker()
+    if not enabled:
+        m.header.frame_id = frame_id
+        m.ns, m.id, m.action = 'safety_box', 0, Marker.DELETE
+        return MarkerArray(markers=[m])
     m.header.frame_id = frame_id
     m.header.stamp = stamp  # type: ignore[assignment]
     m.ns, m.id, m.type, m.action = 'safety_box', 0, Marker.CUBE, Marker.ADD

@@ -137,11 +137,45 @@ def test_ik_contract_whole_seconds(panda):
     print(f'compute_ik unreachable with timeout 1 s took {took:.2f} s')
 
 
+def _scene_call(node, scene):
+    from moveit_msgs.srv import ApplyPlanningScene
+    apply = node.create_client(ApplyPlanningScene, 'apply_planning_scene')
+    assert apply.wait_for_service(timeout_sec=10.0)
+    fut = apply.call_async(ApplyPlanningScene.Request(scene=scene))
+    t0 = time.monotonic()
+    while not fut.done() and time.monotonic() - t0 < 10:
+        time.sleep(0.02)
+    assert fut.done() and fut.result().success
+    node.destroy_client(apply)
+    time.sleep(0.5)
+
+
+def _world(*objects):
+    from moveit_msgs.msg import PlanningScene
+    scene = PlanningScene(is_diff=True)
+    scene.world.collision_objects = list(objects)
+    return scene
+
+
 def test_compute_ik_rejects_a_pose_in_collision(panda):
+    """The hand inside the table: rejected; the same pose with the table removed
+    solves (so the rejection is the collision, not reachability)."""
+    from handeye_autopilot.ros.synthetic_camera import pose
+    from handeye_autopilot_demos.scene import box, load
+    from moveit_msgs.msg import CollisionObject
     node, client = panda
-    assert _ik(client, _hand_down(0.45, 0.25, 0.45)).joints is not None
-    res = _ik(client, _hand_down(0.45, 0.25, 0.02))      # hand inside the table
-    assert res.joints is None and res.reason == 'NO_IK_SOLUTION'
+    G = _hand_down(0.45, 0.25, 0.02)
+    in_table = _ik(client, G)
+    table = load('panda')['robot']['table']
+    _scene_call(node, _world(CollisionObject(id='table', operation=CollisionObject.REMOVE)))
+    try:
+        free = _ik(client, G)
+    finally:                              # the next test needs the table back
+        _scene_call(node, _world(box('table', 'panda_link0',
+                                     pose(list(table['xyz']) + [0.0, 0.0, 0.0]),
+                                     table['size'])))
+    assert free.joints is not None, free.reason
+    assert in_table.joints is None and in_table.reason == 'NO_IK_SOLUTION'
 
 
 def test_only_the_attached_board_collides(panda):
@@ -149,32 +183,19 @@ def test_only_the_attached_board_collides(panda):
     clear the table but the board does not. Rejected with the board attached,
     accepted without it: the attached body is in the IK collision check."""
     from moveit_msgs.msg import AttachedCollisionObject, CollisionObject, PlanningScene
-    from moveit_msgs.srv import ApplyPlanningScene
     node, client = panda
     G = _hand_down(0.45, 0.0, 0.17)
     with_board = _ik(client, G)
-    apply = node.create_client(ApplyPlanningScene, 'apply_planning_scene')
-    assert apply.wait_for_service(timeout_sec=10.0)
-
-    def scene_call(scene):
-        fut = apply.call_async(ApplyPlanningScene.Request(scene=scene))
-        t0 = time.monotonic()
-        while not fut.done() and time.monotonic() - t0 < 10:
-            time.sleep(0.02)
-        assert fut.done() and fut.result().success
     detach = PlanningScene(is_diff=True)
     detach.robot_state.is_diff = True
     gone = AttachedCollisionObject(link_name='panda_hand')
     gone.object.id = 'calibration_board'
     gone.object.operation = CollisionObject.REMOVE
     detach.robot_state.attached_collision_objects = [gone]
-    scene_call(detach)
+    _scene_call(node, detach)
     # detaching leaves the object in the world: remove it there too
-    world = PlanningScene(is_diff=True)
-    world.world.collision_objects = [CollisionObject(id='calibration_board',
-                                                     operation=CollisionObject.REMOVE)]
-    scene_call(world)
-    time.sleep(0.5)
+    _scene_call(node, _world(CollisionObject(id='calibration_board',
+                                             operation=CollisionObject.REMOVE)))
     without_board = _ik(client, G)
     assert with_board.joints is None and with_board.reason == 'NO_IK_SOLUTION'
     assert without_board.joints is not None, without_board.reason
@@ -187,12 +208,18 @@ def test_panda_demo_eye_to_hand_end_to_end(tmp_path):
     with open(log_path, 'w') as log:
         # its own domain: the module fixture's move_group may still be running
         proc = _launch(['demo.launch.py', 'robot:=panda', 'mode:=eye_to_hand'], log, '59')
+        timed_out = False
         try:
             proc.wait(timeout=float(os.environ.get('HANDEYE_DEMO_TIMEOUT', '1200')))
         except subprocess.TimeoutExpired:
-            pass
+            timed_out = True
         finally:
             _stop(proc)
     text = log_path.read_text()
-    lines = [ln for ln in text.splitlines() if 'demo_runner' in ln]
-    assert 'DEMO PASSED' in text, '\n'.join(lines[-30:]) or text[-3000:]
+    lines = '\n'.join([ln for ln in text.splitlines() if 'demo_runner' in ln][-30:])
+    assert not timed_out, 'the demo did not finish in time:\n' + lines
+    # the verdict AND a clean exit of the runner (exit code 0); the launch itself
+    # always exits 0 when the runner ends it
+    assert 'DEMO PASSED' in text, lines or text[-3000:]
+    assert '[run_demo-' in text and 'process has finished cleanly' in text.split(
+        'DEMO PASSED')[-1], lines

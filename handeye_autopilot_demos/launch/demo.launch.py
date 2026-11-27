@@ -7,9 +7,11 @@ camera, the calibration node, and the demo scene.
 Arguments:
 - ``robot``: ``panda`` or ``ur`` (a UR5e);
 - ``mode``: ``eye_to_hand`` or ``eye_in_hand``;
-- ``auto`` (default true): ``run_demo`` moves to the seed, calibrates unattended
-  and the whole launch exits with the demo's verdict; false leaves everything
-  running for you to send goals (README "try it");
+- ``auto`` (default true): ``run_demo`` moves to the seed, calibrates unattended,
+  prints DEMO PASSED or DEMO FAILED, and the whole launch then stops (its own
+  exit code is 0 either way: read the verdict, or run ``run_demo`` yourself,
+  which exits 0 or 1); false leaves everything running for you to send goals
+  (README "try it");
 - ``rviz`` (default false): RViz with the robot, the planning scene, the
   safety box and the annotated camera image;
 - ``record`` (default false): ``ros2 bag record`` of the run (calibrate.launch.py).

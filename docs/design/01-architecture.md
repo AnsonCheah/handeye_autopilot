@@ -51,7 +51,7 @@ Solving uses OpenCV + SciPy. Interop (v1.1): export observations in
 | Quasi-random sampling | SciPy `qmc.Halton` | Nothing |
 | Image + camera info | Image subscription; latest `CameraInfo` cached (§7) | Cache + consistency check |
 | Robot pose at a stamp | `tf2_ros` Buffer, `lookup_transform` with a timeout (waits on the run's worker thread while TF arrives on the executor's others) | Nothing |
-| Motion (plan + execute, cancel) | `move_group`'s `MoveGroup` and `ExecuteTrajectory` actions and `compute_cartesian_path` service (`moveit_msgs`), through rclpy clients. pymoveit2 was dropped in M4: Lyrical's release lacks `get_goal_future` (probe finding 9), and what the node needs from it is a few request fields | `ros/moveit_client.py`: request construction, goal bookkeeping (status, planned trajectory, cancel, goals still active), result checks |
+| Motion (plan + execute, cancel) | `move_group`'s `MoveGroup` and `ExecuteTrajectory` actions and `compute_cartesian_path` and `compute_fk` services (`moveit_msgs`), through rclpy clients. pymoveit2 was dropped in M4: Lyrical's release lacks `get_goal_future` (probe finding 9), and what the node needs from it is a few request fields | `ros/moveit_client.py`: request construction, goal bookkeeping (status, planned trajectory, cancel, goals still active), result checks |
 | Reachability + collision | `moveit_msgs/srv/GetPositionIK` on `compute_ik` | A direct client in `ros/moveit_client.py` (pymoveit2's IK call sets `is_diff=false`, see §3.1) |
 | Collision scene (meshes, point clouds) | MoveIt planning scene, octomap | Docs and demo config only |
 | Exposure | Driver's own ROI auto-exposure, set via rclpy `AsyncParameterClient` | ROI update + driver parameter-name map (checkpoint 2 §L) |
@@ -184,11 +184,23 @@ MoveIt brand implicitly.
   "executing" is not evidence of motion.
 - The safety box, if enabled, is also sent as a `path_constraints` position
   constraint so intermediate motion stays inside it (option; can make planning
-  slower, default on when the box is on). That constrains the tool link only;
-  for planned joint-goal moves the carried object's path is guarded by MoveIt
-  collision checking (`shortcut:` the box is not a collision volume for the
-  carried object on planned moves; add the box faces as planning-scene walls in
-  M4 if `box_check_moving_object` is on).
+  slower, default on when the box is on). That constrains the tool link only.
+  When `box_check_moving_object` is on, a planned move is sent as a plan-only
+  `MoveGroup` goal; the planned trajectory is checked (joints interpolated at
+  ≤ 0.01 rad, FK through `compute_fk`, the carried object's `L_max` ball and
+  the tool origin inside the box at every sample) and only then executed with
+  `ExecuteTrajectory`. A plan that leaves the box is a `not_started` skip
+  (nothing was sent). As built in M4, replacing the planning-scene walls
+  planned earlier: walls would also have to be excluded from collisions with
+  the robot itself (an allowed-collision matrix over objects we don't own).
+  `shortcut:` sampled, not swept.
+- Cartesian paths are checked by the node too: fraction exactly 1.0 (NaN
+  refused), finite joints, and no joint step between path points above
+  `moveit.revolute_jump_threshold` (Jazzy's MoveIt accepts the threshold field
+  but does not apply it, M4 review).
+- Joint measurements count only when received after the request **and**
+  stamped after it (a replayed or queued message is not evidence), and only if
+  finite.
 
 ### 3.3 Validation chain per candidate
 
@@ -382,8 +394,8 @@ acceptance):
   `cancel_timeout`, `service_timeout`, end-state tolerances
   (`joint_tolerance`, `pose_tolerance_translation`, `pose_tolerance_rotation`),
   `cartesian_max_step`, `revolute_jump_threshold`, `box_path_constraint`.
-  The MoveIt names (`compute_ik`, `move_action`, `compute_cartesian_path`,
-  `execute_trajectory`) are relative: remap them;
+  The MoveIt names (`compute_ik`, `compute_fk`, `move_action`,
+  `compute_cartesian_path`, `execute_trajectory`) are relative: remap them;
 - `testing.allow_fault_injection` (default false): adds `~/inject_fault`,
   which sets the motion fault latch, so the latch's admission rule is testable
   before M4 produces real motion faults. Never enabled by the shipped launch
@@ -401,7 +413,7 @@ captures and `solver.min_captures` in every k-fold training split, i.e.
 gates (`core.quality.calibrate`) → result YAML, observations YAML, action
 result. Phase strings as in `Calibrate.Feedback`.
 
-**MoveIt mode run (M4):** the same preflight, then MoveIt checks: all four
+**MoveIt mode run (M4):** the same preflight, then MoveIt checks: all five
 MoveIt interfaces found within `moveit.service_timeout` (`compute_ik` missing
 = `IK_SERVICE_MISSING`, any other = `MOTION_FAILED`), the fixed `ik_link →
 tool_frame` transform (§3.1, else `TF_UNAVAILABLE`), `/joint_states` for the
@@ -463,12 +475,16 @@ snapshotted at admission; every capture's images must match the run's
   terminal status doesn't arrive by the deadline, report `ABORTED` with
   `MOTION_FAULT` and a message telling the operator to check the robot.
 - **Motion fault latch.** After `MOTION_FAULT` the node refuses every new goal
-  until the operator calls `~/clear_fault` (`std_srvs/Trigger`). Clearing
+  until the operator calls `~/clear_fault` (`std_srvs/Trigger`). Also a
+  `MOTION_FAULT`: a goal request the server did not answer within 10 s (it may
+  still accept it later; if it does, the node cancels it at once and tracks
+  it), and a goal that ended without a terminal status. Clearing
   succeeds only when no motion goal from this node (`MoveGroup` or
-  `ExecuteTrajectory`) is still active **and**
+  `ExecuteTrajectory`, including a late-accepted one) is still active **and**
   fresh `joint_states` (newer than the call) show all joint velocities below a
-  threshold over a window *(tune)*; otherwise it returns `success=false` with
-  the reason. The latch survives goal completion and is logged loudly.
+  threshold over a window *(tune)*, with fresh samples for **every joint ever
+  reported** (a stopped arm stream must not clear on a gripper's samples);
+  otherwise it returns `success=false` with the reason. The latch survives goal completion and is logged loudly.
 - Cancel during capture or IK: stop issuing new requests, drop outstanding
   results, report `CANCELED`.
 - Launch tests cover cancel during motion, during capture, and during IK, and
