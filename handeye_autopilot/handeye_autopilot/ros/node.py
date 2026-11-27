@@ -128,7 +128,7 @@ class CalibrationNode(Node):
         # TF (§8-9)
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self, spin_thread=False)
-        self.static_links = tf_tools.StaticLinks(track_values=True)
+        self.static_links = tf_tools.StaticLinks()
         static_qos = QoSProfile(depth=100, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                                 reliability=ReliabilityPolicy.RELIABLE,
                                 history=HistoryPolicy.KEEP_LAST)
@@ -150,6 +150,7 @@ class CalibrationNode(Node):
                           on_clock_change=True), post_callback=self._on_jump)
         self.last_run_records: list[CaptureRecord] = []
         self.last_result: Calibrate.Result | None = None
+        self._solve_end: Any = None          # node time the last final solve finished
         self._joints: list[tuple[float, JointState]] = []
         self.create_subscription(JointState, '/joint_states', self._on_joints, 10,
                                  callback_group=self._sensors)
@@ -447,7 +448,7 @@ class CalibrationNode(Node):
         r.quality = quality_msg(cal)
         if cal is not None and cal.solution is not None and frames is not None:
             r.transform_valid, r.passed = True, cal.passed
-            stamp = self.get_clock().now().to_msg()
+            stamp = (self._solve_end or self.get_clock().now()).to_msg()   # §5: solve end
             parent = frames['base_frame'] if cal.mode == MODES[0] else frames['tool_frame']
             zpar = frames['tool_frame'] if cal.mode == MODES[0] else frames['base_frame']
             r.camera_transform = tf_tools.to_msg(cal.solution.X, parent,
@@ -476,6 +477,7 @@ class CalibrationNode(Node):
 
     def _run_goal(self, goal_handle: Any, goal: Calibrate.Goal, run: RunState
                   ) -> Calibrate.Result:
+        self._solve_end = None
         try:
             cfg = P.load_run_config(self, goal.profile, run.snapshot, run.profile_text)
         except ValueError as e:
@@ -494,6 +496,7 @@ class CalibrationNode(Node):
             frames = dict(cfg.frames, camera_frame=info.header.frame_id)
             t_solve = self.now()
             cal = calibrate(goal.mode, records, cfg.solver)
+            self._solve_end = self.get_clock().now()
             # a cancel or a clock reset during the solve still wins (no result written)
             self._check_cancel(goal_handle, run)
             self._check_jump(t_solve)
@@ -545,8 +548,16 @@ class CalibrationNode(Node):
             raise RunAbort(R.NO_CAMERA_INFO, 'image size differs from CameraInfo')
         self._check_clock(img.stamp, img.received, cfg)
         base, tool = cfg.frames['base_frame'], cfg.frames['tool_frame']
-        if self._lookup_cancellable(goal_handle, run, base, tool, img.stamp_ns,
-                                    t.tf_timeout) is None:
+        # TF at an image's stamp, retried with the NEWEST image each time (an early
+        # frame can predate this node's TF history), until the deadline
+        tf_deadline = time.monotonic() + max(t.tf_timeout, t.camera_info_timeout)
+        found = None
+        while found is None and time.monotonic() < tf_deadline:
+            img = self.images.latest() or img
+            self._check_clock(img.stamp, img.received, cfg)
+            found = self._lookup_cancellable(goal_handle, run, base, tool, img.stamp_ns,
+                                             min(0.2, t.tf_timeout))
+        if found is None:
             if tf_tools.latest(self.tf_buffer, base, tool) is None:
                 why = 'is the robot driver (robot_state_publisher) running?'
             else:

@@ -22,7 +22,8 @@ handeye_autopilot:
       target_captures: 20          # manual mode solves when this many are accepted
       frames_per_capture: 3
     solver:
-      min_captures: 8              # ~/finish is refused below this
+      min_captures: 8              # per k-fold training split: with 5 folds, ~/finish
+      #                              needs ceil(8 x 5 / 4) = 10 accepted captures
     timing:
       settle_window: 0.5
       settle_timeout: 10.0

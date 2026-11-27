@@ -380,7 +380,10 @@ TF `base → tool`) → phase `manual_capture`: the operator jogs the robot and
 calls `~/capture` for each pose (settle, N frames, TF per frame, `core`
 capture gates; the outcome arrives in feedback) → the run solves when
 `session.target_captures` captures are accepted or the operator calls
-`~/finish` (refused below `solver.min_captures` accepted) → solve, verify,
+`~/finish` (refused below the fold-aware minimum: at least `solver.folds`
+captures and `solver.min_captures` in every k-fold training split, i.e.
+⌈min_captures × folds / (folds − 1)⌉; the same bound validates
+`target_captures`) → solve, verify,
 gates (`core.quality.calibrate`) → result YAML, observations YAML, action
 result. Phase strings as in `Calibrate.Feedback`.
 

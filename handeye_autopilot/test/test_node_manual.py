@@ -877,15 +877,46 @@ def test_a_moving_joint_on_another_publisher_blocks_clearing(world_factory):
 
 # -- review fixes (M3 xhigh pass 6) -------------------------------------------------
 
-def test_conflicting_static_values_are_refused():
+def test_conflicting_static_values_are_refused_at_publish_time(tmp_path):
+    """Two live publishers disagree about a static subtree edge: publish_result
+    (a fresh subscriber, so it sees only live publishers) refuses."""
+    from handeye_autopilot.core.results import transform_dict
     from handeye_autopilot.ros import tf_tools
+    from handeye_autopilot.ros.publish_result import ResultPublisher
     from tf2_msgs.msg import TFMessage
-    static = tf_tools.StaticLinks(track_values=True)
-    static.add(TFMessage(transforms=[tf_tools.to_msg(np.eye(4), 'cam', 'opt')]))
-    static.add(TFMessage(transforms=[tf_tools.to_msg(tf.make(np.eye(3), [0.25, 0, 0]),
-                                                     'cam', 'opt')]))   # a URDF disagrees
-    sub = tf_tools.camera_subtree({'opt': 'cam'}, static, 'opt', 'base_link', '')
-    assert sub.error and 'conflicting' in sub.error
+    import yaml
+    T = tf.make(np.eye(3), [0.0, 0.0, 0.1])
+    doc = {'publish': {'ok': True, 'transform': transform_dict(np.eye(4), 'base_link', 'cam'),
+                       'subtree': transform_dict(T, 'cam', 'opt')}}
+    f = tmp_path / 'result.yaml'
+    f.write_text(yaml.safe_dump(doc))
+    (tmp_path / '.publishable').touch()
+    node = ResultPublisher(str(f), listen=0.0)
+    try:
+        node.buffer.set_transform_static(tf_tools.to_msg(T, 'cam', 'opt'), 'test')
+        for M in (T, tf.make(np.eye(3), [0.25, 0, 0.1])):      # a URDF disagrees
+            node.static_values.add(TFMessage(transforms=[tf_tools.to_msg(M, 'cam', 'opt')]))
+        assert 'conflicting' in node.check_subtree()
+    finally:
+        node.destroy_node()
+
+
+def test_preflight_uses_a_newer_frame_when_an_early_one_predates_tf(world_factory):
+    """Camera streaming before the robot: the first frames predate any TF; the
+    preflight must move on to newer frames instead of aborting."""
+    w = world_factory(cam_over={'stamp_from_clock': True})
+    w.robot.freeze = True
+    w.node.tf_buffer.clear()
+    time.sleep(0.5)                                # only TF-less images now
+    h = w.driver.send()
+
+    def start_robot():
+        time.sleep(0.5)
+        w.robot.freeze = False
+    threading.Thread(target=start_robot, daemon=True).start()
+    w.driver.wait_phase(FB.PHASE_MANUAL_CAPTURE, timeout=15.0)
+    w.driver.wait(h.cancel_goal_async())
+    w.result(h)
 
 
 def test_target_must_leave_each_fold_enough_captures(world_factory, tmp_path):

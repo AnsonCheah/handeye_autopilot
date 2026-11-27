@@ -227,9 +227,9 @@ def camera_subtree(tree: dict[str, str], static: StaticLinks, optical: str, pare
         if moving is not None:
             return Subtree(root, chain, f'{moving} -> {child} is published on /tf (moving or '
                            'a competing driver): the camera subtree must be static')
-        if static.conflicting(par, child):
-            return Subtree(root, chain, f'{par} -> {child} has conflicting values on '
-                           '/tf_static (two publishers disagree): remove one')
+        # (conflicting static values are checked by publish_result, whose fresh
+        # subscription sees only the publishers alive at publish time; a
+        # long-running node also remembers a replaced driver's old value)
         if not static.has(par, child):
             return Subtree(root, chain, f'{par} -> {child} is not on /tf_static: the camera '
                            'subtree must be static (a moving link cannot be calibrated '
