@@ -626,7 +626,9 @@ def test_cancel_while_writing_the_result_ends_canceled(world_factory, monkeypatc
 
 
 def test_clock_jump_between_goals_is_survived(world_factory):
-    w = world_factory(sim_time=True)
+    w = world_factory(sim_time=True, cam_over={'stamp_from_clock': True})
+    w.robot.delay = 0.15                          # TF in flight across the reset
+    time.sleep(0.5)
     w.clock.jump(-100.0)
     time.sleep(1.0)
     assert w.node._jumps >= 1
@@ -1042,3 +1044,27 @@ def test_a_client_waiting_early_gets_the_real_result(world_factory):
     run_captures(w, len(w.poses), accepted_target=10)
     res = d.wait(fut, 120.0).result
     assert res.error_code == R.NONE and res.message and res.quality.captures_accepted >= 10
+
+
+# -- review fixes (M3 xhigh pass 10) ------------------------------------------------
+
+def test_mixed_outcomes_do_not_wedge_the_server(world_factory):
+    w = world_factory()
+    d = w.driver
+    assert _finish_run(w).error_code == R.NONE          # success (info log)
+    h = d.send()
+    d.wait_phase(FB.PHASE_MANUAL_CAPTURE)
+    d.wait(h.cancel_goal_async())
+    assert w.result(h).result.error_code == R.CANCELED  # cancel (warning log)
+    h = d.send()
+    assert h.accepted                                   # not stuck "busy"
+    d.wait(h.cancel_goal_async())
+    w.result(h)
+
+
+def test_a_stopped_camera_fails_preflight(world_factory):
+    w = world_factory(node_over={'timing.camera_info_timeout': 2.0})
+    w.camera.timer.cancel()                             # the stream stops
+    time.sleep(0.3)
+    res = w.result(w.driver.send()).result
+    assert res.error_code == R.NO_CAMERA_INFO and 'fresh images' in res.message

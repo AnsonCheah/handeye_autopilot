@@ -369,15 +369,16 @@ class CalibrationNode(Node):
             self._terminate(goal_handle, result)     # an accepted cancel is honoured here too
             return result
         finally:
+            with self._lock:
+                self._run = None             # first: nothing below may keep the slot busy
             self.last_run_records = list(run.records)
             self.last_result = locals().get('result')       # for diagnostics and tests
-            if self.last_result is not None:
-                r = self.last_result
-                log = self.get_logger().info if r.error_code == R.NONE else \
-                    self.get_logger().warning
-                log(f'run ended: code {r.error_code}: {r.message}')
-            with self._lock:
-                self._run = None
+            r = self.last_result
+            # (rclpy fixes one severity per log call site: two separate calls)
+            if r is not None and r.error_code == R.NONE:
+                self.get_logger().info(f'run ended: {r.message}')
+            elif r is not None:
+                self.get_logger().warning(f'run ended: code {r.error_code}: {r.message}')
 
     def _terminate(self, goal_handle: Any, result: Calibrate.Result) -> None:
         """The one place a goal reaches its terminal state. Only a success leaves
@@ -534,16 +535,19 @@ class CalibrationNode(Node):
                    ) -> tuple[CameraModel, CameraInfo]:
         self._feedback(goal_handle, run, FB.PHASE_PREFLIGHT)
         t = cfg.timing
+        start = self.now()
         deadline = time.monotonic() + t.camera_info_timeout
         while True:
             self._check_cancel(goal_handle, run)
             with self._info_lock:
                 info = self._info
             img = self.images.latest()
-            if info is not None and img is not None:
+            # an image that ARRIVED after this goal started: a stopped camera's
+            # cached last frame must not pass the preflight
+            if info is not None and img is not None and img.received >= start:
                 break
             if time.monotonic() > deadline:
-                what = 'CameraInfo' if info is None else 'images'
+                what = 'CameraInfo' if info is None else 'fresh images'
                 raise RunAbort(R.NO_CAMERA_INFO, f'no {what} received within '
                                f'{t.camera_info_timeout:.0f} s; check the camera topics '
                                '(remap "image" and "camera_info")')
@@ -566,6 +570,7 @@ class CalibrationNode(Node):
         tf_deadline = time.monotonic() + max(t.tf_timeout, t.camera_info_timeout)
         found = None
         while found is None and time.monotonic() < tf_deadline:
+            self._drop_future_tf(base, tool, cfg)
             img = self.images.latest() or img
             self._check_clock(img.stamp, img.received, cfg)
             found = self._lookup_cancellable(goal_handle, run, base, tool, img.stamp_ns,
@@ -659,6 +664,7 @@ class CalibrationNode(Node):
                       camera: CameraModel, info: CameraInfo, cid: int) -> CaptureRecord:
         t = cfg.timing
         base, tool = cfg.frames['base_frame'], cfg.frames['tool_frame']
+        self._drop_future_tf(base, tool, cfg)
         t_start = self.now()
         s = tf_tools.settle(self.tf_buffer, base, tool, self.now, t.settle_window,
                             t.settle_translation, t.settle_rotation, t.settle_timeout,
@@ -706,6 +712,15 @@ class CalibrationNode(Node):
         shown = min(images, key=lambda im: abs(im.stamp - (rec.stamp or images[-1].stamp)))
         self._publish_viz(shown, rec, cfg, camera)
         return rec
+
+    def _drop_future_tf(self, base: str, tool: str, cfg: P.RunConfig) -> None:
+        """After a sim reset, TF already in flight can refill the cleared buffer with
+        old-epoch stamps far 'in the future'; tf2 then rejects fresh TF as old
+        data. Seeing that, clear again (static transforms are kept)."""
+        got = tf_tools.latest(self.tf_buffer, base, tool)
+        if got is not None and got[1] > self.now() + max(1.0, cfg.timing.clock_tolerance):
+            self.get_logger().warning('TF from before a clock reset found: clearing it')
+            self.tf_buffer.clear()
 
     def _lookup_cancellable(self, goal_handle: Any, run: RunState, base: str, tool: str,
                             stamp_ns: int, timeout: float) -> Any:

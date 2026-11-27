@@ -107,6 +107,13 @@ class ResultPublisher(Node):
         t0 = time.monotonic()
         while time.monotonic() - t0 < self.listen:          # let /tf_static arrive
             rclpy.spin_once(self, timeout_sec=0.1)
+        # discovery of a latched /tf_static publisher can take longer under load:
+        # keep listening (up to 5 s more) until the subtree to check has arrived
+        st = self.subtree
+        t1 = time.monotonic()
+        while st is not None and time.monotonic() - t1 < 5.0 and \
+                tf_tools.latest(self.buffer, st['parent'], st['child']) is None:
+            rclpy.spin_once(self, timeout_sec=0.1)
         # drain everything already queued, so the /tf tracker has seen each message
         # the buffer has (shortcut: a link that turns dynamic only AFTER this check
         # is not caught; static links cannot be unpublished anyway)
