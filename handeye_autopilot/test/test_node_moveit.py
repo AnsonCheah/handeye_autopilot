@@ -541,7 +541,7 @@ def test_moving_tcp_offset_is_refused(moveit_world):
         k = 0
         while not stop.is_set():
             k += 1
-            T = tf.make(np.eye(3), np.array([0.0, 0.0, 0.1 + 0.01 * (k % 7)]))
+            T = tf.make(np.eye(3), np.array([0.0, 0.0, 0.1 + 0.001 * k]))   # ever-moving
             pub.sendTransform(tf_tools.to_msg(T, 'tool0', 'flange',
                                               w.robot.get_clock().now().to_msg()))
             time.sleep(0.05)

@@ -100,8 +100,9 @@ MoveIt brand implicitly.
   the robot model, rigidly attached to the group's tip.
 - If the user's `tool_frame` exists only in TF (a TCP not in the URDF), the
   node looks up the fixed `ik_link → tool_frame` transform once at goal start
-  (must be static; checked twice, 1 s apart) and converts every candidate pose
-  to an `ik_link` pose. Refuse to start if the transform is missing or moving.
+  (must be static; checked over 1 s) and converts every candidate pose
+  to an `ik_link` pose. Refuse to start if the transform is missing or moving
+  (as built: 5 samples over 1 s, all identical).
 - Requests use the **monitored planning-scene state** (`robot_state` empty,
   `is_diff = true`), so attached collision objects are kept. The seed is the
   scene's current state. (A joint-only state with `is_diff = false` can drop

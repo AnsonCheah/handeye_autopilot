@@ -916,11 +916,12 @@ class CalibrationNode(Node):
     def _fixed_offset(self, goal_handle: Any, run: RunState, ik_link: str, tool: str,
                       cfg: P.RunConfig) -> Any:
         """§3.1: the ik_link -> tool_frame transform, which must be fixed: looked up
-        twice, 1 s apart, and identical."""
+        over 1 s (5 samples, so a periodic motion cannot alias into two equal
+        lookups), all identical."""
         if ik_link == tool:
             return np.eye(4)
         seen = []
-        for k in range(2):
+        for k in range(5):
             got = None
             deadline = time.monotonic() + max(2.0, cfg.timing.tf_timeout)
             while got is None and time.monotonic() < deadline:
@@ -932,16 +933,16 @@ class CalibrationNode(Node):
                 raise RunAbort(R.TF_UNAVAILABLE, f'no TF {ik_link} -> {tool}: the tool frame '
                                'must be rigidly attached to moveit.ik_link')
             seen.append(got[0])
-            if k == 0:
+            if k < 4:
                 t0 = time.monotonic()
-                while time.monotonic() - t0 < 1.0:
+                while time.monotonic() - t0 < 0.25:
                     self._check_cancel(goal_handle, run)
                     time.sleep(0.05)
-        if tf.translation_distance(seen[0], seen[1]) > 1e-6 or \
-                tf.rotation_angle(seen[0], seen[1]) > 1e-6:
+        if any(tf.translation_distance(seen[0], T) > 1e-6 or
+               tf.rotation_angle(seen[0], T) > 1e-6 for T in seen[1:]):
             raise RunAbort(R.TF_UNAVAILABLE, f'TF {ik_link} -> {tool} is moving; the tool '
                            'frame must be fixed to moveit.ik_link')
-        return seen[1]
+        return seen[-1]
 
     def _joints_now(self, names: Any, after: float, timeout: float, run: RunState
                     ) -> Any:
