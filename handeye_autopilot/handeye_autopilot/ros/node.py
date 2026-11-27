@@ -1,4 +1,5 @@
-"""The calibration node (01-architecture §5a, §6-9): manual mode (M3).
+"""The calibration node (01-architecture §5a, §6-9): manual mode (M3) and
+MoveIt mode (M4).
 
     ros2 run handeye_autopilot calibrate_node --ros-args --params-file <params.yaml>
 
@@ -28,6 +29,7 @@ import threading
 import time
 from typing import Any
 
+from action_msgs.msg import GoalStatus
 import numpy as np
 import rclpy
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
@@ -44,6 +46,7 @@ from rclpy.qos import (
     qos_profile_sensor_data,
 )
 from rosgraph_msgs.msg import Clock
+from scipy.spatial.transform import Rotation
 from sensor_msgs.msg import CameraInfo, Image, JointState
 from std_msgs.msg import Header
 from std_srvs.srv import Trigger
@@ -56,21 +59,31 @@ from handeye_autopilot_interfaces.action import Calibrate
 from handeye_autopilot_interfaces.msg import GateResult, QualityReport
 
 from ..core import codes, observations
+from ..core import session as S
 from ..core import transforms as tf
 from ..core.camera import CameraModel
 from ..core.capture import CaptureRecord, Frame, capture
+from ..core.planning import IKResult
 from ..core.quality import Calibration, calibrate
 from ..core.results import result_dict, transform_dict
 from ..core.solver import TOO_FEW_CAPTURES
 from . import params as P
 from . import tf_tools, viz
 from .camera_input import CameraInfoError, ImageBuffer, camera_model, same_info
+from .moveit_client import SUCCESS, GoalOutcome, MoveItClient, error_name
 from .publish_result import PUBLISHABLE
 
 R = Calibrate.Result
 FB = Calibrate.Feedback
 MODES = (Calibrate.Goal.MODE_EYE_TO_HAND, Calibrate.Goal.MODE_EYE_IN_HAND)
 EXECUTIONS = (Calibrate.Goal.EXECUTION_MOVEIT, Calibrate.Goal.EXECUTION_MANUAL)
+PHASES = {FB.PHASE_SEED_CHECK, FB.PHASE_BOOTSTRAP, FB.PHASE_CENTRING, FB.PHASE_PLANNING,
+          FB.PHASE_MOVING, FB.PHASE_CAPTURING, FB.PHASE_SOLVING, FB.PHASE_VERIFYING}
+# session failure reasons (02-features §B) -> result codes (01-architecture §5)
+SESSION_CODES = {S.MOTION_FAILED_REASON: R.MOTION_FAILED, S.RECOVERY_FAILED: R.MOTION_FAILED,
+                 S.SEED_REJECTED: R.NOT_ENOUGH_SAMPLES, S.BOARD_LOST: R.NOT_ENOUGH_SAMPLES,
+                 S.BOOTSTRAP_FAILED: R.NOT_ENOUGH_SAMPLES,
+                 S.NOT_ENOUGH_SAMPLES: R.NOT_ENOUGH_SAMPLES}
 
 
 class RunAbort(Exception):
@@ -102,6 +115,7 @@ class RunState:
     finalizing: bool = False            # past the point where a cancel can win
     max_now: float = 0.0                # latest node time seen (sampled jump check)
     records: list[CaptureRecord] = field(default_factory=list)
+    motion_note: str = ''               # why the last motion was not 'ok' (for the message)
 
 
 class CalibrationNode(Node):
@@ -163,6 +177,9 @@ class CalibrationNode(Node):
         self._joints: list[tuple[float, JointState]] = []
         self.create_subscription(JointState, '/joint_states', self._on_joints, 10,
                                  callback_group=self._sensors)
+        # MoveIt services and actions (§3): their replies arrive on this group
+        # while the run thread waits for them
+        self.moveit = MoveItClient(self, ReentrantCallbackGroup())
 
         # outputs
         self.pub_image = self.create_publisher(Image, '~/annotated_image', 2)
@@ -313,6 +330,11 @@ class CalibrationNode(Node):
             if self._run is not None:
                 res.success, res.message = False, 'a run is active'
                 return res
+        if self.moveit.active():
+            # §6: a motion goal of ours that never reached a terminal state
+            res.success, res.message = False, ('a motion goal from this node is still active '
+                                               'in MoveIt; stop it (or restart move_group)')
+            return res
         t0, call_now = time.monotonic(), self.now()
         window, vmax, deadline, min_msgs = 0.5, 0.01, t0 + 3.0, 5
         waiting = ''
@@ -439,7 +461,8 @@ class CalibrationNode(Node):
                                      'cancelled' if cancel else 'clock jumped back' if jumped
                                      else 'CameraInfo changed')
         new = None
-        if cancel and result.error_code != R.CANCELED:
+        if cancel and result.error_code not in (R.CANCELED, R.MOTION_FAULT):
+            # (a cancel whose stop was not confirmed stays MOTION_FAULT, §6)
             new = self._result(R.CANCELED, 'cancelled' + kept, result_file=result.result_file)
         elif result.error_code == R.NONE and jumped:
             new = self._result(R.TF_UNAVAILABLE, 'the node clock jumped back during the '
@@ -514,39 +537,72 @@ class CalibrationNode(Node):
             cfg = P.load_run_config(self, goal.profile, run.snapshot, run.profile_text)
         except ValueError as e:
             return self._result(R.INVALID_GOAL, str(e))
+        if cfg.session.box_enabled:
+            try:
+                centre = tf.make(Rotation.from_euler('xyz', cfg.session.box_rpy),
+                                 np.asarray(cfg.session.box_xyz, float))
+                self.pub_markers.publish(viz.box_marker(
+                    centre, cfg.session.box_size, cfg.frames['base_frame'],
+                    self.get_clock().now().to_msg()))
+            except Exception as e:  # noqa: BLE001 - visualisation must never end a run
+                self.get_logger().warning(f'safety box marker failed: {e!r}')
         with self._lock:
             # ~/finish needs enough captures for every k-fold training split
             run.min_captures = P.least_captures(cfg.solver.min_captures, cfg.solver.folds)
             run.target_captures = cfg.session.target_captures
+        extra = ''
         try:
+            if goal.execution == Calibrate.Goal.EXECUTION_MOVEIT and cfg.moveit.missing():
+                raise RunAbort(R.INVALID_GOAL, f'MoveIt execution needs {cfg.moveit.missing()}')
             camera, info = self._preflight(goal_handle, run, cfg)
-            if goal.execution == Calibrate.Goal.EXECUTION_MOVEIT:
-                raise RunAbort(R.INTERNAL, 'MoveIt execution is not available yet (M4); '
-                               'use execution "manual"')
-            records = self._manual(goal_handle, run, cfg, camera, info)
-            self._feedback(goal_handle, run, FB.PHASE_SOLVING)
             frames = dict(cfg.frames, camera_frame=info.header.frame_id)
             t_solve = self.now()
-            cal = calibrate(goal.mode, records, cfg.solver, on_solved=lambda: self._feedback(
-                goal_handle, run, FB.PHASE_VERIFYING))
-            self._solve_end = self.get_clock().now()
-            # a cancel or a clock reset during the solve still wins (no result written)
-            self._check_cancel(goal_handle, run)
-            self._check_jump(t_solve)
+            if goal.execution == Calibrate.Goal.EXECUTION_MOVEIT:
+                sres = self._moveit(goal_handle, run, cfg, camera, info, goal.mode)
+                records = sres.records
+                self._solve_end = self.get_clock().now()
+                self._check_cancel(goal_handle, run)
+                self._check_jump(t_solve)
+                extra = sres.message
+                if sres.calibration is None:
+                    code = SESSION_CODES.get(sres.failure or '', R.INTERNAL)
+                    note = f' ({run.motion_note})' if code == R.MOTION_FAILED and \
+                        run.motion_note else ''
+                    return self._result(code, f'{sres.failure}: {sres.message}{note}',
+                                        counts=(run.accepted, run.rejected))
+                cal = sres.calibration
+            else:
+                records = self._manual(goal_handle, run, cfg, camera, info)
+                self._feedback(goal_handle, run, FB.PHASE_SOLVING)
+                t_solve = self.now()
+                cal = calibrate(goal.mode, records, cfg.solver,
+                                on_solved=lambda: self._feedback(goal_handle, run,
+                                                                 FB.PHASE_VERIFYING))
+                self._solve_end = self.get_clock().now()
+                # a cancel or a clock reset during the solve still wins (no result written)
+                self._check_cancel(goal_handle, run)
+                self._check_jump(t_solve)
         except RunAbort as e:
+            if e.code == R.MOTION_FAULT:
+                with self._lock:
+                    self._fault_latched = True
+                self.get_logger().error(f'MOTION FAULT latched: {e}. New goals are refused '
+                                        'until ~/clear_fault succeeds')
             return self._result(e.code, str(e), counts=(run.accepted, run.rejected))
         path = self._write_results(goal.mode, cfg, records, cal, frames)
+        if extra:
+            extra = f' ({extra.strip()})'
         if cal.solution is None:
             reason = cal.failure.reason if cal.failure else 'unknown'
             msg = f'solve failed ({reason}): {cal.failure}; observations saved for an ' \
                   'offline re-solve'
             # 02-features §E5: too_few_captures -> NOT_ENOUGH_SAMPLES, others SOLVE_FAILED
             code = R.NOT_ENOUGH_SAMPLES if reason == TOO_FEW_CAPTURES else R.SOLVE_FAILED
-            return self._result(code, msg, cal, frames, str(path))
+            return self._result(code, msg + extra, cal, frames, str(path))
         msg = 'calibration passed all quality gates' if cal.passed else \
             'calibration finished but failed quality gates: ' + ', '.join(
                 g.name for g in cal.report.gates if g.gated and not g.passed)
-        return self._result(R.NONE, msg, cal, frames, str(path))
+        return self._result(R.NONE, msg + extra, cal, frames, str(path))
 
     # -- preflight (§7-8) -------------------------------------------------------------
     def _preflight(self, goal_handle: Any, run: RunState, cfg: P.RunConfig
@@ -654,6 +710,232 @@ class CalibrationNode(Node):
                 f'and the node use different clocks (node use_sim_time={sim}); stamp images '
                 'with the host / ROS clock'))
 
+    # -- MoveIt mode (§3) ---------------------------------------------------------------
+    def _moveit(self, goal_handle: Any, run: RunState, cfg: P.RunConfig, camera: CameraModel,
+                info: CameraInfo, mode: str) -> S.SessionResult:
+        """Drive the core session: it asks for moves and captures, we execute them
+        through MoveIt and report measured outcomes (02-features §B)."""
+        mi = cfg.moveit
+        base, tool = cfg.frames['base_frame'], cfg.frames['tool_frame']
+        ik_link = mi.ik_link or tool
+        missing = self.moveit.missing(mi.service_timeout, run.cancelled)
+        self._check_cancel(goal_handle, run)
+        if 'compute_ik' in missing:
+            raise RunAbort(R.IK_SERVICE_MISSING, 'no compute_ik service (is move_group '
+                           'running? remap "compute_ik" if it has another name); use '
+                           'execution "manual" without MoveIt')
+        if missing:
+            raise RunAbort(R.MOTION_FAILED, f'MoveIt interfaces missing: {", ".join(missing)}'
+                           ' (is move_group running with its default capabilities?)')
+        ik_T_tool = self._fixed_offset(goal_handle, run, ik_link, tool, cfg)
+        tool_T_ik = tf.inv(ik_T_tool)
+        if self._joints_now(mi.joint_names, time.monotonic(), 3.0, run) is None:
+            raise RunAbort(R.TF_UNAVAILABLE, 'no /joint_states for '
+                           f'{", ".join(mi.joint_names)}: is the robot driver running?')
+        path = None
+        if cfg.session.box_enabled and mi.box_path_constraint:
+            centre = tf.make(Rotation.from_euler('xyz', cfg.session.box_rpy),
+                             np.asarray(cfg.session.box_xyz, float))
+            path = self.moveit.box_constraint(ik_link, ik_T_tool, base, centre,
+                                              cfg.session.box_size)
+
+        def ik(G: Any) -> IKResult:
+            self._check_cancel(goal_handle, run)
+            return self.moveit.solve_ik(G @ tool_T_ik, base, mi.group_name, ik_link,
+                                        mi.joint_names, mi.ik_timeout, run.cancelled)
+
+        def on_phase(phase: str) -> None:
+            if phase in PHASES:
+                self._feedback(goal_handle, run, phase)
+
+        session = S.Session(mode, cfg.board, camera, ik, cfg=cfg.session,
+                            capture_cfg=cfg.capture, solver_cfg=cfg.solver, on_phase=on_phase)
+        last_now = self.now()
+        weak_reported = False
+        while True:
+            self._check_cancel(goal_handle, run)
+            self._check_jump(last_now)
+            last_now = max(last_now, self.now())
+            self._check_info(run)
+            action = session.next_action()
+            if isinstance(action, S.Finished):
+                return action.result
+            if session.plan is not None and session.plan.weak and not weak_reported:
+                weak_reported = True        # §C6: reported before execution, still executed
+                self.get_logger().warning(f'weak plan: {session.plan.advice}')
+                with self._lock:
+                    run.last_detail = f'weak plan: {session.plan.advice}'[:300]
+                self._feedback(goal_handle, run)
+            if isinstance(action, S.Move):
+                outcome, joints, pose = self._motion(goal_handle, run, cfg, action, ik_link,
+                                                     tool_T_ik, path)
+                session.on_motion(outcome, joints, pose)
+                continue
+            frames, images, _, detail = self._collect(goal_handle, run, cfg, info)
+            joints = self._joints_now(mi.joint_names, time.monotonic(), 1.0, run)
+            n_before = len(session.records)
+            session.on_capture(frames, joints)        # may run the final solve
+            recs = session.records
+            rec = recs[n_before] if len(recs) > n_before else None
+            if rec is None:
+                continue
+            self._check_info(run)
+            run.records = recs
+            with self._lock:
+                if rec.accepted:
+                    run.accepted += 1
+                    run.last_rejection, run.last_detail = '', ''
+                else:
+                    run.rejected += 1
+                    run.last_rejection = rec.reject or ''
+                    run.last_detail = rec.detail or detail
+            self._show(images, rec, cfg, camera)
+            self._feedback(goal_handle, run)
+
+    def _fixed_offset(self, goal_handle: Any, run: RunState, ik_link: str, tool: str,
+                      cfg: P.RunConfig) -> Any:
+        """§3.1: the ik_link -> tool_frame transform, which must be fixed: looked up
+        twice, 1 s apart, and identical."""
+        if ik_link == tool:
+            return np.eye(4)
+        seen = []
+        for k in range(2):
+            got = None
+            deadline = time.monotonic() + max(2.0, cfg.timing.tf_timeout)
+            while got is None and time.monotonic() < deadline:
+                self._check_cancel(goal_handle, run)
+                got = tf_tools.latest(self.tf_buffer, ik_link, tool)
+                if got is None:
+                    time.sleep(0.05)
+            if got is None:
+                raise RunAbort(R.TF_UNAVAILABLE, f'no TF {ik_link} -> {tool}: the tool frame '
+                               'must be rigidly attached to moveit.ik_link')
+            seen.append(got[0])
+            if k == 0:
+                t0 = time.monotonic()
+                while time.monotonic() - t0 < 1.0:
+                    self._check_cancel(goal_handle, run)
+                    time.sleep(0.05)
+        if tf.translation_distance(seen[0], seen[1]) > 1e-6 or \
+                tf.rotation_angle(seen[0], seen[1]) > 1e-6:
+            raise RunAbort(R.TF_UNAVAILABLE, f'TF {ik_link} -> {tool} is moving; the tool '
+                           'frame must be fixed to moveit.ik_link')
+        return seen[1]
+
+    def _joints_now(self, names: Any, after: float, timeout: float, run: RunState
+                    ) -> Any:
+        """Measured joints (in ``names`` order) from /joint_states received after
+        ``after`` (monotonic), newest per joint; None if not all arrive in time."""
+        deadline = time.monotonic() + timeout
+        while True:
+            with self._lock:
+                msgs = [m for t, m in self._joints if t > after]
+            pos: dict[str, float] = {}
+            for m in msgs:                      # oldest first: newer values win
+                pos.update(zip(m.name, m.position, strict=False))
+            if all(n in pos for n in names):
+                return np.array([pos[n] for n in names], dtype=float)
+            if time.monotonic() > deadline or run.cancelled.is_set():
+                return None
+            time.sleep(0.02)
+
+    def _motion(self, goal_handle: Any, run: RunState, cfg: P.RunConfig, a: S.Move,
+                ik_link: str, tool_T_ik: Any, path: Any) -> tuple[str, Any, Any]:
+        """One Move (§3.2) -> (outcome, measured joints, measured tool pose).
+
+        ok: goal accepted, SUCCEEDED with SUCCESS, and the measured TF tool pose
+        (and, for joint goals, the joints) at the target after settling: a
+        planning-only move_group or a clamped joint goal reports success without
+        getting there. not_started: provably nothing moved (a refused Cartesian
+        path; an ABORTED MoveGroup goal with an empty planned trajectory and
+        unchanged joints). Anything else is failed. A cancel ends the run
+        (CANCELED), or MOTION_FAULT when the stop is not confirmed (§6)."""
+        mi = cfg.moveit
+        base, tool = cfg.frames['base_frame'], cfg.frames['tool_frame']
+        with self._lock:
+            run.motion_note = ''
+        before = self._joints_now(mi.joint_names, time.monotonic(), 2.0, run)
+        self._check_cancel(goal_handle, run)
+        if a.cartesian:
+            plan = self.moveit.plan_cartesian(
+                [W @ tool_T_ik for W in a.waypoints], base, mi.group_name, ik_link,
+                mi.cartesian_max_step, mi.revolute_jump_threshold, mi.velocity_scaling,
+                mi.acceleration_scaling, mi.service_timeout + 10.0, run.cancelled)
+            self._check_cancel(goal_handle, run)
+            if not plan.ok:                       # nothing was sent (probe finding 7)
+                return self._not_started(run, cfg, plan.note, before)
+            out = self.moveit.run(self.moveit.execute,
+                                  self.moveit.execute_goal(plan.trajectory),
+                                  mi.motion_timeout, mi.cancel_timeout, run.cancelled)
+        else:
+            goal = self.moveit.joint_goal(a.joints, mi.joint_names, mi.group_name, base,
+                                          mi.planning_time, mi.velocity_scaling,
+                                          mi.acceleration_scaling, path)
+            out = self.moveit.run(self.moveit.move, goal, mi.planning_time + mi.motion_timeout,
+                                  mi.cancel_timeout, run.cancelled)
+        self._stopped(out, run)                   # raises on a cancel or an unconfirmed stop
+        after = self._joints_now(mi.joint_names, time.monotonic(), 2.0, run)
+        if not out.accepted:
+            return self._failed(run, out.note, after)
+        if not a.cartesian and out.status == GoalStatus.STATUS_ABORTED and \
+                out.planned_points == 0 and before is not None and after is not None and \
+                float(np.max(np.abs(after - before))) <= mi.joint_tolerance:
+            return self._not_started(run, cfg, f'planning failed ({error_name(out.error_code)})',
+                                     after)
+        if out.status != GoalStatus.STATUS_SUCCEEDED or out.error_code != SUCCESS:
+            return self._failed(run, f'MoveIt ended the goal with status {out.status}, '
+                                f'{error_name(out.error_code)}', after)
+        # end-state check: where the robot really is, measured after settling
+        t = cfg.timing
+        s = tf_tools.settle(self.tf_buffer, base, tool, self.now, t.settle_window,
+                            t.settle_translation, t.settle_rotation, t.settle_timeout,
+                            run.cancelled)
+        self._check_cancel(goal_handle, run)
+        if not s.ok or s.pose is None:
+            return self._failed(run, f'no settled measurement after the motion: {s.reason}',
+                                after)
+        after = self._joints_now(mi.joint_names, time.monotonic(), 2.0, run)
+        dt = tf.translation_distance(s.pose, a.tool_pose)
+        dr = tf.rotation_angle(s.pose, a.tool_pose)
+        if dt > mi.pose_tolerance_translation or dr > mi.pose_tolerance_rotation:
+            return self._failed(run, f'MoveIt reported success but the measured tool pose is '
+                                f'{dt * 1000:.1f} mm / {math.degrees(dr):.2f} deg from the '
+                                'target', after, s.pose)
+        if not a.cartesian and (after is None or float(np.max(np.abs(
+                after - np.asarray(a.joints)))) > mi.joint_tolerance):
+            return self._failed(run, 'MoveIt reported success but the measured joints are not '
+                                'at the goal', after, s.pose)
+        return S.MOTION_OK, after, s.pose
+
+    def _stopped(self, out: GoalOutcome, run: RunState) -> None:
+        """A goal we had to cancel: CANCELED when its stop is confirmed, else a fault."""
+        if out.sent and not out.accepted and out.note == 'no reply to the goal request':
+            raise RunAbort(R.MOTION_FAULT, 'MoveIt did not answer a motion goal, which may be '
+                           'running without a handle to stop it; check the robot')
+        if not out.stopped:
+            return
+        if not out.stop_confirmed:
+            raise RunAbort(R.MOTION_FAULT, f'motion {out.stopped}: the stop was not confirmed '
+                           f'({out.note}); check the robot')
+        if out.stopped == 'cancel':
+            raise RunAbort(R.CANCELED, 'cancelled (motion stopped)')
+        with self._lock:
+            run.motion_note = 'the motion did not finish in moveit.motion_timeout; stopped'
+        raise RunAbort(R.MOTION_FAILED, run.motion_note)
+
+    def _not_started(self, run: RunState, cfg: P.RunConfig, why: str, joints: Any
+                     ) -> tuple[str, Any, Any]:
+        self.get_logger().info(f'motion not started: {why}')
+        got = tf_tools.latest(self.tf_buffer, cfg.frames['base_frame'], cfg.frames['tool_frame'])
+        return S.MOTION_NOT_STARTED, joints, None if got is None else got[0]
+
+    def _failed(self, run: RunState, why: str, joints: Any, pose: Any = None
+                ) -> tuple[str, Any, Any]:
+        self.get_logger().error(f'motion failed: {why}')
+        with self._lock:
+            run.motion_note = why
+        return S.MOTION_FAILED, joints, pose
+
     # -- manual capture loop -------------------------------------------------------
     def _check_info(self, run: RunState) -> None:
         if run.info_changed:
@@ -703,6 +985,24 @@ class CalibrationNode(Node):
 
     def _capture_once(self, goal_handle: Any, run: RunState, cfg: P.RunConfig,
                       camera: CameraModel, info: CameraInfo, cid: int) -> CaptureRecord:
+        frames, images, code, detail = self._collect(goal_handle, run, cfg, info)
+        if not frames:
+            return reject_record(cid, camera, code, detail)
+        rec = capture(cid, frames, cfg.board, camera, cfg.capture)
+        self._check_info(run)               # intrinsics unchanged while these were taken
+        self._show(images, rec, cfg, camera)
+        return rec
+
+    def _show(self, images: list[Any], rec: CaptureRecord, cfg: P.RunConfig,
+              camera: CameraModel) -> None:
+        if images:
+            shown = min(images, key=lambda im: abs(im.stamp - (rec.stamp or images[-1].stamp)))
+            self._publish_viz(shown, rec, cfg, camera)
+
+    def _collect(self, goal_handle: Any, run: RunState, cfg: P.RunConfig, info: CameraInfo
+                 ) -> tuple[list[Frame], list[Any], str, str]:
+        """Settle, then the capture's frames, each with TF at its own stamp (§8).
+        Returns (frames, images, reject code, detail); no frames = rejected."""
         t = cfg.timing
         base, tool = cfg.frames['base_frame'], cfg.frames['tool_frame']
         self._drop_future_tf(base, tool, cfg)
@@ -715,7 +1015,7 @@ class CalibrationNode(Node):
         if not s.ok:
             if 'newer than the settle start' in s.reason:
                 raise RunAbort(R.TF_UNAVAILABLE, s.reason)
-            return reject_record(cid, camera, codes.TF_UNAVAILABLE, s.reason)
+            return [], [], codes.TF_UNAVAILABLE, s.reason
         n = cfg.session.frames_per_capture
         # frames that ARRIVED after the settle: each is checked (camera, clock), and
         # only those also ACQUIRED after the settle are used (§8)
@@ -739,20 +1039,16 @@ class CalibrationNode(Node):
                 if im.stamp > s.end_stamp and len(images) < n:
                     images.append(im)
         if len(images) < n:
-            return reject_record(cid, camera, codes.NO_BOARD if not images else codes.CONSENSUS,
-                                 f'{len(images)} of {n} images acquired after the settle within '
-                                 f'{t.frame_timeout} s')
+            return [], images, codes.NO_BOARD if not images else codes.CONSENSUS, \
+                f'{len(images)} of {n} images acquired after the settle within ' \
+                f'{t.frame_timeout} s'
         frames: list[Frame] = []
         for im in images:
             pose = self._lookup_cancellable(goal_handle, run, base, tool, im.stamp_ns,
                                             t.tf_timeout)
             frames.append(Frame(im.gray, im.stamp, pose))
             self._check_cancel(goal_handle, run)
-        rec = capture(cid, frames, cfg.board, camera, cfg.capture)
-        self._check_info(run)               # intrinsics unchanged while these were taken
-        shown = min(images, key=lambda im: abs(im.stamp - (rec.stamp or images[-1].stamp)))
-        self._publish_viz(shown, rec, cfg, camera)
-        return rec
+        return frames, images, '', ''
 
     def _drop_future_tf(self, base: str, tool: str, cfg: P.RunConfig) -> None:
         """After a sim reset, TF already in flight can refill the cleared buffer with

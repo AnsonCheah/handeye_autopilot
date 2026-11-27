@@ -11,6 +11,7 @@ from cv_bridge import CvBridge
 from geometry_msgs.msg import Point
 import numpy as np
 from numpy.typing import NDArray
+from scipy.spatial.transform import Rotation
 from sensor_msgs.msg import Image
 from visualization_msgs.msg import Marker, MarkerArray
 
@@ -62,3 +63,20 @@ def board_markers(rec: CaptureRecord, board: BoardSpec, frame_id: str, stamp: ob
         m.points.append(Point(x=float(p[0]), y=float(p[1]), z=float(p[2])))
     arr.markers.append(m)
     return arr
+
+
+def box_marker(centre: NDArray[np.float64], size: tuple[float, float, float], frame_id: str,
+               stamp: object) -> MarkerArray:
+    """The safety box (01-architecture §3.4), translucent. ``shortcut: not editable
+    in RViz, add an interactive marker if users ask``."""
+    m = Marker()
+    m.header.frame_id = frame_id
+    m.header.stamp = stamp  # type: ignore[assignment]
+    m.ns, m.id, m.type, m.action = 'safety_box', 0, Marker.CUBE, Marker.ADD
+    q = Rotation.from_matrix(centre[:3, :3]).as_quat()
+    m.pose.position.x, m.pose.position.y, m.pose.position.z = (float(v) for v in centre[:3, 3])
+    m.pose.orientation.x, m.pose.orientation.y, m.pose.orientation.z, m.pose.orientation.w = (
+        float(v) for v in q)
+    m.scale.x, m.scale.y, m.scale.z = (float(v) for v in size)
+    m.color.r, m.color.g, m.color.b, m.color.a = 0.2, 0.6, 1.0, 0.12
+    return MarkerArray(markers=[m])

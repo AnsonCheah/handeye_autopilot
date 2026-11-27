@@ -75,6 +75,15 @@ def scripted_poses(mode, X, Z, camera, board, n=12, seed=1):
     return out
 
 
+def seed_pose(mode, X, Z, camera, board, depth=0.65):
+    """A MoveIt-mode seed: board centred, small enough in the image that the
+    bootstrap's worst-case check allows useful steps (02-features §B2), tilted."""
+    w, h = board.size_m
+    C = look_at_board(np.array([w / 2, h / 2, 0.0]), depth, math.radians(20),
+                      math.radians(-15), math.radians(5), offset_px=(0, 0), camera=camera)
+    return handeye.tool_pose_for(mode, X, Z, C)
+
+
 def camera_params(mode, **over):
     """SyntheticCamera parameters for a mode with sensible true mounts."""
     if mode == 'eye_to_hand':
@@ -172,3 +181,159 @@ class SimClock(Node):
         m.clock.sec = int(t)
         m.clock.nanosec = int((t - int(t)) * 1e9)
         self.pub.publish(m)
+
+
+# -- M4: a fake MoveIt (01-architecture §12: stub compute_ik, fake MoveGroup) -------
+
+JOINTS = [f'j{i}' for i in range(1, 7)]
+
+
+def encode(G):
+    """Fake kinematics: joints = position + rotation vector of the IK-link pose."""
+    from scipy.spatial.transform import Rotation
+    return np.r_[G[:3, 3], Rotation.from_matrix(G[:3, :3]).as_rotvec()]
+
+
+def decode(j):
+    from handeye_autopilot.core import transforms as tf
+    from scipy.spatial.transform import Rotation
+    j = np.asarray(j, dtype=float)
+    return tf.make(Rotation.from_rotvec(j[3:6]), j[:3])
+
+
+class FakeMoveIt(Node):
+    """compute_ik, compute_cartesian_path, move_action and execute_trajectory over
+    a FakeRobot whose published frame is the IK link. Behaviour switches:
+
+    - ``planning_only``: goals SUCCEED without moving the robot;
+    - ``plan_fails(joints) -> bool``: that MoveGroup goal ABORTS with FAILURE and an
+      empty planned trajectory, nothing moves;
+    - ``hang``: goals never reach a terminal state, cancels are accepted and ignored;
+    - ``motion_time``: seconds a motion takes (cancellable unless ``hang``);
+    - ``reach``: (r_min, r_max) of the IK-link origin from the base;
+    - ``ik_collision(G) -> bool``: compute_ik answers NO_IK_SOLUTION (collision);
+    - ``ik_delay``: seconds each compute_ik call takes.
+    """
+
+    def __init__(self, robot, **kw):
+        super().__init__('fake_moveit', **kw)
+        from moveit_msgs.action import ExecuteTrajectory, MoveGroup
+        from moveit_msgs.srv import GetCartesianPath, GetPositionIK
+        from rclpy.action import ActionServer, CancelResponse
+        from rclpy.callback_groups import ReentrantCallbackGroup
+        from sensor_msgs.msg import JointState
+        self.robot = robot
+        self.planning_only = False
+        self.plan_fails = None
+        self.hang = False
+        self.motion_time = 0.15
+        self.reach = (0.05, 3.0)
+        self.ik_collision = None
+        self.ik_delay = 0.0              # s each compute_ik call takes
+        self.goals: list = []            # (kind, request) per accepted goal
+        self.ik_calls = 0
+        self._release = threading.Event()
+        cb = ReentrantCallbackGroup()
+        self.create_service(GetPositionIK, 'compute_ik', self._ik, callback_group=cb)
+        self.create_service(GetCartesianPath, 'compute_cartesian_path', self._cart,
+                            callback_group=cb)
+        def accept(_req):
+            return CancelResponse.ACCEPT
+        self._move = ActionServer(self, MoveGroup, 'move_action', self._move_exec,
+                                  cancel_callback=accept, callback_group=cb)
+        self._exec = ActionServer(self, ExecuteTrajectory, 'execute_trajectory',
+                                  self._traj_exec, cancel_callback=accept, callback_group=cb)
+        self.js = self.create_publisher(JointState, '/joint_states', 10)
+        self.create_timer(0.02, self._joints, callback_group=cb)
+        self._JointState = JointState
+
+    def release(self):
+        self._release.set()
+
+    def _joints(self):
+        m = self._JointState()
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.name = list(JOINTS)
+        with self.robot._lock:
+            m.position = [float(v) for v in encode(self.robot.G)]
+        m.velocity = [0.0] * 6
+        self.js.publish(m)
+
+    def _reachable(self, G):
+        r = float(np.linalg.norm(G[:3, 3]))
+        return self.reach[0] <= r <= self.reach[1]
+
+    def _ik(self, req, res):
+        self.ik_calls += 1
+        if self.ik_delay:
+            time.sleep(self.ik_delay)
+        G = tf_tools.pose_to_matrix(req.ik_request.pose_stamped.pose)
+        if not self._reachable(G):
+            res.error_code.val = -31                       # NO_IK_SOLUTION
+        elif self.ik_collision is not None and self.ik_collision(G):
+            res.error_code.val = -31
+        else:
+            res.error_code.val = 1
+            res.solution.joint_state.name = list(JOINTS) + ['finger']
+            res.solution.joint_state.position = [float(v) for v in encode(G)] + [0.0]
+        return res
+
+    def _cart(self, req, res):
+        from trajectory_msgs.msg import JointTrajectoryPoint
+        pts = []
+        for p in req.waypoints:
+            G = tf_tools.pose_to_matrix(p)
+            if not self._reachable(G):
+                break
+            pts.append(JointTrajectoryPoint(positions=[float(v) for v in encode(G)]))
+        res.fraction = len(pts) / max(1, len(req.waypoints))
+        res.solution.joint_trajectory.joint_names = list(JOINTS)
+        res.solution.joint_trajectory.points = pts
+        res.error_code.val = 1
+        return res
+
+    def _run_motion(self, goal_handle, target, result):
+        """Move the robot to ``target`` over motion_time; honour cancel/hang."""
+        from action_msgs.msg import GoalStatus  # noqa: F401
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < self.motion_time or self.hang:
+            if self._release.is_set():
+                break
+            if goal_handle.is_cancel_requested and not self.hang:
+                result.error_code.val = -7                 # PREEMPTED
+                goal_handle.canceled(result)
+                return result
+            time.sleep(0.01)
+        if self._release.is_set() and self.hang:
+            goal_handle.abort(result)
+            return result
+        if target is not None and not self.planning_only:
+            self.robot.move_to(target)
+        result.error_code.val = 1
+        goal_handle.succeed(result)
+        return result
+
+    def _move_exec(self, goal_handle):
+        from moveit_msgs.action import MoveGroup
+        from trajectory_msgs.msg import JointTrajectoryPoint
+        req = goal_handle.request.request
+        self.goals.append(('move', req))
+        res = MoveGroup.Result()
+        c = req.goal_constraints[0].joint_constraints
+        joints = [jc.position for jc in sorted(c, key=lambda jc: JOINTS.index(jc.joint_name))]
+        if self.plan_fails is not None and self.plan_fails(joints):
+            res.error_code.val = 99999                     # FAILURE, nothing planned
+            goal_handle.abort(res)
+            return res
+        res.planned_trajectory.joint_trajectory.points = [
+            JointTrajectoryPoint(positions=list(encode(self.robot.G))),
+            JointTrajectoryPoint(positions=list(joints))]
+        return self._run_motion(goal_handle, decode(joints), res)
+
+    def _traj_exec(self, goal_handle):
+        from moveit_msgs.action import ExecuteTrajectory
+        traj = goal_handle.request.trajectory.joint_trajectory
+        self.goals.append(('execute', traj))
+        res = ExecuteTrajectory.Result()
+        target = decode(traj.points[-1].positions) if traj.points else None
+        return self._run_motion(goal_handle, target, res)

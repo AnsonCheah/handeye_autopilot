@@ -98,7 +98,12 @@ Intrinsics are fixed (from `CameraInfo`), not refined.
      loss stall the bootstrap in M2 tests); after `max_halvings` the run fails
      (`board_lost`) with a message naming `L_max` as the likely culprit.
    An optional rough initial guess (e.g. CAD) only sets the first step size; it
-   is never trusted for visibility. Measured in M2: worst-case rotation steps
+   is never trusted for visibility. The seed's view matters (measured in M4):
+   with the board filling about half the image, the worst-case check capped
+   rotation steps at 0.4–0.75° for `L_max` 0.15–0.3 m, below the 2° spread the
+   preliminary solve needs, so no round was clean and the bootstrap could not
+   start; a centred board at 0.65 m worked in both modes. The failure message
+   names the cap and says to start with the board smaller and centred. Measured in M2: worst-case rotation steps
    from the seed are ~1.5°; a 0.2 mm / 0.02° noisy simulated robot reaches a
    usable estimate in 3–4 rounds.
 3. **Bounded centring.** Bring the board toward image centre at nominal depth in

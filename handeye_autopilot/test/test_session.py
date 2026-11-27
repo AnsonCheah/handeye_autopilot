@@ -433,3 +433,15 @@ def test_halved_retry_is_checked_before_it_is_sent(monkeypatch):
     a1 = tf.rotation_angle(steps[0].tool_pose, seed_tool)
     a2 = tf.rotation_angle(steps[1].tool_pose, seed_tool)
     assert a1 == pytest.approx(v0, rel=0.02) and a2 == pytest.approx(v0 / 4, rel=0.02)
+
+
+def test_bootstrap_failure_names_the_visibility_cap():
+    """A seed where the board nearly fills the image: before any estimate, the
+    worst case over L_max caps every rotation step below what the preliminary
+    solve needs. The failure must say so, not only 'check L_max' (found in M4)."""
+    r, _, _ = run('eye_to_hand', session_cfg=cfg(max_bootstrap_rounds=2),
+                  seed_spec={'distance': 0.45, 'tilt': [20, -15], 'roll': 5,
+                             'offset': [60, -40]})
+    assert r.failure == session.BOOTSTRAP_FAILED
+    assert 'limited rotation steps to' in r.message
+    assert 'smaller and centred' in r.message

@@ -13,7 +13,7 @@ Package: `handeye_autopilot`.
 - **License:** Apache-2.0. **Distros:** Jazzy (24.04), Lyrical (26.04),
   Rolling. Kilted skipped (EOL around first release). Verified in rosdistro
   (2026-11-25): `moveit`, `moveit_resources`, `ur_robot_driver`, `pymoveit2`
-  are released on all three.
+  are released on all three (pymoveit2 is not used since M4, §2).
 - **Python only** (rclpy). The only CMake package is the interface package.
 - **Conventions:** SI units, REP 103/105, ROS quaternion order (x,y,z,w).
 
@@ -25,7 +25,7 @@ Package: `handeye_autopilot`.
 | `industrial_calibration` + `industrial_calibration_ros2` (ROS-I) | Ceres solver, covariance, noise and homography analysis, several target types, RViz panel | Data collection is manual (save on trigger); no pose generation or motion; not on the build farm; C++ with no Python API, so we can't depend on it from a farm-released Python package |
 | `moveit_calibration` (ros2 branch) | RViz plugin, automatic sampling around a pose | Unreleased for ROS 2, 59 open issues |
 | `robot_calibration` | Released; full kinematic calibration | Different scope (robot kinematics), heavier setup |
-| `pymoveit2` | Released rclpy wrapper for MoveGroup, IK, planning scene | A building block, not a calibration tool. **We reuse it.** |
+| `pymoveit2` | Released rclpy wrapper for MoveGroup, IK, planning scene | A building block, not a calibration tool. Planned for reuse; dropped in M4 because its API differs between distro releases (§2) |
 
 **This package's contribution:** automated, safe, quality-gated *data
 collection and validation* for hand-eye calibration: pose planning from the
@@ -51,8 +51,8 @@ Solving uses OpenCV + SciPy. Interop (v1.1): export observations in
 | Quasi-random sampling | SciPy `qmc.Halton` | Nothing |
 | Image + camera info | Image subscription; latest `CameraInfo` cached (§7) | Cache + consistency check |
 | Robot pose at a stamp | `tf2_ros` Buffer, `lookup_transform` with a timeout (waits on the run's worker thread while TF arrives on the executor's others) | Nothing |
-| Motion (plan + execute, cancel) | `pymoveit2` `MoveIt2` where its API is the same on every distro; rclpy action clients on `MoveGroup` / `ExecuteTrajectory` (`moveit_msgs`) for goal status, planned trajectory and cancel (the M2 probe found Lyrical's pymoveit2 lacks `get_goal_future`) | Goal parameters, result checks |
-| Reachability + collision | `moveit_msgs/srv/GetPositionIK` on `compute_ik` | A direct client (~20 lines; pymoveit2's IK call sets `is_diff=false`, see §3.1) |
+| Motion (plan + execute, cancel) | `move_group`'s `MoveGroup` and `ExecuteTrajectory` actions and `compute_cartesian_path` service (`moveit_msgs`), through rclpy clients. pymoveit2 was dropped in M4: Lyrical's release lacks `get_goal_future` (probe finding 9), and what the node needs from it is a few request fields | `ros/moveit_client.py`: request construction, goal bookkeeping (status, planned trajectory, cancel, goals still active), result checks |
+| Reachability + collision | `moveit_msgs/srv/GetPositionIK` on `compute_ik` | A direct client in `ros/moveit_client.py` (pymoveit2's IK call sets `is_diff=false`, see §3.1) |
 | Collision scene (meshes, point clouds) | MoveIt planning scene, octomap | Docs and demo config only |
 | Exposure | Driver's own ROI auto-exposure, set via rclpy `AsyncParameterClient` | ROI update + driver parameter-name map (checkpoint 2 §L) |
 | Stray-marker rejection | OpenCV `solvePnPRansac` + ChArUco interpolation | Glue (checkpoint 2 §D4) |
@@ -85,7 +85,8 @@ The node never talks to a robot driver. It uses:
 | Need | Interface | Default name (relative, remappable) |
 |---|---|---|
 | Pose reachable and collision-free | `moveit_msgs/srv/GetPositionIK` | `compute_ik` |
-| Plan + execute to a pose | `moveit_msgs/action/MoveGroup` via `pymoveit2` | `move_action` |
+| Plan + execute to joints | `moveit_msgs/action/MoveGroup` | `move_action` |
+| Straight tool path (checked moves) | `moveit_msgs/srv/GetCartesianPath`, then `moveit_msgs/action/ExecuteTrajectory` | `compute_cartesian_path`, `execute_trajectory` |
 | Robot pose for the solve | TF `base_frame → tool_frame` | — |
 
 A robot without MoveIt plugs in by serving `compute_ik` with the
@@ -119,7 +120,7 @@ MoveIt brand implicitly.
   Rejection reason is recorded as `IK_FAILED` with the MoveIt error code; no
   finer claim is made.
 
-### 3.2 Motion (pymoveit2)
+### 3.2 Motion (MoveIt actions)
 
 - Goal per planned pose: a **joint goal** equal to the IK solution kept for
   that candidate (checkpoint 2 §C5), so execution reaches the same arm
@@ -170,7 +171,8 @@ MoveIt brand implicitly.
   TCP deviation (~0.01 mm with 1° waypoints) is far inside the box margins;
   the bootstrap return to the seed is checked against the nominal seed, so
   the end-pose tolerance must stay well inside the step safety factor. The driver
-  requires the whole path (pymoveit2 `cartesian_fraction_threshold=1.0`; a
+  requires the whole path (`compute_cartesian_path` must return fraction 1.0
+  before the trajectory goes to `execute_trajectory`; a
   shorter path is refused before anything is sent, which is the `not_started`
   evidence for these moves; probe) and sets a joint-space jump threshold
   (MoveIt's default 0 disables the check). The end check is the measured TF
@@ -196,7 +198,9 @@ MoveIt brand implicitly.
    the probe moves (§checkpoint 2 B) run, so no visibility prediction is needed
    there.
 2. `compute_ik` (§3.1). If the service is absent, only manual mode is allowed.
-3. Optional plan-only check (pymoveit2 `plan`), off by default.
+3. Optional plan-only check (MoveGroup `plan_only`), off by default. Not
+   built in M4 (`shortcut:` a planning failure at execution time is already a
+   safe skip with a spare; add the check if skips waste too much time).
 
 Every rejection is recorded with its reason.
 
@@ -234,8 +238,8 @@ one updates it):
 | Package | build / buildtool | exec | test |
 |---|---|---|---|
 | `handeye_autopilot_interfaces` | `ament_cmake`, `rosidl_default_generators`, `geometry_msgs`, `action_msgs`, `service_msgs` | `rosidl_default_runtime`, `geometry_msgs`, `action_msgs`, `service_msgs` | — |
-| `handeye_autopilot` | — | `python3-numpy`, `python3-scipy`, `python3-opencv`, `python3-yaml`, `rclpy`, `cv_bridge`, `image_geometry`, `tf2_ros`, `geometry_msgs`, `sensor_msgs`, `std_srvs`, `moveit_msgs`, `pymoveit2`, `handeye_autopilot_interfaces`; M3: `std_msgs`, `builtin_interfaces`, `tf2_msgs`, `visualization_msgs`, `ament_index_python`, `launch`, `launch_ros`, `ros2bag`, `tf2_ros_py`, `rosgraph_msgs` | `python3-pytest`; M3: `launch_testing`, `launch_testing_ros` |
-| `handeye_autopilot_demos` | — | `handeye_autopilot`, `handeye_autopilot_interfaces`, `launch`, `launch_ros`, `moveit_resources_panda_moveit_config`, `ur_moveit_config`, `ur_robot_driver` | `python3-pytest` |
+| `handeye_autopilot` | — | `python3-numpy`, `python3-scipy`, `python3-opencv`, `python3-yaml`, `rclpy`, `cv_bridge`, `image_geometry`, `tf2_ros`, `geometry_msgs`, `sensor_msgs`, `std_srvs`, `moveit_msgs`, `handeye_autopilot_interfaces`; M3: `std_msgs`, `builtin_interfaces`, `tf2_msgs`, `visualization_msgs`, `ament_index_python`, `launch`, `launch_ros`, `ros2bag`, `tf2_ros_py`, `rosgraph_msgs`; M4: `action_msgs`, `shape_msgs` (`pymoveit2` removed) | `python3-pytest`; M3: `launch_testing`, `launch_testing_ros` |
+| `handeye_autopilot_demos` | — | `handeye_autopilot`, `handeye_autopilot_interfaces`, `launch`, `launch_ros`, `moveit_resources_panda_moveit_config`, `ur_moveit_config`, `ur_robot_driver`; M4: `ur_description`, `moveit_configs_utils`, `moveit_ros_move_group`, `moveit_ros_perception`, `moveit_planners_ompl`, `moveit_kinematics`, `moveit_simple_controller_manager`, `moveit_ros_visualization`, `controller_manager`, `joint_state_broadcaster`, `joint_trajectory_controller`, `robot_state_publisher`, `rviz2` and the message and Python keys its nodes import | `python3-pytest`; M4: `launch_testing`, `launch_testing_ros` |
 
 **Dependency gate (CI, every PR, every distro;
 `ci/scripts/check_deps.sh`):** keys are listed with `rosdep keys --from-paths
@@ -371,6 +375,15 @@ acceptance):
   `timing`, frames) overriding the node parameters for one run. Unknown
   profile (no file) = rejected at admission; a file that fails to parse or
   validate = accepted, then `ABORTED` with `INVALID_GOAL`;
+- `moveit.*` (M4, MoveIt mode): `group_name` and `joint_names` (required:
+  the SRDF group and its joints in goal order), `ik_link` (empty = tool
+  frame), `ik_timeout` (whole s, 0 = server default), `planning_time`,
+  `velocity_scaling` and `acceleration_scaling` (in (0, 1]), `motion_timeout`,
+  `cancel_timeout`, `service_timeout`, end-state tolerances
+  (`joint_tolerance`, `pose_tolerance_translation`, `pose_tolerance_rotation`),
+  `cartesian_max_step`, `revolute_jump_threshold`, `box_path_constraint`.
+  The MoveIt names (`compute_ik`, `move_action`, `compute_cartesian_path`,
+  `execute_trajectory`) are relative: remap them;
 - `testing.allow_fault_injection` (default false): adds `~/inject_fault`,
   which sets the motion fault latch, so the latch's admission rule is testable
   before M4 produces real motion faults. Never enabled by the shipped launch
@@ -387,6 +400,27 @@ captures and `solver.min_captures` in every k-fold training split, i.e.
 `target_captures`) → solve, verify,
 gates (`core.quality.calibrate`) → result YAML, observations YAML, action
 result. Phase strings as in `Calibrate.Feedback`.
+
+**MoveIt mode run (M4):** the same preflight, then MoveIt checks: all four
+MoveIt interfaces found within `moveit.service_timeout` (`compute_ik` missing
+= `IK_SERVICE_MISSING`, any other = `MOTION_FAILED`), the fixed `ik_link →
+tool_frame` transform (§3.1, else `TF_UNAVAILABLE`), `/joint_states` for the
+group. Then the core session drives the run (02-features §B): seed capture at
+the robot's current pose → bootstrap → centring → planning → moves and
+captures → solve, verify, gates, with feedback phases as the session reports
+them (`verifying` during the k-fold refits). A weak plan is logged and shown in
+feedback (`last_rejection_detail`) before execution. Each `Move` is executed
+and judged as §3.2 says; a `Capture` is the manual capture step (settle,
+frames, TF per frame) with the measured joints. Session failures map to
+result codes: `motion_failed`, `recovery_failed` → `MOTION_FAILED` (the
+message carries why the motion was judged failed); `seed_rejected`,
+`board_lost`, `bootstrap_failed`, `not_enough_samples` → `NOT_ENOUGH_SAMPLES`,
+with the session's advice in the message. A cancel during a motion cancels
+the goal and waits `moveit.cancel_timeout` for its terminal status
+(`CANCELED`), else `MOTION_FAULT` and the latch (§6); a motion past
+`moveit.motion_timeout` is cancelled the same way (`MOTION_FAILED` once the
+stop is confirmed). With the safety box enabled the node publishes it on
+`~/markers` (namespace `safety_box`) when a run starts.
 
 **Synthetic camera node** (`synthetic_camera`, tests and demos): publishes
 `image` + `camera_info` at a rate, rendering the board with `core.render` at
@@ -421,7 +455,8 @@ snapshotted at admission; every capture's images must match the run's
   deadline; it never spins (as built in M3).
 - The action server installs a cancel callback that **accepts** cancellation
   (rclpy's default rejects it).
-- Cancel during motion: call pymoveit2's cancel on the active motion goal
+- Cancel during motion: cancel the active motion goal through its rclpy goal
+  handle
   (`MoveGroup` for planned moves, `ExecuteTrajectory` for Cartesian ones),
   then wait (with deadline) for its terminal status; only then report
   `CANCELED`. A cancel acknowledgement is not proof the robot stopped; if the
@@ -559,8 +594,9 @@ snapshotted at admission; every capture's images must match the run's
   `no-symlink-install`; the checkout used by the gate and the consumer and
   action-ros-ci's own checkout are pinned to **one** commit (the PR head SHA,
   passed as `ref` to both); dependency gate (§4); `ruff`; `mypy --strict` on
-  `handeye_autopilot.core`. The `pymoveit2` API smoke test runs (not skips) on
-  every leg (`HANDEYE_AUTOPILOT_REQUIRE_DEPS=1`).
+  `handeye_autopilot.core`. The `moveit_msgs` interface test (the request and
+  result fields the node uses) runs (not skips) on every leg
+  (`HANDEYE_AUTOPILOT_REQUIRE_DEPS=1`).
 - **Core on several OpenCV versions:** a pip-based job runs the ROS-free
   tests on OpenCV 4.10 and 4.12 (4.12 ships in no distro yet), so detection
   changes are checked against every API variant without waiting for ROS
@@ -574,9 +610,12 @@ snapshotted at admission; every capture's images must match the run's
 
 ## 13. Risks
 
-- `pymoveit2` is a single-maintainer project. Mitigation: we use a small part
-  (MoveGroup goals, cancel); if it breaks on a distro, replacing it is a
-  contained change in one module.
+- `pymoveit2` was a single-maintainer dependency; it was replaced in M4 by
+  direct clients on MoveIt's own interfaces (one module, `ros/moveit_client.py`).
+  Remaining risk: MoveIt message fields change between releases (the
+  `GetCartesianPath` jump thresholds already differ). Mitigation: optional
+  fields are set only where they exist, and the interface test checks the
+  fields used on every distro.
 - MoveIt `compute_ik` behaviour differs across distros (timeout handling).
   CI on all three.
 - Author new to ROS 2: the custom surface is one action and two messages; it
