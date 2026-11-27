@@ -360,8 +360,8 @@ class MoveItClient:
         included), right before execution: ExecuteTrajectory, unlike a MoveGroup
         goal, does not re-check a trajectory planned earlier. Checked at its points
         and between them (joints interpolated at <= 0.01 rad). All requests go out
-        in small concurrent batches, so the check is short (tens of ms).
-        ``shortcut:`` a scene update that arrives during these few tens of ms is
+        in small concurrent batches (typically well under a second).
+        ``shortcut:`` a scene update that arrives during this check is
         treated like one arriving just after dispatch: not handled (MoveIt does
         not monitor ExecuteTrajectory motions either). '' if valid, else why."""
         jt = traj.joint_trajectory

@@ -54,7 +54,24 @@ pose. Stop a run from any terminal with
 
 ## Results (Jazzy, this machine)
 
-RESULTS_TABLE
+Each run unattended from the seed pose; "error" is the calibrated camera mount
+against the true one (only a simulation knows it). All four passed every
+quality gate.
+
+| Robot | Mode | Captures (accepted / rejected) | Reprojection RMS | Held-out RMS | Error vs truth | Calibration time |
+|---|---|---|---|---|---|---|
+| Panda | eye-to-hand | 60 / 1 | 0.24 px | 0.24 px | 0.03 mm, 0.006° | 3.8 min |
+| Panda | eye-in-hand | 96 / 1 | 0.19 px | 0.19 px | 0.03 mm, 0.004° | 5.9 min |
+| UR5e | eye-to-hand | 60 / 1 | 0.24 px | 0.24 px | 0.05 mm, 0.007° | 3.9 min |
+| UR5e | eye-in-hand | 96 / 1 | 0.19 px | 0.19 px | 0.02 mm, 0.005° | 6.9 min |
+
+Eye-in-hand needs more bootstrap rounds (6 vs 3) before the first usable
+estimate, hence more captures. The sub-0.1 mm errors reflect a perfect
+simulated robot and camera (exact joints, an ideal pinhole renderer); real
+hardware (M5) will be dominated by robot accuracy and optics. Videos of the
+Panda eye-to-hand and UR5e eye-in-hand runs are kept outside the repository
+(4x speed: RViz on top, the camera and each capture as the calibration saw it
+below).
 
 ## What the tests prove
 

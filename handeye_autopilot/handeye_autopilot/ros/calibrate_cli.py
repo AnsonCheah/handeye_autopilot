@@ -35,6 +35,7 @@ from action_msgs.msg import GoalStatus
 from action_msgs.srv import CancelGoal
 import rclpy
 from rclpy.action import ActionClient
+from rclpy.action.client import ClientGoalHandle
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.signals import SignalHandlerOptions
@@ -48,34 +49,36 @@ CODES = {v: k for k, v in vars(Calibrate.Result).items()
          if k.isupper() and isinstance(v, int)}
 
 
-def _cancel_by_id(node: Node, ns: str, goal_id: UUID, timeout: float, why: str) -> None:
-    """Cancel OUR goal by its ID through the action's cancel service (no goal
-    handle needed), retried while the node may still be admitting it, then wait
-    for its result: the confirmation that the run, and its motion, stopped."""
-    cancel = node.create_client(CancelGoal, f'{ns}/calibrate/_action/cancel_goal')
-    result = node.create_client(Calibrate.Impl.GetResultService,
-                                f'{ns}/calibrate/_action/get_result')
-    if not cancel.wait_for_service(timeout_sec=5.0):
-        print(f'{why}; the action cancel service is not available: check the node and '
-              'the robot', file=sys.stderr)
-        return
-    req = CancelGoal.Request()
-    req.goal_info.goal_id = goal_id
+def _cancel_by_id(client: ActionClient, goal_id: UUID, timeout: float, why: str) -> None:
+    """Cancel OUR goal by its ID, without the goal handle the lost reply would
+    have given us: a handle for that ID on the same action client, so the cancel
+    and result requests use the client's own (remapped) action channels.
+    Retried while the node may still be admitting the goal; then wait for its
+    result, which says whether the stop was confirmed."""
+    handle = ClientGoalHandle(client, goal_id,
+                              Calibrate.Impl.SendGoalService.Response(accepted=True))
     for _attempt in range(3):
-        fut = cancel.call_async(req)
+        fut = handle.cancel_goal_async()
         if not wait_future(fut, 10.0):
             break
-        r = fut.result()
-        if r.return_code == CancelGoal.Response.ERROR_NONE:
+        code = fut.result().return_code
+        if code == CancelGoal.Response.ERROR_NONE:
             print(f'{why}: cancelling our goal; waiting for it to stop...', file=sys.stderr,
                   flush=True)
-            got = result.call_async(Calibrate.Impl.GetResultService.Request(goal_id=goal_id))
-            if wait_future(got, timeout):
-                print(f'stopped: {got.result().result.message}', file=sys.stderr)
+            got = handle.get_result_async()
+            if not wait_future(got, timeout):
+                print('no result after the cancel: CHECK THE ROBOT', file=sys.stderr)
+                return
+            res = got.result()
+            r = res.result
+            if res.status == GoalStatus.STATUS_CANCELED or \
+                    r.error_code == Calibrate.Result.CANCELED:
+                print(f'stopped: {r.message}', file=sys.stderr)
             else:
-                print('no result after the cancel: check the robot', file=sys.stderr)
+                print(f'the goal ended {CODES.get(r.error_code, r.error_code)}: {r.message} '
+                      '(the stop is NOT confirmed: CHECK THE ROBOT)', file=sys.stderr)
             return
-        if r.return_code == CancelGoal.Response.ERROR_GOAL_TERMINATED:
+        if code == CancelGoal.Response.ERROR_GOAL_TERMINATED:
             print(f'{why}: our goal had already ended', file=sys.stderr)
             return
         time.sleep(2.0)                    # unknown yet: may still be being admitted
@@ -107,7 +110,7 @@ def run(args: argparse.Namespace, node: Node, interrupted: threading.Event) -> i
     send = client.send_goal_async(goal, feedback_callback=feedback, goal_uuid=goal_id)
     if not wait_future(send, args.accept_timeout, interrupted):
         # the node may have accepted it and started (with motion) without us
-        _cancel_by_id(node, ns, goal_id, args.cancel_timeout,
+        _cancel_by_id(client, goal_id, args.cancel_timeout,
                       'no goal reply' if not interrupted.is_set() else 'interrupted')
         return 130 if interrupted.is_set() else 2
     handle = send.result()

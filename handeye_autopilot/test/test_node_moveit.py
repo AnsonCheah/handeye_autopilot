@@ -31,6 +31,10 @@ from handeye_autopilot_interfaces.action import Calibrate  # noqa: E402
 R = Calibrate.Result
 FB = Calibrate.Feedback
 
+# own DDS domain per test process (see the ros fixture): two test runs at once
+# must not answer each other's fake MoveIt
+DOMAIN = str(30 + os.getpid() % 60)
+
 MOVEIT = {'moveit.group_name': 'arm', 'moveit.joint_names': JOINTS,
           'moveit.service_timeout': 2.0, 'moveit.cancel_timeout': 1.0,
           'moveit.motion_timeout': 20.0,
@@ -78,7 +82,7 @@ def ros():
     # names, and a real move_group (the demos' tests, run in parallel by colcon)
     # must not answer it
     old = os.environ.get('ROS_DOMAIN_ID')
-    os.environ['ROS_DOMAIN_ID'] = '57'
+    os.environ['ROS_DOMAIN_ID'] = DOMAIN
     rclpy.init()
     yield
     rclpy.shutdown()
@@ -582,7 +586,7 @@ def test_ctrl_c_cancels_the_motion_before_exiting(moveit_world, tmp_path):
     log = open(log_path, 'w')
     proc = subprocess.Popen([exe, '--ros-args', '-r', '__node:=handeye_sub',
                              '--params-file', str(pfile)], stdout=log, stderr=subprocess.STDOUT,
-                            env=dict(os.environ, ROS_DOMAIN_ID='57', PYTHONUNBUFFERED='1'),
+                            env=dict(os.environ, ROS_DOMAIN_ID=DOMAIN, PYTHONUNBUFFERED='1'),
                             start_new_session=True)
     try:
         _wait(lambda: 'ready: send a goal' in log_path.read_text(), 60.0, 'node not ready')
@@ -617,7 +621,7 @@ def _cli(args, log_path):
                        'calibrate')
     return subprocess.Popen([exe] + args, stdout=open(log_path, 'w'),
                             stderr=subprocess.STDOUT,
-                            env=dict(os.environ, ROS_DOMAIN_ID='57', PYTHONUNBUFFERED='1'),
+                            env=dict(os.environ, ROS_DOMAIN_ID=DOMAIN, PYTHONUNBUFFERED='1'),
                             start_new_session=True)
 
 
@@ -646,27 +650,8 @@ def test_cli_without_a_goal_reply_cancels_its_own_goal(moveit_world, tmp_path):
     """The goal reply does not arrive in time (here: a server that admits slower
     than the accept timeout): the CLI cancels ITS goal by ID through the action's
     cancel service, waits for its result, and exits 2."""
-    from rclpy.action import ActionServer, CancelResponse, GoalResponse
-    from rclpy.callback_groups import ReentrantCallbackGroup
     w = moveit_world()
-    cancelled = []
-
-    def slow_admit(_goal):
-        time.sleep(3.0)
-        return GoalResponse.ACCEPT
-
-    def execute(handle):
-        while not handle.is_cancel_requested:
-            time.sleep(0.05)
-        r = Calibrate.Result(error_code=Calibrate.Result.CANCELED, message='cancelled')
-        handle.canceled(r)
-        return r
-
-    def on_cancel(handle):
-        cancelled.append(bytes(handle.goal_id.uuid))
-        return CancelResponse.ACCEPT
-    ActionServer(w.client, Calibrate, '/dummy/calibrate', execute, goal_callback=slow_admit,
-                 cancel_callback=on_cancel, callback_group=ReentrantCallbackGroup())
+    cancelled = _dummy_server(w.client, '/dummy/calibrate', admit_s=3.0, accept=True)
     time.sleep(2.0)
     log = tmp_path / 'cli.log'
     proc = _cli(['--mode', 'eye_to_hand', '--node', '/dummy', '--accept-timeout', '1'], log)
@@ -699,3 +684,79 @@ def test_finish_is_refused_in_moveit_mode(moveit_world):
     res = w.driver.call(w.driver.finish)
     assert not res.success
     w.driver.wait(h.cancel_goal_async(), 10.0)
+
+
+def _dummy_server(node, name, admit_s, accept, first_instant=False):
+    """An action server whose admission takes ``admit_s`` and then accepts or
+    rejects (``first_instant``: the first goal is admitted at once); accepted
+    goals run until cancelled (at most 60 s). Returns the cancelled ids."""
+    from rclpy.action import ActionServer, CancelResponse, GoalResponse
+    from rclpy.callback_groups import ReentrantCallbackGroup
+    cancelled = []
+    state = {'first': first_instant}
+
+    def admit(_goal):
+        if state.pop('first', False):           # the first operator: admitted at once
+            return GoalResponse.ACCEPT
+        time.sleep(admit_s)
+        return GoalResponse.ACCEPT if accept else GoalResponse.REJECT
+
+    def execute(handle):
+        t0 = time.monotonic()
+        while not handle.is_cancel_requested and time.monotonic() - t0 < 60.0:
+            time.sleep(0.05)
+        r = Calibrate.Result(error_code=Calibrate.Result.CANCELED, message='cancelled')
+        if handle.is_cancel_requested:
+            handle.canceled(r)
+        else:
+            handle.abort(r)
+        return r
+
+    def on_cancel(handle):
+        cancelled.append(bytes(handle.goal_id.uuid))
+        return CancelResponse.ACCEPT
+    ActionServer(node, Calibrate, name, execute, goal_callback=admit,
+                 cancel_callback=on_cancel, callback_group=ReentrantCallbackGroup())
+    return cancelled
+
+
+def test_cli_interrupt_while_rejection_pending_spares_the_other_run(moveit_world, tmp_path):
+    """Operator A's goal runs; operator B's CLI is interrupted while B's (busy)
+    rejection is still pending: B cancels only B's goal ID, never A's run."""
+    import signal
+
+    from rclpy.action import ActionClient
+    w = moveit_world()
+    cancelled = _dummy_server(w.client, '/dummy2/calibrate', admit_s=4.0, accept=False,
+                              first_instant=True)
+    a = ActionClient(w.client, Calibrate, '/dummy2/calibrate')
+    assert a.wait_for_server(timeout_sec=10.0)
+    time.sleep(1.0)
+    ha = w.driver.wait(a.send_goal_async(Calibrate.Goal(mode='eye_to_hand')), 10.0)
+    assert ha.accepted
+    log = tmp_path / 'cli.log'
+    proc = _cli(['--mode', 'eye_to_hand', '--node', '/dummy2', '--accept-timeout', '30'], log)
+    time.sleep(2.5)                          # B's goal is now waiting for admission
+    proc.send_signal(signal.SIGINT)
+    assert proc.wait(timeout=60) == 130, log.read_text()
+    assert bytes(ha.goal_id.uuid) not in cancelled, "operator A's run was cancelled"
+    assert not ha.get_result_async().done()  # A's run still going
+    w.driver.wait(ha.cancel_goal_async(), 10.0)
+
+
+def test_cli_fallback_cancel_follows_a_remapped_action(moveit_world, tmp_path):
+    """With the action name remapped, the fallback cancel (no goal reply) still
+    reaches the server: it goes through the action client's own channels."""
+    w = moveit_world()
+    cancelled = _dummy_server(w.client, '/remapped/calibrate', admit_s=3.0, accept=True)
+    time.sleep(2.0)
+    log = tmp_path / 'cli.log'
+    proc = _cli(['--mode', 'eye_to_hand', '--node', '/dummy3', '--accept-timeout', '1',
+                 '--ros-args', '-r', '/dummy3/calibrate:=/remapped/calibrate'], log)
+    try:
+        assert proc.wait(timeout=60) == 2, log.read_text()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert len(cancelled) == 1, log.read_text()        # the CLI's goal, at the remap
+    assert 'stopped' in log.read_text()
