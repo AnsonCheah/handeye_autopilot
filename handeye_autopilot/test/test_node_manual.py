@@ -1152,8 +1152,28 @@ def test_short_rewind_then_a_goal(world_factory):
     w.result(h)
 
 
-def test_verifying_phase_comes_between_solve_and_result(world_factory):
+def test_verifying_phase_is_active_when_k_fold_starts(world_factory, monkeypatch):
+    from handeye_autopilot.core import quality
     w = world_factory()
+    seen = []
+    real = quality.k_folds
+
+    def spy(*a, **k):
+        seen.append(w.node._run.phase)            # the phase at k-fold entry
+        return real(*a, **k)
+    monkeypatch.setattr(quality, 'k_folds', spy)
     _finish_run(w)
-    phases = [f.phase for f in w.driver.feedback]
-    assert phases.index(FB.PHASE_SOLVING) < phases.index(FB.PHASE_VERIFYING)
+    assert seen == [FB.PHASE_VERIFYING]
+
+
+def test_a_queued_old_resolution_frame_does_not_abort_preflight(world_factory):
+    w = world_factory()
+    from sensor_msgs.msg import Image
+    old = Image(encoding='mono8', width=4, height=4, step=4, data=bytes(16))
+    old.header.frame_id = 'camera_optical_frame'
+    old.header.stamp = w.node.get_clock().now().to_msg()
+    h = w.driver.send()
+    w.node._on_image(old)                         # a stale, wrong-size frame queued first
+    w.driver.wait_phase(FB.PHASE_MANUAL_CAPTURE, timeout=15.0)
+    w.driver.wait(h.cancel_goal_async())
+    w.result(h)

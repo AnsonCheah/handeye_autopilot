@@ -562,11 +562,6 @@ class CalibrationNode(Node):
             raise RunAbort(R.NO_CAMERA_INFO, str(e)) from e
         with self._lock:
             run.info = info                  # pinned now: any later change taints the run
-        if img.frame_id != info.header.frame_id:
-            raise RunAbort(R.NO_CAMERA_INFO, f'image frame {img.frame_id!r} differs from '
-                           f'CameraInfo frame {info.header.frame_id!r}')
-        if img.gray.shape[1] != info.width or img.gray.shape[0] != info.height:
-            raise RunAbort(R.NO_CAMERA_INFO, 'image size differs from CameraInfo')
         base, tool = cfg.frames['base_frame'], cfg.frames['tool_frame']
         # TF at an image's stamp, retried with the NEWEST image each time (an early
         # frame can predate this node's TF history), until the deadline
@@ -576,11 +571,20 @@ class CalibrationNode(Node):
         while found is None and time.monotonic() < tf_deadline:
             self._check_jump(start)          # a reset here is reported as such
             self._drop_future_tf(base, tool, cfg)
+            self._check_cancel(goal_handle, run)
             img = self.images.latest() or img
             try:
+                # each newest frame must match the pinned CameraInfo and the clock; a
+                # queued frame from just before a camera change or a sim reset is
+                # skipped, and only the deadline turns a mismatch into an abort
+                if img.frame_id != info.header.frame_id:
+                    raise RunAbort(R.NO_CAMERA_INFO, f'image frame {img.frame_id!r} differs '
+                                   f'from CameraInfo frame {info.header.frame_id!r}')
+                if img.gray.shape[1] != info.width or img.gray.shape[0] != info.height:
+                    raise RunAbort(R.NO_CAMERA_INFO, 'image size differs from CameraInfo')
                 self._check_clock(img.stamp, img.received, cfg)
-            except RunAbort as e:            # an old-epoch frame right after a reset:
-                clock_error = e              # wait for newer frames until the deadline
+            except RunAbort as e:
+                clock_error = e
                 time.sleep(0.05)
                 continue
             clock_error = None
