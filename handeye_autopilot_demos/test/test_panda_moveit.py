@@ -216,7 +216,13 @@ def test_panda_demo_eye_to_hand_end_to_end(tmp_path):
         finally:
             _stop(proc)
     text = log_path.read_text()
-    lines = '\n'.join([ln for ln in text.splitlines() if 'demo_runner' in ln][-30:])
+    # the runner's lines, and every error/warning from MoveIt, the controllers and
+    # the spawners (what a CI failure needs to be diagnosed from the log alone)
+    noise = ('FIFO', 'unconnected trees', 'Unable to transform object', 'shape_mask',
+             'rcl.logging')
+    lines = '\n'.join([ln for ln in text.splitlines() if 'demo_runner' in ln or (
+        ('ERROR' in ln or 'WARN' in ln or 'rror' in ln) and
+        not any(n in ln for n in noise))][-80:])
     assert not timed_out, 'the demo did not finish in time:\n' + lines
     # the verdict, the runner's own clean exit, and the launch's exit code (the
     # demo launch exits 1 when the runner fails)
