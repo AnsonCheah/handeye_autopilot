@@ -206,18 +206,19 @@ MoveIt brand implicitly.
   carried object's ball, seed envelope, orientation limit), exactly: the core
   checked the nominal waypoints, and the planned path may deviate within the
   tolerance (M4 review). A failed check is `not_started`.
-- `ok` is reported only with fresh measured joints (a motion whose end joints
-  cannot be read is `failed`).
+- Every reply carries fresh measured joints: a motion whose end joints cannot
+  be read is `failed`, and so is a refused move when no fresh joints arrive
+  after it (the robot driver has stopped reporting).
 - Before any `ExecuteTrajectory` goal (Cartesian moves, box-checked planned
   moves) every trajectory point is re-checked against the current planning
   scene (`check_state_validity` at the points and between them, joints
   interpolated at ≤ 0.01 rad, at most 8 requests in flight: a service keeps
   only ~10 queued requests and drops the rest unanswered, seen with the real
-  `move_group` in M4): unlike a `MoveGroup` goal, an
+  `move_group` in M4; typically well under a second): unlike a `MoveGroup` goal, an
   `ExecuteTrajectory` goal does not re-check a path planned earlier.
   `shortcut:` MoveIt does not monitor scene changes during an
-  `ExecuteTrajectory` execution, and a scene update that arrives during the
-  few tens of ms of this check is treated the same way: obstacles that appear
+  `ExecuteTrajectory` execution, and a scene update that arrives during this
+  check is treated the same way: obstacles that appear
   then or mid-motion are the operator's, as with any MoveIt Cartesian motion
   (accepted in the M4 review).
 - A goal in flight is also cancelled when the run becomes invalid (clock
@@ -397,7 +398,9 @@ reason), `~/markers` (`MarkerArray`: board outline at the last accepted
 capture, in the optical frame).
 **Action:** `~/calibrate` (`Calibrate`). **Services:** `~/capture`,
 `~/finish`, `~/clear_fault`, `~/cancel` (M4) (`std_srvs/Trigger`).
-`~/cancel` stops the active run like an action cancel, from any terminal: an
+`~/finish` is manual mode only (refused in MoveIt mode: the plan decides
+when to solve). `~/cancel` stops the active run, whichever it is, like an
+action cancel, from any terminal: an
 action client whose goal-accepted reply was lost (DDS discovery under load,
 seen in M4 tests) has no goal handle to cancel with. Such a goal ends
 `ABORTED` with `error_code` `CANCELED` (the action protocol allows the
@@ -477,11 +480,13 @@ latest `base → tool` TF; publishes its own driver subtree
 the subtree rule (§9) is exercised.
 
 **Operator CLI (M4):** `ros2 run handeye_autopilot calibrate --mode … --execution …`
-sends the goal and prints progress and the result. If no goal reply arrives
-within `--accept-timeout` it calls `~/cancel` (the run may have started) and
-exits 2; Ctrl-C cancels the goal and waits for the result (else `~/cancel`),
-exit 130; exit 0 only for SUCCEEDED with every gate passed, 1 otherwise, 3 if
-rejected.
+sends the goal with an ID it chose and prints progress and the result. If no
+goal reply arrives within `--accept-timeout`, it cancels that goal ID through
+the action's own cancel service (the run may have started; a goal ID never
+names another operator's run), waits for its result, and exits 2; Ctrl-C
+cancels the goal and waits for its result, exit 130 (before the goal is sent,
+nothing is sent); exit 0 only for SUCCEEDED with every gate passed, 1
+otherwise, 3 if rejected.
 
 **Launch files:** `calibrate.launch.py` (node + parameters, `record:=true`
 adds `ros2 bag record` of the camera, TF, joint-state and annotated-image

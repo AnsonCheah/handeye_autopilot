@@ -34,6 +34,9 @@ def generate_launch_description():
         MoveItConfigsBuilder(robot_name='ur', package_name='ur_moveit_config')
         .robot_description_semantic(os.path.join('srdf', 'ur.srdf.xacro'), {'name': UR_TYPE})
         .sensors_3d(file_path=os.path.join(demos, 'config', 'sensors_3d.yaml'))
+        # RViz's MoveIt displays read the semantic description from move_group
+        .planning_scene_monitor(publish_robot_description=False,
+                                publish_robot_description_semantic=True)
         .to_moveit_configs()
     )
     octomap = {'octomap_frame': 'base_link', 'octomap_resolution': 0.02, 'max_range': 3.0}

@@ -67,8 +67,9 @@ ros2 run tf2_ros tf2_echo panda_link0 camera_link
 `calibrate` prints progress and the result, and Ctrl-C cancels the run
 (waiting until MoveIt confirms the robot stopped). It is
 `ros2 action send_goal` plus what an operator needs: if the node's
-goal-accepted reply is lost (DDS can drop it under load) it cancels the run
-itself instead of waiting forever. From any other terminal a run stops with
+goal-accepted reply is lost (DDS can drop it under load) it cancels its own
+goal instead of waiting forever. From any other terminal the active run
+(whoever started it) stops with
 `ros2 service call /handeye_autopilot/cancel std_srvs/srv/Trigger`.
 
 `result.launch.py` refuses a result whose quality gates failed, or one whose

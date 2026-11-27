@@ -25,6 +25,7 @@
   <exec_depend>moveit_msgs</exec_depend>
   <exec_depend>action_msgs</exec_depend>
   <exec_depend>shape_msgs</exec_depend>
+  <exec_depend>unique_identifier_msgs</exec_depend>
   <exec_depend>handeye_autopilot_interfaces</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>builtin_interfaces</exec_depend>

@@ -642,29 +642,60 @@ def test_cli_ctrl_c_cancels_the_goal(moveit_world, tmp_path):
             proc.kill()
 
 
-def test_cli_without_a_goal_reply_cancels_the_run(moveit_world, tmp_path):
-    """The goal reply never arrives (here: a server slower than the accept
-    timeout): the CLI calls the node's ~/cancel itself and exits 2."""
-    from rclpy.action import ActionServer, GoalResponse
-    from std_srvs.srv import Trigger
+def test_cli_without_a_goal_reply_cancels_its_own_goal(moveit_world, tmp_path):
+    """The goal reply does not arrive in time (here: a server that admits slower
+    than the accept timeout): the CLI cancels ITS goal by ID through the action's
+    cancel service, waits for its result, and exits 2."""
+    from rclpy.action import ActionServer, CancelResponse, GoalResponse
+    from rclpy.callback_groups import ReentrantCallbackGroup
     w = moveit_world()
-    calls = []
+    cancelled = []
 
     def slow_admit(_goal):
-        time.sleep(6.0)
-        return GoalResponse.REJECT
-    from rclpy.callback_groups import ReentrantCallbackGroup
-    cb = ReentrantCallbackGroup()
-    ActionServer(w.client, Calibrate, '/dummy/calibrate', lambda h: Calibrate.Result(),
-                 goal_callback=slow_admit, callback_group=cb)
+        time.sleep(3.0)
+        return GoalResponse.ACCEPT
 
-    def cancel(req, res):
-        calls.append(1)
-        res.success, res.message = True, 'cancelling the active run'
-        return res
-    w.client.create_service(Trigger, '/dummy/cancel', cancel, callback_group=cb)
+    def execute(handle):
+        while not handle.is_cancel_requested:
+            time.sleep(0.05)
+        r = Calibrate.Result(error_code=Calibrate.Result.CANCELED, message='cancelled')
+        handle.canceled(r)
+        return r
+
+    def on_cancel(handle):
+        cancelled.append(bytes(handle.goal_id.uuid))
+        return CancelResponse.ACCEPT
+    ActionServer(w.client, Calibrate, '/dummy/calibrate', execute, goal_callback=slow_admit,
+                 cancel_callback=on_cancel, callback_group=ReentrantCallbackGroup())
     time.sleep(2.0)
     log = tmp_path / 'cli.log'
     proc = _cli(['--mode', 'eye_to_hand', '--node', '/dummy', '--accept-timeout', '1'], log)
     assert proc.wait(timeout=60) == 2, log.read_text()
-    assert calls, log.read_text()
+    assert len(cancelled) == 1, log.read_text()
+    assert 'stopped' in log.read_text()
+
+
+def test_cli_rejected_goal_leaves_the_other_run_alone(moveit_world, tmp_path):
+    """A second operator's goal is rejected (busy): the CLI exits 3 and the
+    first operator's run is not cancelled."""
+    w = moveit_world()
+    w.moveit.motion_time = 20.0
+    h = w.driver.send(execution='moveit')
+    _wait(lambda: w.moveit.goals, 120.0, 'no motion goal')
+    log = tmp_path / 'cli.log'
+    proc = _cli(['--mode', 'eye_to_hand'], log)
+    assert proc.wait(timeout=60) == 3, log.read_text()
+    assert not w.moveit.cancels and w.node._run is not None
+    w.driver.wait(h.cancel_goal_async(), 10.0)
+
+
+def test_finish_is_refused_in_moveit_mode(moveit_world):
+    """~/finish belongs to manual mode: in MoveIt mode the plan decides when to
+    solve, so the request is refused rather than acknowledged and ignored."""
+    w = moveit_world()
+    h = w.driver.send(execution='moveit')
+    _wait(lambda: any(f.phase == FB.PHASE_CAPTURING for f in w.driver.feedback), 120.0,
+          'no capture')
+    res = w.driver.call(w.driver.finish)
+    assert not res.success
+    w.driver.wait(h.cancel_goal_async(), 10.0)

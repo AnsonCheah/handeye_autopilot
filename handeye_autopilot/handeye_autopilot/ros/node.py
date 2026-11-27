@@ -126,6 +126,7 @@ class RunState:
     records: list[CaptureRecord] = field(default_factory=list)
     motion_note: str = ''               # why the last motion was not 'ok' (for the message)
     action_cancel: bool = False         # the cancel came through the action (not ~/cancel)
+    execution: str = ''                 # the goal's execution (manual / moveit)
 
 
 class CalibrationNode(Node):
@@ -295,7 +296,7 @@ class CalibrationNode(Node):
                 # reserve the slot before the next goal, and snapshot the parameters
                 # now: later parameter changes must not reach an accepted run (§5)
                 self._run = RunState(snapshot=P.node_values(self), jumps=self._jumps,
-                                     profile_text=profile_text)
+                                     profile_text=profile_text, execution=goal.execution)
         if reason:
             self.get_logger().warning(f'goal rejected: {reason}')
             return GoalResponse.REJECT
@@ -330,7 +331,8 @@ class CalibrationNode(Node):
     def _srv_finish(self, req: Trigger.Request, res: Trigger.Response) -> Trigger.Response:
         with self._lock:
             run = self._run
-            if run is None or run.phase not in (FB.PHASE_MANUAL_CAPTURE, FB.PHASE_CAPTURING):
+            if run is None or run.execution != Calibrate.Goal.EXECUTION_MANUAL or \
+                    run.phase not in (FB.PHASE_MANUAL_CAPTURE, FB.PHASE_CAPTURING):
                 res.success, res.message = False, 'not in the manual capture phase'
             elif run.accepted < run.min_captures:
                 res.success, res.message = False, (
@@ -1191,7 +1193,9 @@ class CalibrationNode(Node):
         §3.2); the earlier sample only if none arrive."""
         self.get_logger().info(f'motion not started: {why}')
         fresh = self._joints_now(cfg.moveit.joint_names, time.monotonic(), 2.0, run)
-        joints = fresh if fresh is not None else joints
+        if fresh is None:            # every reply carries fresh joints (§3.2)
+            return self._failed(run, f'{why}; and no fresh /joint_states after it', None)
+        joints = fresh
         got = tf_tools.latest(self.tf_buffer, cfg.frames['base_frame'], cfg.frames['tool_frame'])
         return S.MOTION_NOT_STARTED, joints, None if got is None else got[0]
 

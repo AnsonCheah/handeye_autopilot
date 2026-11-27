@@ -4,11 +4,14 @@
 
 Like ``ros2 action send_goal --feedback``, with what an operator needs on top:
 
+- the goal carries an ID chosen here, so it can always be cancelled by that
+  ID through the action's own cancel service, even without the goal handle,
+  and never another operator's run;
 - if the node does not answer the goal within ``--accept-timeout`` (DDS can
-  drop the goal-accepted reply under load, seen in M4), it calls the node's
-  ``~/cancel`` (the run may have started without us) and exits 2;
-- Ctrl-C cancels the goal and waits for the result (MoveIt confirming the
-  stop); without a result it calls ``~/cancel`` too, then exits 130;
+  drop the goal-accepted reply under load, seen in M4), it cancels that goal
+  ID (the run may have started without us), waits for its result, exits 2;
+- Ctrl-C cancels the goal and waits for its result (MoveIt confirming the
+  stop), then exits 130; Ctrl-C before the goal is sent sends nothing;
 - prints progress and the result, and exits 0 only if the run SUCCEEDED and
   passed every quality gate (1 otherwise, 3 if the goal was rejected; the
   node logs why).
@@ -26,14 +29,16 @@ import sys
 import threading
 import time
 from typing import Any
+import uuid
 
 from action_msgs.msg import GoalStatus
+from action_msgs.srv import CancelGoal
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.signals import SignalHandlerOptions
-from std_srvs.srv import Trigger
+from unique_identifier_msgs.msg import UUID
 
 from handeye_autopilot_interfaces.action import Calibrate
 
@@ -43,25 +48,39 @@ CODES = {v: k for k, v in vars(Calibrate.Result).items()
          if k.isupper() and isinstance(v, int)}
 
 
-def _stop_run(node: Node, ns: str, why: str) -> None:
-    """Cancel whatever run the node has through ~/cancel; retried a few times,
-    since a goal still being admitted has no run to cancel yet."""
-    cli = node.create_client(Trigger, f'{ns}/cancel')
-    if not cli.wait_for_service(timeout_sec=5.0):
-        print(f'{why}; {ns}/cancel is not available: check the node and the robot',
-              file=sys.stderr)
+def _cancel_by_id(node: Node, ns: str, goal_id: UUID, timeout: float, why: str) -> None:
+    """Cancel OUR goal by its ID through the action's cancel service (no goal
+    handle needed), retried while the node may still be admitting it, then wait
+    for its result: the confirmation that the run, and its motion, stopped."""
+    cancel = node.create_client(CancelGoal, f'{ns}/calibrate/_action/cancel_goal')
+    result = node.create_client(Calibrate.Impl.GetResultService,
+                                f'{ns}/calibrate/_action/get_result')
+    if not cancel.wait_for_service(timeout_sec=5.0):
+        print(f'{why}; the action cancel service is not available: check the node and '
+              'the robot', file=sys.stderr)
         return
+    req = CancelGoal.Request()
+    req.goal_info.goal_id = goal_id
     for _attempt in range(3):
-        fut = cli.call_async(Trigger.Request())
+        fut = cancel.call_async(req)
         if not wait_future(fut, 10.0):
-            print(f'{why}; {ns}/cancel did not answer: check the node and the robot',
-                  file=sys.stderr)
-            return
+            break
         r = fut.result()
-        print(f'{why}; {ns}/cancel: {r.message}', file=sys.stderr)
-        if r.success:
+        if r.return_code == CancelGoal.Response.ERROR_NONE:
+            print(f'{why}: cancelling our goal; waiting for it to stop...', file=sys.stderr,
+                  flush=True)
+            got = result.call_async(Calibrate.Impl.GetResultService.Request(goal_id=goal_id))
+            if wait_future(got, timeout):
+                print(f'stopped: {got.result().result.message}', file=sys.stderr)
+            else:
+                print('no result after the cancel: check the robot', file=sys.stderr)
             return
-        time.sleep(2.0)
+        if r.return_code == CancelGoal.Response.ERROR_GOAL_TERMINATED:
+            print(f'{why}: our goal had already ended', file=sys.stderr)
+            return
+        time.sleep(2.0)                    # unknown yet: may still be being admitted
+    print(f'{why}: the node does not know our goal (never accepted, or ended)',
+          file=sys.stderr)
 
 
 def run(args: argparse.Namespace, node: Node, interrupted: threading.Event) -> int:
@@ -81,11 +100,15 @@ def run(args: argparse.Namespace, node: Node, interrupted: threading.Event) -> i
             print(line + (f' - {f.last_rejection_detail}' if f.last_rejection_detail and
                           f.last_rejection_detail != last['detail'] else ''), flush=True)
         last['phase'], last['detail'] = f.phase, f.last_rejection_detail
+    if interrupted.is_set():
+        return 130                          # nothing sent
     goal = Calibrate.Goal(mode=args.mode, execution=args.execution, profile=args.profile)
-    send = client.send_goal_async(goal, feedback_callback=feedback)
+    goal_id = UUID(uuid=list(uuid.uuid4().bytes))
+    send = client.send_goal_async(goal, feedback_callback=feedback, goal_uuid=goal_id)
     if not wait_future(send, args.accept_timeout, interrupted):
         # the node may have accepted it and started (with motion) without us
-        _stop_run(node, ns, 'no goal reply' if not interrupted.is_set() else 'interrupted')
+        _cancel_by_id(node, ns, goal_id, args.cancel_timeout,
+                      'no goal reply' if not interrupted.is_set() else 'interrupted')
         return 130 if interrupted.is_set() else 2
     handle = send.result()
     if not handle.accepted:
@@ -99,7 +122,7 @@ def run(args: argparse.Namespace, node: Node, interrupted: threading.Event) -> i
             print('cancelling (waiting for the robot to stop)...', file=sys.stderr, flush=True)
             handle.cancel_goal_async()
             if not wait_future(res_fut, args.cancel_timeout):
-                _stop_run(node, ns, 'no result after the cancel')
+                print('no result after the cancel: check the robot', file=sys.stderr)
                 return 130
             break
         time.sleep(0.05)
