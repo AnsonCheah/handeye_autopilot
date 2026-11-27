@@ -1172,8 +1172,33 @@ def test_a_queued_old_resolution_frame_does_not_abort_preflight(world_factory):
     old = Image(encoding='mono8', width=4, height=4, step=4, data=bytes(16))
     old.header.frame_id = 'camera_optical_frame'
     old.header.stamp = w.node.get_clock().now().to_msg()
+    w.camera.timer.cancel()                       # pause the stream ...
+    time.sleep(0.2)
     h = w.driver.send()
-    w.node._on_image(old)                         # a stale, wrong-size frame queued first
+    w.node._on_image(old)                         # ... so preflight sees the stale frame
+    time.sleep(0.5)
+    assert w.node._run.phase == FB.PHASE_PREFLIGHT  # still waiting, not aborted
+    w.camera.timer.reset()                        # matching frames resume
+    w.driver.wait_phase(FB.PHASE_MANUAL_CAPTURE, timeout=15.0)
+    w.driver.wait(h.cancel_goal_async())
+    w.result(h)
+
+
+def test_new_resolution_image_before_its_camera_info(world_factory):
+    """Camera changes resolution: the new image arrives before its CameraInfo.
+    Preflight must re-read CameraInfo and pin the matching pair."""
+    w = world_factory()
+    from sensor_msgs.msg import Image
+    w.camera.timer.cancel()
+    old_info = w.node._info
+    big = Image(encoding='mono8', width=8, height=8, step=8, data=bytes(64))
+    big.header.frame_id = 'camera_optical_frame'
+    big.header.stamp = w.node.get_clock().now().to_msg()
+    h = w.driver.send()
+    w.node._on_image(big)                         # new-size image, old CameraInfo cached
+    time.sleep(0.3)
+    w.node._on_info(old_info)                     # (old info still current)
+    w.camera.timer.reset()                        # the real stream resumes (matching pairs)
     w.driver.wait_phase(FB.PHASE_MANUAL_CAPTURE, timeout=15.0)
     w.driver.wait(h.cancel_goal_async())
     w.result(h)

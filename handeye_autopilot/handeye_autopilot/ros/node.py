@@ -556,12 +556,6 @@ class CalibrationNode(Node):
                                f'{t.camera_info_timeout:.0f} s; check the camera topics '
                                '(remap "image" and "camera_info")')
             time.sleep(0.05)
-        try:
-            camera = camera_model(info, cfg.image_is_rectified)
-        except CameraInfoError as e:
-            raise RunAbort(R.NO_CAMERA_INFO, str(e)) from e
-        with self._lock:
-            run.info = info                  # pinned now: any later change taints the run
         base, tool = cfg.frames['base_frame'], cfg.frames['tool_frame']
         # TF at an image's stamp, retried with the NEWEST image each time (an early
         # frame can predate this node's TF history), until the deadline
@@ -573,6 +567,8 @@ class CalibrationNode(Node):
             self._drop_future_tf(base, tool, cfg)
             self._check_cancel(goal_handle, run)
             img = self.images.latest() or img
+            with self._info_lock:            # the newest CameraInfo too: around a camera
+                info = self._info or info    # change, image and info arrive in either order
             try:
                 # each newest frame must match the pinned CameraInfo and the clock; a
                 # queued frame from just before a camera change or a sim reset is
@@ -601,6 +597,13 @@ class CalibrationNode(Node):
                        'use different clocks (use_sim_time / device clocks)')
             raise RunAbort(R.TF_UNAVAILABLE, f'no TF {base} -> {tool} at the image stamp; '
                            + why)
+        # pin the CameraInfo of the matching (image, info) pair just used
+        try:
+            camera = camera_model(info, cfg.image_is_rectified)
+        except CameraInfoError as e:
+            raise RunAbort(R.NO_CAMERA_INFO, str(e)) from e
+        with self._lock:
+            run.info = info                  # pinned now: any later change taints the run
         return camera, info
 
     def _check_jump(self, since: float, run: RunState | None = None) -> None:
