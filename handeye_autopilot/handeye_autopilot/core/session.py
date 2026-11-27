@@ -171,6 +171,14 @@ class Session:
         """Captures so far (read-only use: the driver shows the newest one)."""
         return list(self._st.records)
 
+    def check_pose(self, G: Mat) -> str | None:
+        """The limits a move is checked against (box incl. the carried object's
+        L_max ball, seed envelope, orientation), for a measured or planned tool
+        pose; None before the seed is known or when G is inside them."""
+        if self._st.seed_tool is None:
+            return None
+        return self._limit_reason(np.asarray(G, dtype=float))
+
     def next_action(self) -> Action:
         return self._pending
 

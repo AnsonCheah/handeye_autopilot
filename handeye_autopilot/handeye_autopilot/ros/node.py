@@ -72,7 +72,14 @@ from ..core.solver import TOO_FEW_CAPTURES
 from . import params as P
 from . import tf_tools, viz
 from .camera_input import CameraInfoError, ImageBuffer, camera_model, same_info
-from .moveit_client import SUCCESS, TERMINAL, GoalOutcome, MoveItClient, error_name
+from .moveit_client import (
+    SUCCESS,
+    TERMINAL,
+    GoalOutcome,
+    MoveItClient,
+    dense_samples,
+    error_name,
+)
 from .publish_result import PUBLISHABLE
 
 R = Calibrate.Result
@@ -811,7 +818,8 @@ class CalibrationNode(Node):
                 self._feedback(goal_handle, run)
             if isinstance(action, S.Move):
                 outcome, joints, pose = self._motion(goal_handle, run, cfg, action, ik_link,
-                                                     tool_T_ik, path, mode)
+                                                     tool_T_ik, path, mode,
+                                                     session.check_pose)
                 session.on_motion(outcome, joints, pose)
                 continue
             frames, images, _, detail = self._collect(goal_handle, run, cfg, info)
@@ -934,7 +942,8 @@ class CalibrationNode(Node):
             time.sleep(0.02)
 
     def _motion(self, goal_handle: Any, run: RunState, cfg: P.RunConfig, a: S.Move,
-                ik_link: str, tool_T_ik: Any, path: Any, mode: str) -> tuple[str, Any, Any]:
+                ik_link: str, tool_T_ik: Any, path: Any, mode: str,
+                check_pose: Any = None) -> tuple[str, Any, Any]:
         """One Move (§3.2) -> (outcome, measured joints, measured tool pose).
 
         ok: goal accepted, SUCCEEDED with SUCCESS, and the measured TF tool pose
@@ -968,7 +977,8 @@ class CalibrationNode(Node):
             # points is not enough: the measured tool path must be the straight one
             # the core checked (01-architecture §3.2)
             why = plan.note if not plan.ok else self._off_straight_path(
-                plan.trajectory, a.waypoints, a.tool_pose, cfg, ik_link, tool_T_ik, run, mode) or \
+                plan.trajectory, a.waypoints, a.tool_pose, cfg, ik_link, tool_T_ik, run,
+            check_pose) or \
                 self.moveit.invalid_state(plan.trajectory, mi.group_name, mi.service_timeout,
                                           run.cancelled)
             self._check_cancel(goal_handle, run)
@@ -1038,6 +1048,8 @@ class CalibrationNode(Node):
             return self._failed(run, f'no settled measurement after the motion: {s.reason}',
                                 after)
         after = self._joints_now(mi.joint_names, time.monotonic(), 2.0, run)
+        if after is None:            # 'ok' always carries fresh measured joints (§3.2)
+            return self._failed(run, 'no fresh /joint_states after the motion', None, s.pose)
         dt = tf.translation_distance(s.pose, a.tool_pose)
         dr = tf.rotation_angle(s.pose, a.tool_pose)
         if not (dt <= mi.pose_tolerance_translation and dr <= mi.pose_tolerance_rotation):
@@ -1058,7 +1070,7 @@ class CalibrationNode(Node):
 
     def _off_straight_path(self, traj: Any, waypoints: list[Any], target: Any,
                            cfg: P.RunConfig, ik_link: str, tool_T_ik: Any,
-                           run: RunState, mode: str) -> str:
+                           run: RunState, check_pose: Any) -> str:
         """A checked short move must follow the straight tool path the core
         checked: through FK of the planned trajectory (joints interpolated at
         <= 0.01 rad), every tool position within ``pose_tolerance_translation``
@@ -1071,10 +1083,7 @@ class CalibrationNode(Node):
         q = np.array([list(p.positions) for p in jt.points], dtype=float)
         if len(q) == 0 or not np.all(np.isfinite(q)):
             return 'the Cartesian path has no or invalid points'
-        samples = [q[0]]
-        for a, b in zip(q[:-1], q[1:], strict=True):
-            n = max(1, int(np.ceil(float(np.max(np.abs(b - a))) / 0.01)))
-            samples += [a + (b - a) * k / n for k in range(1, n + 1)]
+        samples = dense_samples(q)
         poses = self.moveit.fk_poses(list(jt.joint_names), samples, ik_link,
                                      cfg.frames['base_frame'], mi.service_timeout,
                                      run.cancelled)
@@ -1097,10 +1106,11 @@ class CalibrationNode(Node):
                         f'{d * 1000:.1f} mm / {math.degrees(max(0.0, r - half)):.2f} deg '
                         '(a joint-space jump)')
             # the core checked the nominal waypoints; the path really driven may
-            # deviate within the tolerance, so the box is checked on it too
-            why = _box_violation(G, cfg, mode, 0.0)
+            # deviate within the tolerance, so every limit (box, carried object,
+            # seed envelope, orientation) is checked on it too, exactly (FK poses)
+            why = check_pose(G)
             if why:
-                return f'the Cartesian path as planned {why}'
+                return f'the Cartesian path as planned breaks a limit ({why})'
         return ''
 
     def _path_outside_box(self, traj: Any, cfg: P.RunConfig, ik_link: str, tool_T_ik: Any,
@@ -1114,10 +1124,7 @@ class CalibrationNode(Node):
         q = np.array([list(p.positions) for p in jt.points], dtype=float)
         if not np.all(np.isfinite(q)):
             return 'the planned trajectory has invalid joint values'
-        samples = [q[0]]
-        for a, b in zip(q[:-1], q[1:], strict=True):
-            n = max(1, int(np.ceil(float(np.max(np.abs(b - a))) / 0.01)))
-            samples += [a + (b - a) * k / n for k in range(1, n + 1)]
+        samples = dense_samples(q)
         poses = self.moveit.fk_poses(list(jt.joint_names), samples, ik_link,
                                      cfg.frames['base_frame'], cfg.moveit.service_timeout,
                                      run.cancelled)

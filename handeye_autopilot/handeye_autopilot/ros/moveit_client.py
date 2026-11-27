@@ -76,6 +76,16 @@ def to_pose(T: Mat) -> Pose:
     return p
 
 
+def dense_samples(q: NDArray[np.float64], step: float = 0.01) -> list[NDArray[np.float64]]:
+    """Joint vectors along a trajectory's points, linearly interpolated so that no
+    joint moves more than ``step`` rad between samples (endpoints included)."""
+    out = [q[0]]
+    for a, b in zip(q[:-1], q[1:], strict=True):
+        n = max(1, int(np.ceil(float(np.max(np.abs(b - a))) / step)))
+        out += [a + (b - a) * k / n for k in range(1, n + 1)]
+    return out
+
+
 def wait_future(fut: Any, timeout: float,
                 cancelled: threading.Event | Callable[[], bool] | None = None,
                 poll: float = 0.01) -> bool:
@@ -345,26 +355,33 @@ class MoveItClient:
 
     def invalid_state(self, traj: RobotTrajectory, group: str, timeout: float,
                       cancelled: threading.Event | None = None) -> str:
-        """Every trajectory point against the CURRENT planning scene (attached
-        bodies included), right before execution: ExecuteTrajectory, unlike a
-        MoveGroup goal, does not re-check a trajectory planned earlier. All
-        requests go out at once, so the check spans one scene snapshot as far as
-        possible (a few ms). '' if all are valid, else why."""
+        """The trajectory against the CURRENT planning scene (attached bodies
+        included), right before execution: ExecuteTrajectory, unlike a MoveGroup
+        goal, does not re-check a trajectory planned earlier. Checked at its points
+        and between them (joints interpolated at <= 0.01 rad). All requests go out
+        at once, so the check spans one scene snapshot as far as possible.
+        ``shortcut:`` a scene update that arrives during these few tens of ms is
+        treated like one arriving just after dispatch: not handled (MoveIt does
+        not monitor ExecuteTrajectory motions either). '' if valid, else why."""
         jt = traj.joint_trajectory
+        q = np.array([list(p.positions) for p in jt.points], dtype=float)
+        if len(q) == 0 or not np.all(np.isfinite(q)):
+            return 'the trajectory has no or invalid points'
         futs = []
-        for p in jt.points:
+        for sample in dense_samples(q):
             req = GetStateValidity.Request()
             req.group_name = group
             req.robot_state.is_diff = True
             req.robot_state.joint_state.name = list(jt.joint_names)
-            req.robot_state.joint_state.position = [float(v) for v in p.positions]
+            req.robot_state.joint_state.position = [float(v) for v in sample]
             futs.append(self.validity.call_async(req))
         deadline = time.monotonic() + timeout
         for k, fut in enumerate(futs):
             if not wait_future(fut, max(0.0, deadline - time.monotonic()), cancelled):
                 return 'check_state_validity did not reply'
             if not fut.result().valid:
-                return f'trajectory point {k} is no longer valid in the current planning scene'
+                return f'the trajectory (sample {k}) is no longer valid in the current ' \
+                       'planning scene'
         return ''
 
     def attached_links(self, timeout: float) -> set[str] | None:

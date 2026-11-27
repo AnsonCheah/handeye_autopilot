@@ -281,20 +281,40 @@ def test_bad_cartesian_paths_are_never_executed(moveit_world, fault):
     assert not [k for k, _ in w.moveit.goals if k == 'execute']
 
 
-def test_cartesian_path_is_box_checked_as_planned(moveit_world):
+@pytest.mark.parametrize('limit', ['box', 'envelope'])
+def test_cartesian_path_is_limit_checked_as_planned(moveit_world, limit):
     """The core checks the nominal waypoints; the path MoveIt plans may deviate
     within the straight-path tolerance. Here the tolerance is loose and the
-    planned path swings 5 cm up through the box top: refused, nothing runs."""
+    planned path swings 5 cm up, through the box top or out of the seed
+    envelope: refused, nothing runs."""
     w = moveit_world(node_over={'moveit.pose_tolerance_translation': 0.2})
     G0 = w.robot.G
-    w.node.set_parameters([
-        rclpy.parameter.Parameter('session.box_enabled', value=True),
-        rclpy.parameter.Parameter('session.box_xyz', value=[float(v) for v in G0[:3, 3]]),
-        rclpy.parameter.Parameter('session.box_size', value=[2.0, 2.0, 0.06])])
+    if limit == 'box':
+        w.node.set_parameters([
+            rclpy.parameter.Parameter('session.box_enabled', value=True),
+            rclpy.parameter.Parameter('session.box_xyz',
+                                      value=[float(v) for v in G0[:3, 3]]),
+            rclpy.parameter.Parameter('session.box_size', value=[2.0, 2.0, 0.06])])
+    else:
+        w.node.set_parameters([rclpy.parameter.Parameter('session.envelope_radius',
+                                                         value=0.035)])
     w.moveit.cart_swing = True
     out = w.result(w.driver.send(execution='moveit'), timeout=120.0)
     assert out.result.error_code == R.NOT_ENOUGH_SAMPLES, out.result.message
     assert not [k for k, _ in w.moveit.goals if k == 'execute']
+
+
+def test_ok_needs_fresh_joints_after_the_motion(moveit_world):
+    """§3.2: 'ok' carries fresh measured joints; if /joint_states stops, the
+    motion's end state is unknown: MOTION_FAILED."""
+    w = moveit_world()
+    w.moveit.motion_time = 2.0
+    h = w.driver.send(execution='moveit')
+    _wait(lambda: w.moveit.goals, 120.0, 'no motion goal')
+    w.moveit.publish_joints = False
+    out = w.result(h, timeout=60.0)
+    assert out.result.error_code == R.MOTION_FAILED, out.result.message
+    assert 'joint_states' in out.result.message
 
 
 def test_camera_change_during_a_motion_stops_it(moveit_world):
@@ -527,6 +547,11 @@ def test_ctrl_c_cancels_the_motion_before_exiting(moveit_world, tmp_path):
     try:
         _wait(lambda: 'ready: send a goal' in log_path.read_text(), 60.0, 'node not ready')
         d = Driver(w.client, ns='/handeye_sub')
+        assert d.action.wait_for_server(timeout_sec=60.0)
+        # DDS discovery is per direction: under load the server can see our goal
+        # request before it has matched our response reader, and the goal reply
+        # is then dropped ('failed to send response'); let discovery settle first
+        time.sleep(2.0)
         h = d.send(execution='moveit', timeout=60.0)
         assert h.accepted
         _wait(lambda: w.moveit.goals, 120.0, 'no motion goal')

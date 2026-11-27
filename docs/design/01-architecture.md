@@ -202,17 +202,23 @@ MoveIt brand implicitly.
   path re-timed and resampled (a branch flip can be spread over small steps),
   the tool path itself: FK of the trajectory (joints interpolated at ≤ 0.01
   rad) must stay within the end-pose tolerances of the straight waypoint path,
-  and with the box enabled every FK sample is box-checked as well (the core
-  checked the nominal waypoints; the planned path may deviate within the
-  tolerance) (M4 review). A failed check is `not_started`.
+  and every FK sample must pass the same limits as the waypoints (box with the
+  carried object's ball, seed envelope, orientation limit), exactly: the core
+  checked the nominal waypoints, and the planned path may deviate within the
+  tolerance (M4 review). A failed check is `not_started`.
+- `ok` is reported only with fresh measured joints (a motion whose end joints
+  cannot be read is `failed`).
 - Before any `ExecuteTrajectory` goal (Cartesian moves, box-checked planned
   moves) every trajectory point is re-checked against the current planning
-  scene (`check_state_validity`, all requests sent at once so the check
-  spans one scene snapshot as far as possible): unlike a `MoveGroup` goal, an
+  scene (`check_state_validity` at the points and between them, joints
+  interpolated at ≤ 0.01 rad, all requests sent at once so the check spans one
+  scene snapshot as far as possible): unlike a `MoveGroup` goal, an
   `ExecuteTrajectory` goal does not re-check a path planned earlier.
   `shortcut:` MoveIt does not monitor scene changes during an
-  `ExecuteTrajectory` execution either; obstacles that appear mid-motion are
-  the operator's (as with any MoveIt Cartesian motion).
+  `ExecuteTrajectory` execution, and a scene update that arrives during the
+  few tens of ms of this check is treated the same way: obstacles that appear
+  then or mid-motion are the operator's, as with any MoveIt Cartesian motion
+  (accepted in the M4 review).
 - A goal in flight is also cancelled when the run becomes invalid (clock
   reset, CameraInfo change), not only noticed after it ends.
 - Joint measurements count only when received after the request **and**

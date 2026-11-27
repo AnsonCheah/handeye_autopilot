@@ -246,6 +246,7 @@ class FakeMoveIt(Node):
         self.cart_swing = False          # Cartesian paths that swing 5 cm off the line
                                          # in small steps (no single jump)
         self.invalid_states = False      # check_state_validity says invalid
+        self.publish_joints = True       # False: /joint_states stops
         self.cart_fraction = None        # override the reported path fraction
         self.plans = 0                   # plan-only MoveGroup requests
         self.executed: list = []         # trajectories actually executed (joint lists)
@@ -291,6 +292,8 @@ class FakeMoveIt(Node):
         self._release.set()
 
     def _joints(self):
+        if not self.publish_joints:
+            return
         m = self._JointState()
         m.header.stamp = self.get_clock().now().to_msg()
         m.name = list(JOINTS)
