@@ -706,7 +706,9 @@ def test_finish_is_refused_in_moveit_mode(moveit_world):
     solve, so the request is refused rather than acknowledged and ignored."""
     w = moveit_world()
     h = w.driver.send(execution='moveit')
-    _wait(lambda: any(f.phase == FB.PHASE_CAPTURING for f in w.driver.feedback), 120.0,
+    # 'capturing' comes after bootstrap, centring and planning (minutes on a slow
+    # runner): the refusal must hold in that phase, where manual mode accepts it
+    _wait(lambda: any(f.phase == FB.PHASE_CAPTURING for f in w.driver.feedback), 300.0,
           'no capture')
     res = w.driver.call(w.driver.finish)
     assert not res.success

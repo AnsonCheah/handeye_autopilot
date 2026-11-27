@@ -120,6 +120,12 @@ class Driver:
 
     def send(self, mode='eye_to_hand', execution='manual', profile='', timeout=10.0):
         assert self.action.wait_for_server(timeout_sec=timeout)
+        if not getattr(self, '_settled', False):
+            # first contact: DDS discovery is per direction, and a goal reply sent
+            # before the server has matched our reply reader is lost (seen on
+            # loaded CI runners)
+            time.sleep(1.0)
+            self._settled = True
         g = Calibrate.Goal(mode=mode, execution=execution, profile=profile)
         return self.wait(self.action.send_goal_async(
             g, feedback_callback=lambda f: self.feedback.append(f.feedback)), timeout)
