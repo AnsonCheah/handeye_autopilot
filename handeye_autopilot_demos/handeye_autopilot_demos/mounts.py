@@ -72,6 +72,12 @@ def moved_mount(mount: Mat, case: dict[str, Any]) -> Mat:
     return out
 
 
+def board_centre(board: dict[str, Any]) -> np.ndarray:
+    """The board centre in the board frame (origin at a corner, board in +x +y)."""
+    return np.array([board['squares_x'] * board['square_length'] / 2,
+                     board['squares_y'] * board['square_length'] / 2, 0.0])
+
+
 def case_config(cfg: dict[str, Any], mode: str, seed_tool: Mat,
                 case: dict[str, Any], margin: float = 0.02) -> dict[str, Any]:
     """A copy of the robot's demo config with the case's mounts.
@@ -79,7 +85,9 @@ def case_config(cfg: dict[str, Any], mode: str, seed_tool: Mat,
     ``seed_tool``: base -> tool at the seed joints (FK). The fixed object moves
     so the camera's view of the board at the seed is unchanged. The node's
     ``lever_max`` becomes the new lever arm's largest component plus
-    ``margin``: what an operator would measure and enter.
+    ``margin``: what an operator would measure and enter. The lever arm is
+    tool -> board centre (eye-to-hand) or tool -> camera origin (eye-in-hand),
+    the references of the bootstrap bound (02-features §B).
     """
     out = copy.deepcopy(cfg)
     t = out[mode]
@@ -89,7 +97,7 @@ def case_config(cfg: dict[str, Any], mode: str, seed_tool: Mat,
         view = inv(cam) @ G @ brd       # camera_T_board at the seed
         brd = moved_mount(brd, case)
         cam = G @ brd @ inv(view)
-        lever = brd[:3, 3]
+        lever = (brd @ np.r_[board_centre(out['board']), 1.0])[:3]   # 02-features §B
     else:                               # tool_T_cam, base_T_board
         view = inv(cam) @ inv(G) @ brd
         cam = moved_mount(cam, case)

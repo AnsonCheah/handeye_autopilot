@@ -40,6 +40,12 @@ MODES = ('eye_to_hand', 'eye_in_hand')
 ERR = re.compile(r'error against the true camera mount: ([\d.]+) mm, ([\d.]+) deg')
 FINISHED = re.compile(r'finished: status (\d+), error_code (\d+): (.*)')
 CAPTURES = re.compile(r'captures accepted (\d+), rejected (\d+)')
+# the runner's seed-move failure with collision evidence from MoveIt
+SEED_COLLISION = re.compile(r'could not reach the seed: status \d+, '
+                            r'(START_STATE_IN_COLLISION|GOAL_IN_COLLISION)')
+STOP = threading.Event()                 # Ctrl-C: launch nothing more
+_running: set[subprocess.Popen] = set()  # launches to stop on Ctrl-C
+_running_lock = threading.Lock()
 
 
 def seed_tool_pose(robot: str, cfg: dict[str, Any], domain: int) -> Any:
@@ -51,12 +57,13 @@ def seed_tool_pose(robot: str, cfg: dict[str, Any], domain: int) -> Any:
 
     r = cfg['robot']
     env = dict(os.environ, ROS_DOMAIN_ID=str(domain))
-    proc = subprocess.Popen(['ros2', 'launch', 'handeye_autopilot_demos', r['launch']],
-                            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            start_new_session=True)
     ctx = rclpy.Context()
-    rclpy.init(context=ctx, domain_id=domain)
+    proc = None
     try:
+        proc = subprocess.Popen(['ros2', 'launch', 'handeye_autopilot_demos', r['launch']],
+                                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+        rclpy.init(context=ctx, domain_id=domain)
         node = rclpy.create_node('sweep_fk', context=ctx)
         ex = MultiThreadedExecutor(num_threads=2, context=ctx)
         ex.add_node(node)
@@ -76,8 +83,10 @@ def seed_tool_pose(robot: str, cfg: dict[str, Any], domain: int) -> Any:
         ex.shutdown(timeout_sec=2.0)
         return out[0]
     finally:
-        rclpy.shutdown(context=ctx)
-        _stop(proc)
+        if ctx.ok():
+            rclpy.shutdown(context=ctx)
+        if proc is not None:
+            _stop(proc)
 
 
 def _stop(proc: subprocess.Popen) -> None:
@@ -95,18 +104,25 @@ def run_case(job: dict[str, Any], domains: queue.Queue, timeout: float) -> dict[
     t0 = time.time()
     try:
         log = Path(job['dir']) / 'launch.log'
-        with open(log, 'w') as f:
+        with open(log, 'w') as f, _running_lock:
+            if STOP.is_set():
+                return dict(job, verdict='failed', message='sweep interrupted', minutes=0.0)
             proc = subprocess.Popen(
                 ['ros2', 'launch', 'handeye_autopilot_demos', 'demo.launch.py',
                  f"robot:={job['robot']}", f"mode:={job['mode']}",
                  f"config:={job['config']}", 'stay:=false'],
                 env=dict(os.environ, ROS_DOMAIN_ID=str(domain)), stdout=f,
                 stderr=subprocess.STDOUT, start_new_session=True)
-            try:
-                code = proc.wait(timeout)
-            except subprocess.TimeoutExpired:
-                code = None
-            _stop(proc)
+            _running.add(proc)
+        try:
+            code = proc.wait(timeout)
+        except subprocess.TimeoutExpired:
+            code = None
+        _stop(proc)
+        with _running_lock:
+            _running.discard(proc)
+        if STOP.is_set():
+            return dict(job, verdict='failed', message='sweep interrupted', minutes=0.0)
         return dict(job, **parse(log.read_text(), code), minutes=round((time.time() - t0) / 60, 1))
     finally:
         domains.put(domain)
@@ -123,9 +139,11 @@ def parse(text: str, code: int | None) -> dict[str, Any]:
         out['message'] = m.group(3).strip()
     if code == 0 and 'DEMO PASSED' in text:
         out['verdict'] = 'passed'
-    elif 'could not reach the seed' in text:
+    elif code is not None and (m := SEED_COLLISION.search(text)):
+        # MoveIt's collision verdict on the robot's start or seed state with this
+        # mount: nobody could start a calibration like that
         out['verdict'] = 'setup'
-        out['message'] = 'the robot cannot reach the seed with this mount (collision)'
+        out['message'] = f'the mount collides with the robot before calibrating ({m.group(1)})'
     else:
         out['verdict'] = 'failed'
         if code is None:
@@ -160,7 +178,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument('--jobs', type=int, default=3, help='runs at the same time')
     ap.add_argument('--timeout', type=float, default=1800.0, help='per run, s')
     ap.add_argument('--domain-base', type=int, default=120,
-                    help='first ROS domain ID used (one per parallel run)')
+                    help='first ROS domain ID used (one per parallel run, plus one for '
+                         'FK); two sweeps at once need ranges that do not overlap')
     ap.add_argument('--out', default=os.path.expanduser(
         '~/.ros/handeye_autopilot/mount_sweep/' + time.strftime('%Y%m%dT%H%M%S')))
     a = ap.parse_args(argv)
@@ -189,14 +208,25 @@ def main(argv: list[str] | None = None) -> int:
     for i in range(a.jobs):
         domains.put(a.domain_base + 1 + i)
     rows: list[dict[str, Any]] = []
-    with ThreadPoolExecutor(a.jobs) as pool:
-        futures = [pool.submit(run_case, j, domains, a.timeout + 300) for j in jobs]
+    pool = ThreadPoolExecutor(a.jobs)
+    futures = [pool.submit(run_case, j, domains, a.timeout + 300) for j in jobs]
+    try:
         for f in futures:
             row = f.result()
             rows.append(row)
             print(f"{row['robot']} {row['mode']} {row['name']}: {row['verdict']} "
                   f"{row.get('error_mm', '')} {row.get('message', '')}", flush=True)
             (out / 'results.yaml').write_text(yaml.safe_dump(rows, sort_keys=False))
+    except KeyboardInterrupt:
+        print('interrupted: stopping the running demos...', flush=True)
+        STOP.set()
+        with _running_lock:
+            procs = list(_running)
+        for p in procs:
+            _stop(p)
+        pool.shutdown(wait=True, cancel_futures=True)
+        return 130
+    pool.shutdown()
     md = table(rows)
     (out / 'results.md').write_text(md + '\n')
     print(md)

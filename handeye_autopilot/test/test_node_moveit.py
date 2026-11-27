@@ -172,11 +172,13 @@ def test_planning_only_success_is_caught_by_the_tf_check(moveit_world, kind):
     assert w.moveit.goals[-1][0] == kind                      # the faulty action was hit
 
 
-def test_invalid_plan_after_moving_is_a_failure_not_a_skip(moveit_world):
-    """INVALID_MOTION_PLAN is a safe skip only with joints measured unchanged:
-    the same reply after the robot moved ends the run (MOTION_FAILED)."""
+@pytest.mark.parametrize('kind', ['invalid_moved', 'invalid_roundtrip'])
+def test_invalid_plan_after_moving_is_a_failure_not_a_skip(moveit_world, kind):
+    """INVALID_MOTION_PLAN is a safe skip only if the joints were watched and
+    never left the start while the goal was active: the same reply after the
+    robot moved, even if it came back exactly, ends the run (MOTION_FAILED)."""
     w = moveit_world()
-    w.moveit.plan_fails = lambda joints: 'invalid_moved'
+    w.moveit.plan_fails = lambda joints: kind
     h = w.driver.send(execution='moveit')
     assert h.accepted
     out = w.result(h, timeout=300.0)

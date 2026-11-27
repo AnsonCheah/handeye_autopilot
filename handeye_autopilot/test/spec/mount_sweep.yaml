@@ -3,7 +3,9 @@
 # an offset in the tool frame: translation added (m), rotation applied about
 # the tool axes (deg, extrinsic xyz). Perfect motion and the fake IK of
 # m2_sim; the seed is m2.yaml's view of the board. lever_max = the moved lever
-# arm's largest component + 0.02 m (what an operator would enter).
+# arm's largest component + 0.02 m (what an operator would enter); the lever
+# arm is tool -> board centre (eye-to-hand) or tool -> camera (eye-in-hand).
+# Both the camera and the board transform must match the truth.
 # CI runs the `ci: true` cases; HANDEYE_FULL_SWEEP=1 runs all (~20 s each).
 # The same offsets on real MoveIt robots: handeye_autopilot_demos sweep_mounts.
 lever_margin_m: 0.02

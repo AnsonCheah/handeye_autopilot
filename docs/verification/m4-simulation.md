@@ -81,8 +81,9 @@ below).
 
 The four demos use one mount each. [mount-sweep.md](mount-sweep.md) moves the
 board or camera mount by up to ±200 mm and ±90° per axis, on both robots and
-in both modes. 66 of 72 robot runs pass within 0.12 mm and 0.014°; the other 6
-are mounts that collide with the robot at the seed.
+in both modes. 66 of 72 robot runs pass within 0.11 mm and 0.014°; in the other
+6, MoveIt reports the mounted board or camera in collision with the robot
+before the calibration starts.
 
 ## What the tests prove
 

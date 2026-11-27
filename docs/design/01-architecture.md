@@ -142,10 +142,12 @@ MoveIt brand implicitly.
   (probe). `not_started` needs all of: `ABORTED`, an **empty planned
   trajectory** in the MoveGroup result (nothing existed to execute) **or**
   `INVALID_MOTION_PLAN` (MoveIt's `ValidateSolution` planning adapter rejected
-  its own plan before execution; it returns that plan filled in. Seen in the
-  mount sweep, §10; `shortcut:` trusts the code as a planning-stage one, revisit
-  if a MoveIt release returns it after execution started), and
-  measured joints unchanged from the start (within tolerance). Anything else,
+  its own plan; it returns that plan filled in; seen in the mount sweep, §10)
+  with the joints **watched the whole time the goal was active**: every
+  `/joint_states` sample within tolerance of the start, at most 0.25 s between
+  samples (`shortcut:` sampled; tighten if a robot can leave and return within
+  that), and measured joints unchanged from the start (within tolerance). A
+  plan that moved the robot and brought it back is therefore `failed`. Anything else,
   or joints unknown, = `failed` (a motion that moved and came back must not
   pass as a safe skip). The result's `executed_trajectory` is always empty on
   Jazzy (probe), so it is not used.
@@ -641,7 +643,11 @@ snapshotted at admission; every capture's images must match the run's
   sweep_mounts`, parallel runs in separate ROS domains). The robot sweep moves
   the fixed object (camera tripod / board stand) so the camera sees the board
   at the seed as in the demo, since a good seed is the operator's job, and sets
-  `lever_max` to the moved lever arm + 20 mm, as an operator would measure.
+  `lever_max` to the moved lever arm's largest component + 20 mm, as an
+  operator would measure (tool → board centre in eye-to-hand, tool → camera
+  in eye-in-hand: the references of the bootstrap bound, 02-features §B). A
+  run is `setup`, not a failure, only when MoveIt reports the start or seed
+  state in collision with the moved mount.
   `shortcut:` no 3D occlusion and the carried object may overlap its
   touch links (the attached box ignores them), so a few cases are physically
   implausible mounts; the results table records them, upgrade if a real mount

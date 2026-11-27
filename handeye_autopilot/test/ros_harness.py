@@ -218,7 +218,8 @@ class FakeMoveIt(Node):
       FAILURE and an empty planned trajectory, nothing moves; ``'invalid'``: it
       ABORTS with INVALID_MOTION_PLAN and the rejected plan filled in (MoveIt's
       ValidateSolution adapter), nothing moves; ``'invalid_moved'``: the same
-      reply, but the robot moved to the goal first;
+      reply, but the robot moved to the goal first; ``'invalid_roundtrip'``: the
+      same reply after the robot went to the goal and came back to the start;
     - ``hang``: goals of the kinds in ``fault_kinds`` never reach a terminal state;
       cancels are accepted and ignored;
     - ``fault_kinds``: {'move', 'execute'} by default (MoveGroup / ExecuteTrajectory);
@@ -419,13 +420,17 @@ class FakeMoveIt(Node):
             return res
         start = list(encode(self.robot.G))
         pts = [start, list(joints)]
-        if fail in ('invalid', 'invalid_moved'):
+        if fail in ('invalid', 'invalid_moved', 'invalid_roundtrip'):
             res.planned_trajectory.joint_trajectory.joint_names = list(JOINTS)
             res.planned_trajectory.joint_trajectory.points = [
                 JointTrajectoryPoint(positions=[float(v) for v in p]) for p in pts]
-            if fail == 'invalid_moved':
+            if fail in ('invalid_moved', 'invalid_roundtrip'):
+                G0 = self.robot.G.copy()
                 self.robot.move_to(decode(joints))
                 time.sleep(0.3)
+                if fail == 'invalid_roundtrip':     # back exactly where it started
+                    self.robot.move_to(G0)
+                    time.sleep(0.3)
             res.error_code.val = -2                        # INVALID_MOTION_PLAN
             goal_handle.abort(res)
             return res

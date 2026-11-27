@@ -51,7 +51,10 @@ def test_case_moves_the_robot_side_mount_and_keeps_the_seed_view(robot, mode):
     R = mounts.pose([0, 0, 0] + [math.radians(v) for v in case['rotation_deg']])[:3, :3]
     np.testing.assert_allclose(after[:3, :3], R @ before[:3, :3], atol=1e-9)
     np.testing.assert_allclose(_view(out, mode, SEED), _view(cfg, mode, SEED), atol=1e-9)
-    assert out['calibration']['session']['lever_max'] >= np.abs(after[:3, 3]).max() + 0.02 - 1e-3
+    ref = mounts.board_centre(cfg['board']) if mode == 'eye_to_hand' else np.zeros(3)
+    lever = (after @ np.r_[ref, 1.0])[:3]            # tool -> board centre / camera origin
+    assert out['calibration']['session']['lever_max'] == pytest.approx(
+        np.abs(lever).max() + 0.02, abs=1e-3)
     assert cfg[mode][key] != out[mode][key]          # the input config is not modified
 
 
@@ -79,5 +82,12 @@ def test_parse_reads_the_runner_output():
     r = parse(ok, 0)
     assert r['verdict'] == 'passed' and r['error_mm'] == 0.02 and r['accepted'] == 60
     assert parse(ok.replace('PASSED', 'FAILED'), 1)['verdict'] == 'failed'
-    assert parse('could not reach the seed: status 6', 1)['verdict'] == 'setup'
+    seed = 'could not reach the seed: status 6, START_STATE_IN_COLLISION '
+    assert parse(seed, 1)['verdict'] == 'setup'
+    assert parse(seed.replace('START_STATE_IN_COLLISION', 'GOAL_IN_COLLISION'), 1)[
+        'verdict'] == 'setup'
+    # no collision evidence, or a timeout: a failure, never excluded as setup
+    assert parse(seed.replace('START_STATE_IN_COLLISION', 'CONTROL_FAILED'), 1)[
+        'verdict'] == 'failed'
+    assert parse(seed, None)['verdict'] == 'failed'
     assert parse('', None) == {'exit_code': None, 'verdict': 'failed', 'message': 'timed out'}

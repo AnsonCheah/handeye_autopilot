@@ -8,7 +8,7 @@ from pathlib import Path
 
 from handeye_autopilot.core import transforms as tf
 from handeye_autopilot.core.config import SessionConfig
-from m1b_sim import truth
+from m1b_sim import BOARD, truth
 from m2_sim import SPEC as M2
 from m2_sim import run
 import numpy as np
@@ -35,17 +35,25 @@ def mounts(mode, case):
 @pytest.mark.parametrize('case', CASES, ids=[c['name'] for c in CASES])
 def test_mount_is_recovered(mode, case):
     X, Z = mounts(mode, case)
-    lever = (Z if mode == 'eye_to_hand' else X)[:3, 3]
+    # the bootstrap bound's lever arm (02-features §B): tool -> board centre
+    # (eye-to-hand), tool -> camera origin (eye-in-hand)
+    w, h = BOARD.size_m
+    lever = (Z @ np.array([w / 2, h / 2, 0, 1]))[:3] if mode == 'eye_to_hand' else X[:3, 3]
     cfg = SessionConfig(**{**SessionConfig().to_dict(), **M2['session'],
                            'lever_max': float(np.abs(lever).max()) + SPEC['lever_margin_m']})
-    r, Xt, _ = run(mode, mounts=(X, Z), session_cfg=cfg)
+    r, Xt, Zt = run(mode, mounts=(X, Z), session_cfg=cfg)
     assert r.failure is None, r.message
     cal = r.calibration
     assert cal.passed, [g.name for g in cal.report.gates if g.gated and not g.passed]
     dt = tf.translation_distance(cal.solution.X, Xt)
     dr = math.degrees(tf.rotation_angle(cal.solution.X, Xt))
-    print(f'{mode} {case["name"]}: {1000 * dt:.2f} mm, {dr:.3f} deg')
+    zt = tf.translation_distance(cal.solution.Z, Zt)
+    zr = math.degrees(tf.rotation_angle(cal.solution.Z, Zt))
+    print(f'{mode} {case["name"]}: camera {1000 * dt:.2f} mm, {dr:.3f} deg; '
+          f'board {1000 * zt:.2f} mm, {zr:.3f} deg')
     assert dt <= TOL['translation_m'] and dr <= TOL['rotation_deg']
+    # the moved mount itself (the board in eye-to-hand) is recovered too
+    assert zt <= TOL['translation_m'] and zr <= TOL['rotation_deg']
 
 
 def test_offsets_reach_the_requested_ranges():

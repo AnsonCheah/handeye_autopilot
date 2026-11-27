@@ -187,6 +187,7 @@ class CalibrationNode(Node):
         self.last_result: Calibrate.Result | None = None
         self._solve_end: Any = None          # node time the last final solve finished
         self._joints: list[tuple[float, JointState]] = []
+        self._still_watches: list[StillWatch] = []   # joints watched during a goal
         self._joint_names_seen: set[str] = set()   # every joint ever reported
         self.create_subscription(JointState, '/joint_states', self._on_joints, 10,
                                  callback_group=self._sensors)
@@ -270,6 +271,8 @@ class CalibrationNode(Node):
                 self._joints = [(t, m) for t, m in self._joints if t >= now - 5.0]
             self._joints = self._joints[-10000:]
             self._joint_names_seen.update(msg.name)
+            for w in self._still_watches:
+                w.sample(now, msg)
 
     # -- admission (§5): rejected goals get no result -----------------------------
     def _admit(self, goal: Calibrate.Goal) -> GoalResponse:
@@ -991,6 +994,7 @@ class CalibrationNode(Node):
         t_start = self.now()
         before = self._joints_now(mi.joint_names, time.monotonic(), 2.0, run)
         check_path = cfg.session.box_enabled and cfg.session.box_check_moving_object
+        watch: StillWatch | None = None
 
         def invalid() -> bool:                # the run stopped being valid (§6-8)
             return run.info_changed or self._jumps != run.jumps
@@ -1049,22 +1053,36 @@ class CalibrationNode(Node):
                                       invalid)
             else:
                 self._still_valid(goal_handle, run, t_start)
-                out = self.moveit.run(self.moveit.move, goal,
-                                      mi.planning_time + mi.motion_timeout,
-                                      mi.cancel_timeout, run.cancelled, invalid)
+                if before is not None:            # evidence for a safe skip (§3.2)
+                    watch = StillWatch(list(mi.joint_names), np.asarray(before, float),
+                                       mi.joint_tolerance, time.monotonic())
+                    with self._lock:
+                        self._still_watches.append(watch)
+                try:
+                    out = self.moveit.run(self.moveit.move, goal,
+                                          mi.planning_time + mi.motion_timeout,
+                                          mi.cancel_timeout, run.cancelled, invalid)
+                finally:
+                    if watch is not None:
+                        with self._lock:
+                            self._still_watches.remove(watch)
+                            watch.end(time.monotonic())
         self._stopped(out, run)                   # raises on a cancel or an unconfirmed stop
         if out.stopped == 'invalid':              # stopped because the run became invalid
             self._still_valid(goal_handle, run, t_start)      # raises with the reason
         after = self._joints_now(mi.joint_names, time.monotonic(), 2.0, run)
         if not out.accepted:
             return self._failed(run, out.note, after)
-        # shortcut: INVALID_MOTION_PLAN with a plan filled in is trusted as a
-        # planning-pipeline rejection (MoveIt's ValidateSolution adapter, seen in
-        # the mount sweep), still only with joints measured unchanged; revisit if a
-        # MoveIt release returns it after execution started.
+        # INVALID_MOTION_PLAN comes with the rejected plan filled in (MoveIt's
+        # ValidateSolution adapter; seen in the mount sweep): a safe skip only if
+        # the joints were watched the whole time the goal was active and never
+        # left the start (§3.2). shortcut: sampled at the driver's rate, a gap of
+        # at most STILL_MAX_GAP s is trusted; tighten if a robot can leave and
+        # return within that.
+        unplanned = out.planned_points == 0 or (
+            out.error_code == INVALID_MOTION_PLAN and watch is not None and watch.still())
         if not a.cartesian and not check_path and out.status == GoalStatus.STATUS_ABORTED and \
-                (out.planned_points == 0 or out.error_code == INVALID_MOTION_PLAN) and \
-                _same(before, after, mi.joint_tolerance):
+                unplanned and _same(before, after, mi.joint_tolerance):
             return self._not_started(run, cfg, f'planning failed ({error_name(out.error_code)})',
                                      after)
         if out.status != GoalStatus.STATUS_SUCCEEDED or out.error_code != SUCCESS:
@@ -1467,6 +1485,39 @@ def _segment_distance(p: Any, a: Any, b: Any) -> float:
     ab = b - a
     t = 0.0 if float(ab @ ab) < 1e-18 else float(np.clip((p - a) @ ab / (ab @ ab), 0.0, 1.0))
     return float(np.linalg.norm(p - (a + t * ab)))
+
+
+STILL_MAX_GAP = 0.25     # s, the largest joint-sample gap a StillWatch accepts
+
+
+@dataclass
+class StillWatch:
+    """Did the joints stay at ``ref`` the whole time a goal was active?
+    Updated from /joint_states (under the node's lock)."""
+    names: list[str]
+    ref: Any
+    tol: float
+    last: float                 # monotonic time of the last full sample (or the start)
+    max_gap: float = 0.0
+    moved: bool = False
+    samples: int = 0
+
+    def sample(self, now: float, msg: Any) -> None:
+        pos = dict(zip(msg.name, msg.position, strict=False))
+        if not all(n in pos for n in self.names):
+            return
+        q = np.array([pos[n] for n in self.names], dtype=float)
+        if not _same(q, self.ref, self.tol):
+            self.moved = True
+        self.max_gap = max(self.max_gap, now - self.last)
+        self.last = now
+        self.samples += 1
+
+    def end(self, now: float) -> None:
+        self.max_gap = max(self.max_gap, now - self.last)
+
+    def still(self) -> bool:
+        return self.samples > 0 and not self.moved and self.max_gap <= STILL_MAX_GAP
 
 
 def _same(a: Any, b: Any, tol: float) -> bool:

@@ -14,8 +14,9 @@ Arguments:
   safety box and the annotated camera image;
 - ``stay`` (default: true with RViz, false without): after an ``auto`` run,
   keep everything running (look around in RViz, publish the result to TF;
-  Ctrl-C ends it). false stops the whole launch with the runner's verdict as
-  its exit code (0 passed, 1 failed): what CI runs;
+  Ctrl-C ends it; the exit code is then not the verdict). false stops the
+  whole launch with the runner's verdict as its exit code (0 passed, 1
+  failed): what CI and scripts use;
 - ``config`` (default: the package's ``config/<robot>.yaml``): another robot
   config, e.g. with different true mounts (the mount sweep, ``sweep_mounts``);
 - ``record`` (default false): ``ros2 bag record`` of the run (calibrate.launch.py).
@@ -56,11 +57,15 @@ def _verdict(event, context):
 
 
 def _stay(event, context):
-    """Keep running after the runner ends, and say so."""
-    verdict = 'PASSED' if event.returncode == 0 else 'FAILED'
-    return [LogInfo(msg=f'demo {verdict}; everything keeps running (RViz, the camera, '
-                        'MoveIt) so you can publish the result to TF (the runner printed '
-                        'the command). Ctrl-C to stop.')]
+    """Keep running after the runner ends, and say so. The exit code after
+    Ctrl-C is then not the verdict (scripts use stay:=false)."""
+    if event.returncode == 0:
+        return [LogInfo(msg='demo PASSED; everything keeps running (RViz, the camera, '
+                            'MoveIt) so you can publish the result to TF (the runner '
+                            'printed the command). Ctrl-C to stop.')]
+    return [LogInfo(msg=f'demo FAILED (run_demo exit code {event.returncode}): there is '
+                        'no result to publish. Everything keeps running so you can look '
+                        'at the robot and the scene in RViz. Ctrl-C to stop.')]
 
 
 def _truthy(value: str) -> bool:
