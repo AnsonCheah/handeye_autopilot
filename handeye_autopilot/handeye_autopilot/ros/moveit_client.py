@@ -33,10 +33,17 @@ from moveit_msgs.msg import (
     Constraints,
     JointConstraint,
     MoveItErrorCodes,
+    PlanningSceneComponents,
     PositionConstraint,
     RobotTrajectory,
 )
-from moveit_msgs.srv import GetCartesianPath, GetPositionFK, GetPositionIK
+from moveit_msgs.srv import (
+    GetCartesianPath,
+    GetPlanningScene,
+    GetPositionFK,
+    GetPositionIK,
+    GetStateValidity,
+)
 import numpy as np
 from numpy.typing import NDArray
 from rclpy.action import ActionClient
@@ -69,12 +76,15 @@ def to_pose(T: Mat) -> Pose:
     return p
 
 
-def wait_future(fut: Any, timeout: float, cancelled: threading.Event | None = None,
+def wait_future(fut: Any, timeout: float,
+                cancelled: threading.Event | Callable[[], bool] | None = None,
                 poll: float = 0.01) -> bool:
-    """True once ``fut`` is done; False at the deadline or on cancel."""
+    """True once ``fut`` is done; False at the deadline or once ``cancelled``
+    (an Event, or a predicate) says stop."""
     deadline = time.monotonic() + timeout
+    stop = cancelled.is_set if isinstance(cancelled, threading.Event) else cancelled
     while not fut.done():
-        if time.monotonic() > deadline or (cancelled is not None and cancelled.is_set()):
+        if time.monotonic() > deadline or (stop is not None and stop()):
             return False
         time.sleep(poll)
     return True
@@ -114,6 +124,10 @@ class MoveItClient:
         self.cartesian = node.create_client(GetCartesianPath, 'compute_cartesian_path',
                                             callback_group=cb)
         self.fk = node.create_client(GetPositionFK, 'compute_fk', callback_group=cb)
+        self.validity = node.create_client(GetStateValidity, 'check_state_validity',
+                                           callback_group=cb)
+        self.scene = node.create_client(GetPlanningScene, 'get_planning_scene',
+                                        callback_group=cb)
         self.move = ActionClient(node, MoveGroup, 'move_action', callback_group=cb)
         self.execute = ActionClient(node, ExecuteTrajectory, 'execute_trajectory',
                                     callback_group=cb)
@@ -130,6 +144,7 @@ class MoveItClient:
             ('compute_ik', self.ik.service_is_ready),
             ('compute_cartesian_path', self.cartesian.service_is_ready),
             ('compute_fk', self.fk.service_is_ready),
+            ('check_state_validity', self.validity.service_is_ready),
             ('move_action', self.move.server_is_ready),
             ('execute_trajectory', self.execute.server_is_ready)]
         deadline = time.monotonic() + timeout
@@ -150,7 +165,8 @@ class MoveItClient:
                 if f.done() and int(f.result().status) not in TERMINAL:
                     self._unconfirmed += 1          # counted once, then dropped below
             self._active = [(h, f) for h, f in self._active if not f.done()]
-            self._late = [f for f in self._late if not f.done()]
+            # a late request leaves _late only in its own callback, after its goal
+            # (if accepted) is in _active: never a moment where it is in neither
             return len(self._active) + len(self._late)
 
     def unconfirmed(self) -> int:
@@ -169,13 +185,16 @@ class MoveItClient:
         try:
             handle = fut.result()
         except Exception:  # noqa: BLE001 - nothing to cancel
+            handle = None
+        if handle is not None and handle.accepted:
+            res = handle.get_result_async()
+            with self._lock:
+                self._active.append((handle, res))
+                self._late = [f for f in self._late if f is not fut]
+            handle.cancel_goal_async()
             return
-        if handle is None or not handle.accepted:
-            return
-        res = handle.get_result_async()
         with self._lock:
-            self._active.append((handle, res))
-        handle.cancel_goal_async()
+            self._late = [f for f in self._late if f is not fut]
 
     # -- IK (§3.1) ----------------------------------------------------------------------
     def solve_ik(self, base_T_ik: Mat, base_frame: str, group: str, ik_link: str,
@@ -324,13 +343,46 @@ class MoveItClient:
             out.append(pose_to_matrix(res.pose_stamped[0].pose))
         return out
 
+    def invalid_state(self, traj: RobotTrajectory, group: str, timeout: float,
+                      cancelled: threading.Event | None = None) -> str:
+        """Every trajectory point against the CURRENT planning scene (attached
+        bodies included), right before execution: ExecuteTrajectory, unlike a
+        MoveGroup goal, does not re-check a trajectory planned earlier. '' if all
+        are valid, else why."""
+        jt = traj.joint_trajectory
+        for k, p in enumerate(jt.points):
+            req = GetStateValidity.Request()
+            req.group_name = group
+            req.robot_state.is_diff = True
+            req.robot_state.joint_state.name = list(jt.joint_names)
+            req.robot_state.joint_state.position = [float(v) for v in p.positions]
+            fut = self.validity.call_async(req)
+            if not wait_future(fut, timeout, cancelled):
+                return 'check_state_validity did not reply'
+            if not fut.result().valid:
+                return f'trajectory point {k} is no longer valid in the current planning scene'
+        return ''
+
+    def attached_links(self, timeout: float) -> set[str] | None:
+        """Links that carry attached collision objects in the planning scene, or
+        None if the scene cannot be read."""
+        if not self.scene.wait_for_service(timeout_sec=min(timeout, 2.0)):
+            return None
+        req = GetPlanningScene.Request()
+        req.components.components = PlanningSceneComponents.ROBOT_STATE_ATTACHED_OBJECTS
+        fut = self.scene.call_async(req)
+        if not wait_future(fut, timeout):
+            return None
+        return {a.link_name for a in fut.result().scene.robot_state.attached_collision_objects}
+
     def execute_goal(self, trajectory: RobotTrajectory) -> ExecuteTrajectory.Goal:
         return ExecuteTrajectory.Goal(trajectory=trajectory)
 
     def run(self, client: ActionClient, goal: Any, timeout: float, cancel_timeout: float,
-            cancelled: threading.Event, on_accepted: Callable[[], None] | None = None
-            ) -> GoalOutcome:
-        """Send one goal and wait for its terminal status. A cancel (``cancelled``)
+            cancelled: threading.Event, invalid: Callable[[], bool] | None = None,
+            on_accepted: Callable[[], None] | None = None) -> GoalOutcome:
+        """Send one goal and wait for its terminal status. A cancel (``cancelled``),
+        the run becoming invalid (``invalid()``: a clock reset, a CameraInfo change)
         or the deadline cancels the goal and waits ``cancel_timeout`` for the
         terminal status that proves it stopped."""
         out = GoalOutcome(sent=True)
@@ -356,8 +408,10 @@ class MoveItClient:
             self._active.append((handle, res_fut))
         if on_accepted is not None:
             on_accepted()
-        if not wait_future(res_fut, timeout, cancelled):
-            out.stopped = 'cancel' if cancelled.is_set() else 'timeout'
+        if not wait_future(res_fut, timeout, lambda: cancelled.is_set() or
+                           (invalid is not None and invalid())):
+            out.stopped = 'cancel' if cancelled.is_set() else \
+                'invalid' if invalid is not None and invalid() else 'timeout'
             handle.cancel_goal_async()
             out.stop_confirmed = wait_future(res_fut, cancel_timeout) and \
                 int(res_fut.result().status) in TERMINAL

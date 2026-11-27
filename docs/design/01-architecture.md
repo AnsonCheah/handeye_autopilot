@@ -188,16 +188,30 @@ MoveIt brand implicitly.
   When `box_check_moving_object` is on, a planned move is sent as a plan-only
   `MoveGroup` goal; the planned trajectory is checked (joints interpolated at
   ≤ 0.01 rad, FK through `compute_fk`, the carried object's `L_max` ball and
-  the tool origin inside the box at every sample) and only then executed with
+  the tool origin inside the box, 1 cm inside its faces for the controller's
+  spline between points, at every sample) and only then executed with
   `ExecuteTrajectory`. A plan that leaves the box is a `not_started` skip
   (nothing was sent). As built in M4, replacing the planning-scene walls
   planned earlier: walls would also have to be excluded from collisions with
   the robot itself (an allowed-collision matrix over objects we don't own).
   `shortcut:` sampled, not swept.
-- Cartesian paths are checked by the node too: fraction exactly 1.0 (NaN
-  refused), finite joints, and no joint step between path points above
-  `moveit.revolute_jump_threshold` (Jazzy's MoveIt accepts the threshold field
-  but does not apply it, M4 review).
+- Cartesian paths are checked by the node too, before anything is sent:
+  fraction exactly 1.0 (NaN refused), finite joints, no joint step between
+  path points above `moveit.revolute_jump_threshold` (Jazzy's MoveIt accepts
+  the threshold field but does not apply it), and, because MoveIt returns the
+  path re-timed and resampled (a branch flip can be spread over small steps),
+  the tool path itself: FK of the trajectory (joints interpolated at ≤ 0.01
+  rad) must stay within the end-pose tolerances of the straight waypoint path
+  (M4 review). A failed check is `not_started`.
+- Before any `ExecuteTrajectory` goal (Cartesian moves, box-checked planned
+  moves) every trajectory point is re-checked against the current planning
+  scene (`check_state_validity`): unlike a `MoveGroup` goal, an
+  `ExecuteTrajectory` goal does not re-check a path planned earlier.
+  `shortcut:` MoveIt does not monitor scene changes during an
+  `ExecuteTrajectory` execution either; obstacles that appear mid-motion are
+  the operator's (as with any MoveIt Cartesian motion).
+- A goal in flight is also cancelled when the run becomes invalid (clock
+  reset, CameraInfo change), not only noticed after it ends.
 - Joint measurements count only when received after the request **and**
   stamped after it (a replayed or queued message is not evidence), and only if
   finite.
@@ -218,9 +232,9 @@ Every rejection is recorded with its reason.
 
 ### 3.4 Safety box
 
-`bounds.enabled: true|false`. Pose + size in a named frame (the node
-resolves it into the base frame through TF; the core gets a posed box in the
-base frame). Constrains the `tool_frame` origin, optionally the carried object
+`bounds.enabled: true|false`. Pose + size in a named frame (`session.box_frame`, empty = the base frame;
+the node resolves it into the base frame through TF once at goal start,
+`TF_UNAVAILABLE` if missing; the core gets a posed box in the base frame). Constrains the `tool_frame` origin, optionally the carried object
 too (board corners for eye-to-hand, the camera origin for eye-in-hand). Defined in parameters,
 shown in RViz as a marker (`shortcut: not editable in RViz, add an interactive
 marker if users ask`). The envelope around the seed and the orientation limit
@@ -231,8 +245,10 @@ it (else `seed_rejected`), and checked short moves are limit-checked at every
 waypoint (§3.2).
 
 The collision warning checks both representations of the carried board or
-camera: URDF collision geometry on links fixed to the tool, and attached
-collision objects in the planning scene. Warn only if neither exists.
+camera: URDF collision geometry on links fixed (through fixed joints) below
+the tool frame or the IK link, and attached collision objects on those links
+in the planning scene (`get_planning_scene`). Warn only if neither exists (as
+built in M4: a log warning at the start of a MoveIt-mode run).
 
 ## 4. Packages and installation
 
@@ -393,7 +409,8 @@ acceptance):
   `velocity_scaling` and `acceleration_scaling` (in (0, 1]), `motion_timeout`,
   `cancel_timeout`, `service_timeout`, end-state tolerances
   (`joint_tolerance`, `pose_tolerance_translation`, `pose_tolerance_rotation`),
-  `cartesian_max_step`, `revolute_jump_threshold`, `box_path_constraint`.
+  `cartesian_max_step`, `revolute_jump_threshold`, `box_path_constraint`;
+  `session.box_frame` (§3.4).
   The MoveIt names (`compute_ik`, `compute_fk`, `move_action`,
   `compute_cartesian_path`, `execute_trajectory`) are relative: remap them;
 - `testing.allow_fault_injection` (default false): adds `~/inject_fault`,
@@ -413,8 +430,8 @@ captures and `solver.min_captures` in every k-fold training split, i.e.
 gates (`core.quality.calibrate`) → result YAML, observations YAML, action
 result. Phase strings as in `Calibrate.Feedback`.
 
-**MoveIt mode run (M4):** the same preflight, then MoveIt checks: all five
-MoveIt interfaces found within `moveit.service_timeout` (`compute_ik` missing
+**MoveIt mode run (M4):** the same preflight, then MoveIt checks: all six
+MoveIt interfaces (the five above plus `check_state_validity`) found within `moveit.service_timeout` (`compute_ik` missing
 = `IK_SERVICE_MISSING`, any other = `MOTION_FAILED`), the fixed `ik_link →
 tool_frame` transform (§3.1, else `TF_UNAVAILABLE`), `/joint_states` for the
 group. Then the core session drives the run (02-features §B): seed capture at
@@ -487,6 +504,10 @@ snapshotted at admission; every capture's images must match the run's
   otherwise it returns `success=false` with the reason. The latch survives goal completion and is logged loudly.
 - Cancel during capture or IK: stop issuing new requests, drop outstanding
   results, report `CANCELED`.
+- **Shutdown (Ctrl-C, SIGTERM).** The node's own signal handler ends an active
+  run first, which cancels its motion goal and waits for the stop while the
+  executor still runs, and only then shuts down (rclpy's default handler
+  would end the context at once and the cancel could never be sent).
 - Launch tests cover cancel during motion, during capture, and during IK, and
   a new goal sent after a cancel timeout (must be rejected until the fault is
   cleared).

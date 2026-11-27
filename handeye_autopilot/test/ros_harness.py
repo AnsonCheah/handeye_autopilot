@@ -225,7 +225,13 @@ class FakeMoveIt(Node):
     def __init__(self, robot, **kw):
         super().__init__('fake_moveit', **kw)
         from moveit_msgs.action import ExecuteTrajectory, MoveGroup
-        from moveit_msgs.srv import GetCartesianPath, GetPositionFK, GetPositionIK
+        from moveit_msgs.srv import (
+            GetCartesianPath,
+            GetPlanningScene,
+            GetPositionFK,
+            GetPositionIK,
+            GetStateValidity,
+        )
         from rclpy.action import ActionServer, CancelResponse, GoalResponse
         from rclpy.callback_groups import ReentrantCallbackGroup
         from sensor_msgs.msg import JointState
@@ -237,6 +243,9 @@ class FakeMoveIt(Node):
         self.accept_delay = 0.0
         self.detour = None
         self.cart_jump = False           # Cartesian paths with a 1 rad joint jump
+        self.cart_swing = False          # Cartesian paths that swing 5 cm off the line
+                                         # in small steps (no single jump)
+        self.invalid_states = False      # check_state_validity says invalid
         self.cart_fraction = None        # override the reported path fraction
         self.plans = 0                   # plan-only MoveGroup requests
         self.executed: list = []         # trajectories actually executed (joint lists)
@@ -252,8 +261,14 @@ class FakeMoveIt(Node):
         self.create_service(GetCartesianPath, 'compute_cartesian_path', self._cart,
                             callback_group=cb)
         self.create_service(GetPositionFK, 'compute_fk', self._fk, callback_group=cb)
+        self.create_service(GetStateValidity, 'check_state_validity', self._valid,
+                            callback_group=cb)
+        self.create_service(GetPlanningScene, 'get_planning_scene', self._scene,
+                            callback_group=cb)
+        self.cancels: list = []          # kinds of goals whose cancel was requested
 
-        def accept(_req):
+        def accept(handle):
+            self.cancels.append(handle)
             return CancelResponse.ACCEPT
 
         def admit(kind):
@@ -303,6 +318,13 @@ class FakeMoveIt(Node):
             res.solution.joint_state.position = [float(v) for v in encode(G)] + [0.0]
         return res
 
+    def _valid(self, req, res):
+        res.valid = not self.invalid_states
+        return res
+
+    def _scene(self, req, res):
+        return res                       # no attached objects
+
     def _fk(self, req, res):
         js = req.robot_state.joint_state
         pos = dict(zip(js.name, js.position, strict=True))
@@ -330,6 +352,13 @@ class FakeMoveIt(Node):
             pts.append(JointTrajectoryPoint(positions=[float(v) for v in encode(G)]))
         if self.cart_jump and len(pts) > 1:
             pts[len(pts) // 2].positions[5] += 1.0
+        if self.cart_swing and len(pts) > 1:
+            mid = list(pts[len(pts) // 2].positions)
+            bump = [JointTrajectoryPoint(positions=[float(v) for v in
+                                                    np.r_[mid[:2], mid[2] + h, mid[3:]]])
+                    for h in (0.01, 0.02, 0.03, 0.04, 0.05, 0.04, 0.03, 0.02, 0.01)]
+            k = len(pts) // 2
+            pts = pts[:k] + bump + pts[k:]
         res.fraction = len(pts) / max(1, len(req.waypoints))
         if self.cart_fraction is not None:
             res.fraction = self.cart_fraction

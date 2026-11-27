@@ -259,19 +259,114 @@ def test_box_guards_the_carried_object_on_planned_paths(moveit_world):
     assert planned_and_run, 'no checked plan was executed'
 
 
-@pytest.mark.parametrize('fault', ['jump', 'nan_fraction'])
+@pytest.mark.parametrize('fault', ['jump', 'nan_fraction', 'swing', 'invalid_state'])
 def test_bad_cartesian_paths_are_never_executed(moveit_world, fault):
-    """A path with a joint jump (some releases ignore the threshold field) or a
-    NaN fraction is refused before anything is sent: not_started, nothing runs."""
+    """Refused before anything is sent (not_started, nothing runs): a path with a
+    joint jump (some releases ignore the threshold field), a NaN fraction, a
+    path that swings off the straight tool line in steps too small for any jump
+    check (a resampled branch flip), and a path no longer valid in the current
+    planning scene."""
     w = moveit_world()
     if fault == 'jump':
         w.moveit.cart_jump = True
+    elif fault == 'swing':
+        w.moveit.cart_swing = True
+    elif fault == 'invalid_state':
+        w.moveit.invalid_states = True
     else:
         w.moveit.cart_fraction = float('nan')
     out = w.result(w.driver.send(execution='moveit'), timeout=120.0)
     assert out.result.error_code == R.NOT_ENOUGH_SAMPLES, out.result.message
     assert 'bootstrap_failed' in out.result.message
     assert not [k for k, _ in w.moveit.goals if k == 'execute']
+
+
+def test_camera_change_during_a_motion_stops_it(moveit_world):
+    """§6-7: the run becomes invalid while a goal runs: the goal is cancelled at
+    once (not only noticed after it ends) and the run ends NO_CAMERA_INFO."""
+    from handeye_autopilot.core.camera import CameraModel
+    w = moveit_world()
+    w.moveit.motion_time = 6.0
+    h = w.driver.send(execution='moveit')
+    _wait(lambda: w.moveit.goals, 120.0, 'no motion goal')
+    time.sleep(0.5)
+    c = w.camera.camera
+    w.camera.camera = CameraModel(c.K * np.array([[1.01, 1, 1], [1, 1.01, 1], [1, 1, 1]]),
+                                  c.D, c.width, c.height)
+    t0 = time.monotonic()
+    out = w.result(h, timeout=30.0)
+    assert out.result.error_code == R.NO_CAMERA_INFO, out.result.message
+    assert time.monotonic() - t0 < 4.0                  # before the 6 s motion ended
+    assert w.moveit.cancels
+
+
+def test_box_in_a_named_frame_is_resolved_through_tf(moveit_world):
+    """§3.4: session.box_frame: the box is posed in that frame (here 1 m above
+    the base, so the published box sits at z + 1)."""
+    from visualization_msgs.msg import MarkerArray
+    w = moveit_world(node_over={'session.box_enabled': True, 'session.box_frame': 'shelf',
+                                'session.box_xyz': [0.1, 0.0, 0.2],
+                                'session.box_size': [3.0, 3.0, 3.0]})
+    st = tf2_ros.StaticTransformBroadcaster(w.robot)
+    st.sendTransform(tf_tools.to_msg(tf.make(np.eye(3), np.array([0.0, 0.0, 1.0])),
+                                     'base_link', 'shelf'))
+    got = []
+    w.client.create_subscription(MarkerArray, '/handeye_autopilot/markers',
+                                 lambda m: got.extend(x for x in m.markers
+                                                      if x.ns == 'safety_box'), 10)
+    time.sleep(0.5)
+    h = w.driver.send(execution='manual')
+    _wait(lambda: got, 10.0, 'no safety box marker')
+    p = got[-1].pose.position
+    assert got[-1].header.frame_id == 'base_link'
+    assert abs(p.x - 0.1) < 1e-6 and abs(p.z - 1.2) < 1e-6
+    w.driver.wait(h.cancel_goal_async(), 10.0)
+
+
+def test_missing_box_frame_aborts(moveit_world):
+    w = moveit_world(node_over={'session.box_enabled': True, 'session.box_frame': 'nowhere'})
+    out = w.result(w.driver.send(execution='moveit'), timeout=30.0)
+    assert out.result.error_code == R.TF_UNAVAILABLE and 'nowhere' in out.result.message
+
+
+def test_carried_geometry_helpers():
+    """§3.4 warning: links rigid below the tool, and whether they collide."""
+    from handeye_autopilot.ros.node import _fixed_descendants, _has_collision
+    urdf = '''<robot name="r">
+      <link name="flange"/><link name="tool0"/>
+      <link name="board"><collision><geometry><box size="1 1 1"/></geometry></collision></link>
+      <link name="finger"><collision><geometry><box size="1 1 1"/></geometry></collision></link>
+      <joint name="a" type="fixed"><parent link="flange"/><child link="tool0"/></joint>
+      <joint name="b" type="fixed"><parent link="tool0"/><child link="board"/></joint>
+      <joint name="c" type="prismatic"><parent link="tool0"/><child link="finger"/></joint>
+    </robot>'''
+    assert _fixed_descendants(urdf, {'tool0'}) == {'board'}
+    assert _has_collision(urdf, 'board') and not _has_collision(urdf, 'tool0')
+    assert _fixed_descendants('', {'tool0'}) == set()
+
+
+def test_fault_clears_with_a_500hz_joint_stream(moveit_world):
+    """A UR driver publishes joint states at 500 Hz: the history must still span
+    the 0.5 s stillness window."""
+    from sensor_msgs.msg import JointState
+    w = moveit_world(fake=False)
+    pub = w.client.create_publisher(JointState, '/joint_states', 10)
+    d = w.driver
+    assert d.call(d.inject_fault).success
+    stop = threading.Event()
+
+    def stream():
+        while not stop.is_set():
+            m = JointState(name=list(JOINTS), position=[0.1] * 6, velocity=[0.0] * 6)
+            m.header.stamp = w.node.get_clock().now().to_msg()
+            pub.publish(m)
+            time.sleep(0.002)
+    threading.Thread(target=stream, daemon=True).start()
+    try:
+        res = d.call(d.clear_fault, timeout=15.0)
+    finally:
+        stop.set()
+    assert res.success, res.message
 
 
 def test_joint_evidence_needs_fresh_finite_stamps(moveit_world):
@@ -377,3 +472,49 @@ def test_moving_tcp_offset_is_refused(moveit_world):
         stop.set()
     assert out.result.error_code == R.TF_UNAVAILABLE, out.result.message
     assert 'moving' in out.result.message
+
+
+def test_ctrl_c_cancels_the_motion_before_exiting(moveit_world, tmp_path):
+    """SIGINT to the node process while a motion runs: the node cancels the goal
+    (while its executor still runs) before it exits, so no motion is left
+    running without its calibrator."""
+    import signal
+    import subprocess
+
+    from ament_index_python.packages import get_package_prefix
+    from ros_harness import Driver
+    import yaml
+    w = moveit_world()
+    w.moveit.motion_time = 30.0
+    params = {k: v for k, v in MOVEIT.items()}
+    params.update({'output_dir': str(tmp_path), 'session.target_captures': 10,
+                   'session.frames_per_capture': 2, 'capture.consensus_min_frames': 2,
+                   'solver.min_captures': 8, 'timing.settle_window': 0.3,
+                   'timing.clock_tolerance': 10.0})
+    nested: dict = {}
+    for k, v in params.items():
+        node = nested
+        *head, last = k.split('.')
+        for part in head:
+            node = node.setdefault(part, {})
+        node[last] = v
+    pfile = tmp_path / 'p.yaml'
+    pfile.write_text(yaml.safe_dump({'/**': {'ros__parameters': nested}}))
+    exe = os.path.join(get_package_prefix('handeye_autopilot'), 'lib', 'handeye_autopilot',
+                       'calibrate_node')
+    proc = subprocess.Popen([exe, '--ros-args', '-r', '__node:=handeye_sub',
+                             '--params-file', str(pfile)],
+                            env=dict(os.environ, ROS_DOMAIN_ID='57'), start_new_session=True)
+    try:
+        d = Driver(w.client, ns='/handeye_sub')
+        h = d.send(execution='moveit', timeout=30.0)
+        assert h.accepted
+        _wait(lambda: w.moveit.goals, 120.0, 'no motion goal')
+        time.sleep(0.5)
+        proc.send_signal(signal.SIGINT)
+        assert proc.wait(timeout=30) == 0
+        assert w.moveit.cancels, 'the motion goal was not cancelled before the node exited'
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait(timeout=10)
