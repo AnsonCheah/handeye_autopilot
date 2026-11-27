@@ -60,26 +60,32 @@ def _cancel_by_id(client: ActionClient, goal_id: UUID, timeout: float, why: str)
     for _attempt in range(3):
         fut = handle.cancel_goal_async()
         if not wait_future(fut, 10.0):
-            break
+            print(f'{why}: no answer to the cancel request: CHECK THE ROBOT',
+                  file=sys.stderr)
+            return
         code = fut.result().return_code
-        if code == CancelGoal.Response.ERROR_NONE:
-            print(f'{why}: cancelling our goal; waiting for it to stop...', file=sys.stderr,
-                  flush=True)
+        if code in (CancelGoal.Response.ERROR_NONE, CancelGoal.Response.ERROR_GOAL_TERMINATED):
+            if code == CancelGoal.Response.ERROR_NONE:
+                print(f'{why}: cancelling our goal; waiting for it to stop...',
+                      file=sys.stderr, flush=True)
+            else:
+                print(f'{why}: our goal had already ended', file=sys.stderr)
             got = handle.get_result_async()
             if not wait_future(got, timeout):
-                print('no result after the cancel: CHECK THE ROBOT', file=sys.stderr)
+                print('no result for our goal: CHECK THE ROBOT', file=sys.stderr)
                 return
             res = got.result()
             r = res.result
             if res.status == GoalStatus.STATUS_CANCELED or \
                     r.error_code == Calibrate.Result.CANCELED:
                 print(f'stopped: {r.message}', file=sys.stderr)
-            else:
+            elif r.error_code == Calibrate.Result.MOTION_FAULT or \
+                    code == CancelGoal.Response.ERROR_NONE:
                 print(f'the goal ended {CODES.get(r.error_code, r.error_code)}: {r.message} '
                       '(the stop is NOT confirmed: CHECK THE ROBOT)', file=sys.stderr)
-            return
-        if code == CancelGoal.Response.ERROR_GOAL_TERMINATED:
-            print(f'{why}: our goal had already ended', file=sys.stderr)
+            else:
+                print(f'it ended {CODES.get(r.error_code, r.error_code)}: {r.message}',
+                      file=sys.stderr)
             return
         time.sleep(2.0)                    # unknown yet: may still be being admitted
     print(f'{why}: the node does not know our goal (never accepted, or ended)',
@@ -89,9 +95,13 @@ def _cancel_by_id(client: ActionClient, goal_id: UUID, timeout: float, why: str)
 def run(args: argparse.Namespace, node: Node, interrupted: threading.Event) -> int:
     ns = args.node.rstrip('/')
     client = ActionClient(node, Calibrate, f'{ns}/calibrate')
-    if not client.wait_for_server(timeout_sec=args.server_timeout):
-        print(f'no action server {ns}/calibrate (is the node running?)', file=sys.stderr)
-        return 1
+    deadline = time.monotonic() + args.server_timeout
+    while not client.wait_for_server(timeout_sec=0.2):      # Ctrl-C stays prompt
+        if interrupted.is_set():
+            return 130
+        if time.monotonic() > deadline:
+            print(f'no action server {ns}/calibrate (is the node running?)', file=sys.stderr)
+            return 1
     last = {'phase': '', 'detail': ''}
 
     def feedback(msg: Any) -> None:
@@ -103,7 +113,9 @@ def run(args: argparse.Namespace, node: Node, interrupted: threading.Event) -> i
             print(line + (f' - {f.last_rejection_detail}' if f.last_rejection_detail and
                           f.last_rejection_detail != last['detail'] else ''), flush=True)
         last['phase'], last['detail'] = f.phase, f.last_rejection_detail
-    if interrupted.is_set():
+    # discovery is per direction: the server can see our request before it has
+    # matched our reply reader, and a reply sent then is lost (seen under load)
+    if interrupted.wait(1.0):
         return 130                          # nothing sent
     goal = Calibrate.Goal(mode=args.mode, execution=args.execution, profile=args.profile)
     goal_id = UUID(uuid=list(uuid.uuid4().bytes))

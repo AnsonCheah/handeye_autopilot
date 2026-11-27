@@ -1141,8 +1141,9 @@ class CalibrationNode(Node):
     def _path_outside_box(self, traj: Any, cfg: P.RunConfig, ik_link: str, tool_T_ik: Any,
                           mode: str, run: RunState) -> str:
         """The carried object's L_max ball stays inside the box along the planned
-        path: joints interpolated linearly between trajectory points (what the
-        controller follows), FK at every sample. '' if inside, else why.
+        path: joints interpolated linearly between trajectory points, FK at every
+        sample, 1 cm inside the faces (the controller follows splines between the
+        points, close to but not exactly the linear path). '' if inside, else why.
         ``shortcut:`` sampled at <= 0.01 rad joint steps, not swept; tighten if a
         real box face is ever touched between samples."""
         jt = traj.joint_trajectory

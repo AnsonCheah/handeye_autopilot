@@ -594,10 +594,18 @@ def test_ctrl_c_cancels_the_motion_before_exiting(moveit_world, tmp_path):
         assert d.action.wait_for_server(timeout_sec=60.0)
         # DDS discovery is per direction: under load the server can see our goal
         # request before it has matched our response reader, and the goal reply
-        # is then dropped ('failed to send response'); let discovery settle first
-        time.sleep(2.0)
-        h = d.send(execution='moveit', timeout=60.0)
-        assert h.accepted
+        # is then dropped ('failed to send response'). Let discovery settle; if
+        # the first reply is still lost, stop that run and send again.
+        h = None
+        for _attempt in range(3):
+            time.sleep(5.0)
+            try:
+                h = d.send(execution='moveit', timeout=20.0)
+                break
+            except TimeoutError:
+                d.call(d.cancel, timeout=20.0)
+                _wait(lambda: 'run ended' in log_path.read_text(), 60.0, 'run did not end')
+        assert h is not None and h.accepted
         _wait(lambda: w.moveit.goals, 120.0, 'no motion goal')
         time.sleep(0.5)
         proc.send_signal(signal.SIGINT)
@@ -625,25 +633,43 @@ def _cli(args, log_path):
                             start_new_session=True)
 
 
+def _cli_until_answered(args, tmp_path, ok_codes, attempts=3):
+    """Run the CLI; a run in which DDS dropped the very first goal reply (the CLI
+    then reports 'no goal reply', exits 2 and cancels its goal by ID) is retried:
+    discovery under full-suite load, not what the test checks."""
+    for k in range(attempts):
+        log = tmp_path / f'cli{k}.log'
+        proc = _cli(args, log)
+        yield proc, log
+        if proc.poll() is None or proc.returncode in ok_codes or \
+                'no goal reply' not in log.read_text():
+            return
+        time.sleep(3.0)
+
+
 def test_cli_ctrl_c_cancels_the_goal(moveit_world, tmp_path):
     """`ros2 run handeye_autopilot calibrate`: Ctrl-C cancels the goal and waits
     for the stop (exit 130)."""
     import signal
     w = moveit_world()
     w.moveit.motion_time = 30.0
-    time.sleep(2.0)                     # DDS discovery (see the Ctrl-C node test)
-    log = tmp_path / 'cli.log'
-    proc = _cli(['--mode', 'eye_to_hand', '--execution', 'moveit'], log)
-    try:
-        _wait(lambda: w.moveit.goals, 120.0, 'no motion goal')
-        assert 'goal accepted' in log.read_text()
-        proc.send_signal(signal.SIGINT)
-        assert proc.wait(timeout=60) == 130, log.read_text()
-        assert w.moveit.cancels
-        assert 'CANCELED' in log.read_text()
-    finally:
-        if proc.poll() is None:
-            proc.kill()
+    time.sleep(2.0)
+    for proc, log in _cli_until_answered(['--mode', 'eye_to_hand', '--execution', 'moveit',
+                                          '--accept-timeout', '20'], tmp_path, (130,)):
+        try:
+            _wait(lambda p=proc, lg=log: 'goal accepted' in lg.read_text() or
+                  p.poll() is not None, 60.0, 'no goal reply')
+            if proc.poll() is not None:            # reply lost: retried
+                continue
+            _wait(lambda: w.moveit.goals, 120.0, 'no motion goal')
+            proc.send_signal(signal.SIGINT)
+            assert proc.wait(timeout=60) == 130, log.read_text()
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+    assert proc.returncode == 130, log.read_text()
+    assert w.moveit.cancels
+    assert 'CANCELED' in log.read_text()
 
 
 def test_cli_without_a_goal_reply_cancels_its_own_goal(moveit_world, tmp_path):
@@ -667,9 +693,10 @@ def test_cli_rejected_goal_leaves_the_other_run_alone(moveit_world, tmp_path):
     w.moveit.motion_time = 20.0
     h = w.driver.send(execution='moveit')
     _wait(lambda: w.moveit.goals, 120.0, 'no motion goal')
-    log = tmp_path / 'cli.log'
-    proc = _cli(['--mode', 'eye_to_hand'], log)
-    assert proc.wait(timeout=60) == 3, log.read_text()
+    for proc, log in _cli_until_answered(['--mode', 'eye_to_hand'], tmp_path, (3,)):
+        proc.wait(timeout=60)
+        text = log.read_text()
+    assert proc.returncode == 3, text
     assert not w.moveit.cancels and w.node._run is not None
     w.driver.wait(h.cancel_goal_async(), 10.0)
 
@@ -692,12 +719,15 @@ def _dummy_server(node, name, admit_s, accept, first_instant=False):
     goals run until cancelled (at most 60 s). Returns the cancelled ids."""
     from rclpy.action import ActionServer, CancelResponse, GoalResponse
     from rclpy.callback_groups import ReentrantCallbackGroup
-    cancelled = []
+    class Ids(list):
+        admitting = False
+    cancelled = Ids()
     state = {'first': first_instant}
 
     def admit(_goal):
         if state.pop('first', False):           # the first operator: admitted at once
             return GoalResponse.ACCEPT
+        cancelled.admitting = True               # type: ignore[attr-defined]
         time.sleep(admit_s)
         return GoalResponse.ACCEPT if accept else GoalResponse.REJECT
 
@@ -736,9 +766,11 @@ def test_cli_interrupt_while_rejection_pending_spares_the_other_run(moveit_world
     assert ha.accepted
     log = tmp_path / 'cli.log'
     proc = _cli(['--mode', 'eye_to_hand', '--node', '/dummy2', '--accept-timeout', '30'], log)
-    time.sleep(2.5)                          # B's goal is now waiting for admission
+    _wait(lambda: cancelled.admitting, 30.0, "B's goal never reached admission")
+    time.sleep(0.5)
     proc.send_signal(signal.SIGINT)
     assert proc.wait(timeout=60) == 130, log.read_text()
+    assert 'interrupted:' in log.read_text()     # the fallback cancel by ID ran
     assert bytes(ha.goal_id.uuid) not in cancelled, "operator A's run was cancelled"
     assert not ha.get_result_async().done()  # A's run still going
     w.driver.wait(ha.cancel_goal_async(), 10.0)
