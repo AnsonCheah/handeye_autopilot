@@ -1,0 +1,20 @@
+Reviewed `m3-node` at `675b55f`. Eighteen Jazzy helper tests passed. In-process action probes bypassed YAML writes for the successful run. The full launch suite requires writable temporary storage.
+
+### Pass 10 findings
+
+| Finding | Status | Evidence |
+|---|---|---|
+| Recalibration requires a restart to publish | **PARTIAL · SHOULD-FIX** | Same-parent replacement works. A cached mount can still veto publication after switching modes and stopping the old broadcaster. [tf_tools.py:214](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/ros/tf_tools.py:214) |
+| `~/finish` threshold and action stamps | **PARTIAL · SHOULD-FIX** | The threshold is documented. Transform stamps and `PHASE_VERIFYING` still follow k-fold verification. [01-architecture.md:383](/home/anson/workspaces/handeye_autopilot/docs/design/01-architecture.md:383) · [node.py:511](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/ros/node.py:511) · [quality.py:148](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/core/quality.py:148) |
+| Mixed outcomes wedge the server | **RESOLVED** | Cleanup releases the slot first and uses separate log calls. Success, cancellation, then a third goal passed the Jazzy probe. [node.py:371](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/ros/node.py:371) |
+| Simulator reset breaks the next run | **PARTIAL · BLOCKER** | The clock-stamped regression passed. With the default synthetic camera and the same 150 ms TF delay, the next goal falsely aborted with `TF_UNAVAILABLE`. The camera kept publishing future-stamped images from its own stale TF buffer. [test_node_manual.py:628](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/test/test_node_manual.py:628) · [synthetic_camera.py:148](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/ros/synthetic_camera.py:148) · [node.py:566](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/ros/node.py:566) |
+| Stopped camera passes preflight | **PARTIAL · SHOULD-FIX** | The advancing-clock test passed. On paused `/clock`, a cached image with the same arrival time as the preflight start still passed on Jazzy. [node.py:538](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/ros/node.py:538) |
+
+### Additional M3 findings
+
+- **BLOCKER — Failed quality gates still allow publication.** A rendered manual run failed fold verification and estimated the mount 3.44 mm and 0.66° off truth. M3 produced `publish.ok=true`, and the publisher accepts that flag with the success marker regardless of `passed`. [node.py:383](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/ros/node.py:383) · [node.py:764](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/ros/node.py:764) · [publish_result.py:49](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/ros/publish_result.py:49)
+- **SHOULD-FIX — A reset during preflight can report the wrong cause.** Jazzy returned `NO_CAMERA_INFO` while fresh frames were arriving in the new clock epoch. The wait still compared their arrival times against the pre-reset start. [node.py:538](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/ros/node.py:538)
+
+**Notes.** Host-clock sampling during YAML writing remains **ACCEPTED** per `30c4242`. The `CameraInfo` pin and TF drain callback windows remain. [node.py:410](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/ros/node.py:410) · [node.py:555](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/ros/node.py:555) · [publish_result.py:117](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/ros/publish_result.py:117)
+
+M3 merge: BLOCKED

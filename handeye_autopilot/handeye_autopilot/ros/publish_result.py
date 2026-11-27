@@ -44,14 +44,20 @@ def check(tree: dict[str, str], parent: str, root: str) -> str:
 
 
 class ResultPublisher(Node):
-    def __init__(self, path: str, listen: float = 2.0) -> None:
+    def __init__(self, path: str, listen: float = 2.0, allow_failed: bool = False) -> None:
         super().__init__('handeye_result_publisher')
         doc = yaml.safe_load(open(path)) or {}
         pub = doc.get('publish') or {}
+        if not doc.get('passed') and not allow_failed:
+            raise SystemExit(f'refusing to publish {path}: the calibration did not pass its '
+                             'quality gates (see the result file); allow_failed:=true '
+                             'publishes it anyway')
         marker = os.path.join(os.path.dirname(os.path.abspath(path)), PUBLISHABLE)
-        if pub.get('ok') and not os.path.exists(marker):
+        if pub.get('ok') and not os.path.exists(marker) and not (allow_failed and
+                                                                  doc.get('transform_valid')):
             pub = {'ok': False, 'reason': f'no {PUBLISHABLE} marker: the run did not end '
-                   'SUCCEEDED (cancelled or invalidated after the result was written)'}
+                   'SUCCEEDED with all gates passed (cancelled, invalidated, or failed '
+                   'quality gates)'}
         if not pub.get('ok'):
             raise SystemExit(f'refusing to publish {path}: '
                              f'{pub.get("reason", "no publish section")}')
@@ -136,11 +142,13 @@ class ResultPublisher(Node):
 def main(args: list[str] | None = None) -> None:
     rclpy.init(args=args)
     argv = rclpy.utilities.remove_ros_args(sys.argv)
+    allow = '--allow-failed' in argv
+    argv = [a for a in argv if a and a != '--allow-failed']
     if len(argv) != 2:
-        raise SystemExit('usage: publish_result <result.yaml>')
+        raise SystemExit('usage: publish_result <result.yaml> [--allow-failed]')
     code = 1
     try:
-        node = ResultPublisher(argv[1])
+        node = ResultPublisher(argv[1], allow_failed=allow)
         code = node.run()
     except (KeyboardInterrupt, ExternalShutdownException):
         code = 0

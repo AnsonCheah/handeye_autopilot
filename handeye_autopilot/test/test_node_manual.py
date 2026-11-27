@@ -646,7 +646,8 @@ def test_publish_result_refuses_a_changed_camera_subtree(tmp_path):
     from handeye_autopilot.ros.publish_result import ResultPublisher
     import yaml
     T = tf.make(np.eye(3), [0.0, 0.0, 0.1])
-    doc = {'publish': {'ok': True, 'transform': transform_dict(np.eye(4), 'base_link', 'cam'),
+    doc = {'passed': True, 'transform_valid': True,
+           'publish': {'ok': True, 'transform': transform_dict(np.eye(4), 'base_link', 'cam'),
                        'subtree': transform_dict(T, 'cam', 'cam_optical')}}
     f = tmp_path / 'result.yaml'
     f.write_text(yaml.safe_dump(doc))
@@ -755,7 +756,8 @@ def test_publish_result_refuses_a_moving_subtree_link(tmp_path):
     from tf2_msgs.msg import TFMessage
     import yaml
     T = tf.make(np.eye(3), [0.0, 0.0, 0.1])
-    doc = {'publish': {'ok': True, 'transform': transform_dict(np.eye(4), 'base_link', 'cam'),
+    doc = {'passed': True, 'transform_valid': True,
+           'publish': {'ok': True, 'transform': transform_dict(np.eye(4), 'base_link', 'cam'),
                        'subtree': transform_dict(T, 'cam', 'cam_optical')}}
     f = tmp_path / 'result.yaml'
     f.write_text(yaml.safe_dump(doc))
@@ -820,7 +822,8 @@ def test_result_without_the_success_marker_is_not_published(tmp_path):
     from handeye_autopilot.core.results import transform_dict
     from handeye_autopilot.ros.publish_result import ResultPublisher
     import yaml
-    doc = {'publish': {'ok': True, 'transform': transform_dict(np.eye(4), 'base_link', 'cam')}}
+    doc = {'passed': True, 'transform_valid': True,
+           'publish': {'ok': True, 'transform': transform_dict(np.eye(4), 'base_link', 'cam')}}
     f = tmp_path / 'result.yaml'
     f.write_text(yaml.safe_dump(doc))
     with pytest.raises(SystemExit, match='publishable'):
@@ -893,7 +896,8 @@ def test_conflicting_static_values_are_refused_at_publish_time(tmp_path):
     from tf2_msgs.msg import TFMessage
     import yaml
     T = tf.make(np.eye(3), [0.0, 0.0, 0.1])
-    doc = {'publish': {'ok': True, 'transform': transform_dict(np.eye(4), 'base_link', 'cam'),
+    doc = {'passed': True, 'transform_valid': True,
+           'publish': {'ok': True, 'transform': transform_dict(np.eye(4), 'base_link', 'cam'),
                        'subtree': transform_dict(T, 'cam', 'opt')}}
     f = tmp_path / 'result.yaml'
     f.write_text(yaml.safe_dump(doc))
@@ -1068,3 +1072,23 @@ def test_a_stopped_camera_fails_preflight(world_factory):
     time.sleep(0.3)
     res = w.result(w.driver.send()).result
     assert res.error_code == R.NO_CAMERA_INFO and 'fresh images' in res.message
+
+
+# -- review fixes (M3 xhigh pass 11) ------------------------------------------------
+
+def test_failed_gates_are_not_publishable_by_default(world_factory, tmp_path):
+    """A run that completes but fails its quality gates: kept, not publishable."""
+    import os
+
+    from handeye_autopilot.ros.publish_result import ResultPublisher
+    import yaml
+    w = world_factory(node_over={'solver.max_reprojection_rms_px': 1e-6})   # impossible gate
+    res = _finish_run(w)
+    assert res.error_code == R.NONE and res.transform_valid and not res.passed
+    run_dir = os.path.dirname(res.result_file)
+    assert not os.path.exists(os.path.join(run_dir, '.publishable'))
+    with pytest.raises(SystemExit, match='quality gates'):
+        ResultPublisher(res.result_file, listen=0.0)
+    node = ResultPublisher(res.result_file, listen=0.0, allow_failed=True)   # explicit
+    node.destroy_node()
+    assert yaml.safe_load(open(res.result_file))['passed'] is False

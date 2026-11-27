@@ -383,7 +383,9 @@ class CalibrationNode(Node):
     def _terminate(self, goal_handle: Any, result: Calibrate.Result) -> None:
         """The one place a goal reaches its terminal state. Only a success leaves
         the result publishable: the marker is created after the final verdict."""
-        if result.error_code == R.NONE and result.result_file:
+        # publishable only when the run SUCCEEDED and every quality gate passed;
+        # a calibration that failed its gates is kept for inspection, not published
+        if result.error_code == R.NONE and result.passed and result.result_file:
             try:
                 (Path(result.result_file).parent / PUBLISHABLE).touch()
             except OSError as e:
@@ -546,6 +548,7 @@ class CalibrationNode(Node):
             # cached last frame must not pass the preflight
             if info is not None and img is not None and img.received >= start:
                 break
+            self._check_jump(start)          # a reset here is reported as such
             if time.monotonic() > deadline:
                 what = 'CameraInfo' if info is None else 'fresh images'
                 raise RunAbort(R.NO_CAMERA_INFO, f'no {what} received within '
