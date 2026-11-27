@@ -1,0 +1,32 @@
+# handeye_autopilot node parameters (docs/design/01-architecture.md §5a).
+# Every capture.*, solver.*, session.* and board.* field of the core config
+# dataclasses is a parameter with the same name; only common ones are listed.
+# A profile (<profiles_dir>/<name>.yaml) overrides these for one run.
+handeye_autopilot:
+  ros__parameters:
+    base_frame: base_link
+    tool_frame: tool0
+    board_frame: calibration_board
+    camera_root_frame: ""          # empty = topmost ancestor of the optical frame
+    image_is_rectified: false
+    output_dir: ~/.ros/handeye_autopilot
+    profiles_dir: ""
+    board:
+      kind: charuco                # charuco | checkerboard
+      squares_x: 7
+      squares_y: 5
+      square_length: 0.04          # m, measured on the print
+      marker_length: 0.03          # m (ChArUco)
+      dictionary: DICT_5X5_100
+    session:
+      target_captures: 20          # manual mode solves when this many are accepted
+      frames_per_capture: 3
+    solver:
+      min_captures: 8              # per k-fold training split: with 5 folds, ~/finish
+      #                              needs ceil(8 x 5 / 4) = 10 accepted captures
+    timing:
+      settle_window: 0.5
+      settle_timeout: 10.0
+      tf_timeout: 0.5
+      clock_tolerance: 0.5         # s; catches clock-domain mismatches (sim vs wall,
+      #                              device clocks); raise on a heavily loaded PC

@@ -1,3 +1,5 @@
+from glob import glob
+
 from setuptools import find_packages, setup
 
 package_name = 'handeye_autopilot'
@@ -9,6 +11,8 @@ setup(
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name + '/config', glob('config/*.yaml')),
+        ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -21,5 +25,8 @@ setup(
     entry_points={'console_scripts': [
         'board_image = handeye_autopilot.cli.board_image:main',
         'resolve = handeye_autopilot.cli.resolve:main',
+        'calibrate_node = handeye_autopilot.ros.node:main',
+        'synthetic_camera = handeye_autopilot.ros.synthetic_camera:main',
+        'publish_result = handeye_autopilot.ros.publish_result:main',
     ]},
 )

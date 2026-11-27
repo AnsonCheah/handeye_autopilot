@@ -1,0 +1,285 @@
+ros_distro: rolling
+time: Thu Nov 26 22:44:59 2026
+to_ready:
+  submitted: true
+  left_requesting_s: 0.011
+  accepted: true
+  wait_returned: true
+  seconds: 0.118
+  status: 4
+  error_code: 1
+  action: MoveGroup_Result
+  planned_points: 1
+  executed_points: 0
+  lifecycle_status: 4
+  last_failure: null
+  joints_after:
+  - 0.0
+  - -0.785
+  - 0.0
+  - -2.356
+  - 0.0
+  - 1.571
+  - 0.785
+  state_after: MoveIt2State.IDLE
+success:
+  submitted: true
+  left_requesting_s: 0.011
+  accepted: true
+  wait_returned: true
+  seconds: 2.97
+  status: 4
+  error_code: 1
+  action: MoveGroup_Result
+  planned_points: 30
+  executed_points: 0
+  lifecycle_status: 4
+  last_failure: null
+  joints_after:
+  - 1.2001
+  - 0.3004
+  - -0.399
+  - -1.6006
+  - 0.4996
+  - 2.2005
+  - -0.2996
+  state_after: MoveIt2State.IDLE
+planning_failure:
+  submitted: true
+  left_requesting_s: 0.011
+  accepted: true
+  wait_returned: false
+  seconds: 0.048
+  status: 6
+  error_code: 99999
+  action: MoveGroup_Result
+  planned_points: 0
+  executed_points: 0
+  lifecycle_status: 6
+  last_failure: 'FAILURE: The request failed without a specific reason. Check the
+    `move_group` log.'
+  joints_after:
+  - 1.2001
+  - 0.3004
+  - -0.399
+  - -1.6006
+  - 0.4996
+  - 2.2005
+  - -0.2996
+  state_after: MoveIt2State.IDLE
+out_of_bounds_goal:
+  submitted: true
+  left_requesting_s: 0.011
+  accepted: true
+  wait_returned: true
+  seconds: 3.371
+  status: 4
+  error_code: 1
+  action: MoveGroup_Result
+  planned_points: 34
+  executed_points: 0
+  lifecycle_status: 4
+  last_failure: null
+  joints_after:
+  - 0.0001
+  - -0.786
+  - -0.0009
+  - 0.0175
+  - 0.0004
+  - 1.5704
+  - 0.7843
+  state_after: MoveIt2State.IDLE
+back_to_far:
+  submitted: true
+  left_requesting_s: 0.011
+  accepted: true
+  wait_returned: true
+  seconds: 3.37
+  status: 4
+  error_code: 1
+  action: MoveGroup_Result
+  planned_points: 34
+  executed_points: 0
+  lifecycle_status: 4
+  last_failure: null
+  joints_after:
+  - 1.1998
+  - 0.3004
+  - -0.3994
+  - -1.599
+  - 0.4997
+  - 2.2001
+  - -0.2992
+  state_after: MoveIt2State.IDLE
+cancel_mid_motion:
+  submitted: true
+  left_requesting_s: 0.011
+  accepted: true
+  executing_seen: true
+  motion_seen: true
+  moved_at_cancel_rad: 0.021
+  cancel_request_returned: true
+  wait_returned: false
+  seconds: 0.331
+  cancel_to_terminal_s: 0.026
+  status: 5
+  error_code: -7
+  action: MoveGroup_Result
+  planned_points: 30
+  executed_points: 0
+  lifecycle_status: 5
+  moved_after_cancel_rad: 0.021
+  last_failure: 'PREEMPTED: The goal was cancelled, by `cancel_execution()` or by
+    a newer goal.'
+  joints_after:
+  - 1.1788
+  - 0.2814
+  - -0.3924
+  - -1.6123
+  - 0.491
+  - 2.1891
+  - -0.2802
+  state_after: MoveIt2State.IDLE
+back_to_ready:
+  submitted: true
+  left_requesting_s: 0.011
+  accepted: true
+  wait_returned: true
+  seconds: 2.958
+  status: 4
+  error_code: 1
+  action: MoveGroup_Result
+  planned_points: 30
+  executed_points: 0
+  lifecycle_status: 4
+  last_failure: null
+  joints_after:
+  - -0.0005
+  - -0.7856
+  - 0.0001
+  - -2.3566
+  - 0.0008
+  - 1.5706
+  - 0.785
+  state_after: MoveIt2State.IDLE
+cartesian_ok:
+  submitted: true
+  left_requesting_s: 0.014
+  accepted: true
+  wait_returned: true
+  seconds: 1.137
+  status: 4
+  error_code: 1
+  action: ExecuteTrajectory_Result
+  planned_points: null
+  executed_points: null
+  lifecycle_status: 4
+  last_failure: null
+  joints_after:
+  - -0.0005
+  - -0.6293
+  - 0.0002
+  - -2.258
+  - 0.0008
+  - 1.6284
+  - 0.785
+  state_after: MoveIt2State.IDLE
+  end_position_error_mm: 0.01
+  end_rotation_error_deg: 0.0
+cartesian_back:
+  submitted: true
+  left_requesting_s: 0.014
+  accepted: true
+  wait_returned: true
+  seconds: 1.138
+  status: 4
+  error_code: 1
+  action: ExecuteTrajectory_Result
+  planned_points: null
+  executed_points: null
+  lifecycle_status: 4
+  last_failure: null
+  joints_after:
+  - -0.0005
+  - -0.7856
+  - 0.0001
+  - -2.3566
+  - 0.0008
+  - 1.5707
+  - 0.785
+  state_after: MoveIt2State.IDLE
+cartesian_impossible:
+  submitted: false
+  left_requesting_s: 0.078
+  accepted: null
+  wait_returned: false
+  seconds: 0.078
+  status: null
+  error_code: null
+  lifecycle_status: null
+  last_failure: The Cartesian planner reached only 0.13333333333333333 of the path,
+    short of the threshold 1.0; lower `cartesian_fraction_threshold`, or move the
+    goal closer so a straight path exists.
+  joints_after:
+  - -0.0005
+  - -0.7856
+  - 0.0001
+  - -2.3566
+  - 0.0008
+  - 1.5707
+  - 0.785
+  state_after: MoveIt2State.IDLE
+offset_tcp_endpoint_only:
+  done: true
+  waypoints: 1
+  fraction: 1.0
+  points: 10
+  error_code: 1
+  tcp_max_deviation_mm: 4.518
+  tcp_rotation_deg: 20.0
+  tcp_goal_error_deg: 0.0
+offset_tcp_dense_waypoints:
+  done: true
+  waypoints: 20
+  fraction: 1.0
+  points: 10
+  error_code: 1
+  tcp_max_deviation_mm: 0.014
+  tcp_rotation_deg: 20.0
+  tcp_goal_error_deg: 0.0
+ik_whole_seconds:
+  done: true
+  seconds: 0.01
+  error_code: 1
+  joints:
+  - -0.0005
+  - -0.7856
+  - 0.0001
+  - -2.3566
+  - 0.0008
+  - 1.5707
+  - 0.785
+ik_nanosec_only:
+  done: true
+  seconds: 0.01
+  error_code: 1
+  joints:
+  - -0.0005
+  - -0.7856
+  - 0.0001
+  - -2.3566
+  - 0.0008
+  - 1.5707
+  - 0.785
+ik_unreachable:
+  done: true
+  seconds: 1.007
+  error_code: -31
+  joints: []
+ik_unreachable_nanosec_only:
+  done: true
+  seconds: 0.061
+  error_code: -31
+  joints: []
+pymoveit2_missing_api: []
+inconclusive: []

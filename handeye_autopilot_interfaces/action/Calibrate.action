@@ -34,7 +34,7 @@ bool transform_valid       # an estimate exists (true even when quality failed)
 bool passed                # all gated quality checks passed
 # Pose of the camera optical frame in the parent: frame_id = base_frame
 # (eye_to_hand) or tool_frame (eye_in_hand), child_frame_id = optical frame.
-# Stamp = node time when the final solve finished. Identity with empty frame
+# Stamp = node time when the final solve and its k-fold verification finished. Identity with empty frame
 # ids when transform_valid is false (same for target_transform).
 geometry_msgs/TransformStamped camera_transform
 # Board pose: frame_id = tool_frame (eye_to_hand) or base_frame (eye_in_hand),
