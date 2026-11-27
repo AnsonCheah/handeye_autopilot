@@ -157,6 +157,12 @@ def merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def least_captures(min_captures: int, folds: int) -> int:
+    """Fewest accepted captures that leave every k-fold training split with at
+    least ``min_captures`` (and at least one capture per fold)."""
+    return max(folds, -(-min_captures * folds // (folds - 1))) if folds > 1 else min_captures
+
+
 def check_types(group: str, cls: type, values: dict[str, Any]) -> None:
     """Each value has its field's type: a quoted "false" must not become True,
     a bool must not pass as a number (YAML profiles are hand-written)."""
@@ -208,8 +214,8 @@ def build(doc: dict[str, Any], profile: str = '') -> RunConfig:
                 (isinstance(d, float) and isinstance(v, (int, float)) and
                  not isinstance(v, bool))):
             raise ValueError(f'board.{k} must be a {type(d).__name__}, got {v!r}')
+    least = least_captures(doc['solver']['min_captures'], doc['solver']['folds'])
     k, need = doc['solver']['folds'], doc['solver']['min_captures']
-    least = -(-need * k // (k - 1)) if isinstance(k, int) and k > 1 else need
     if doc['session']['target_captures'] < least:
         # every k-fold training split (target - target/k) must still reach min_captures
         raise ValueError(f'session.target_captures must be >= {least} (solver.min_captures '

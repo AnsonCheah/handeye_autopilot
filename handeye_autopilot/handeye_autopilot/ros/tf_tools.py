@@ -136,9 +136,14 @@ class StaticLinks:
     """Every (parent, child) seen on /tf_static (latched, so late joiners get all),
     or, for the dynamic instance, on /tf."""
 
-    def __init__(self) -> None:
+    def __init__(self, track_values: bool = False) -> None:
+        """``track_values`` only for /tf_static: a static edge has one value (a
+        second, different one means two publishers disagree). /tf trackers record
+        edges only: a moving link has endless values, and keeping them would make
+        every message slower (TF fell behind on a moving robot in review)."""
         self.links: set[tuple[str, str]] = set()
         self.values: dict[tuple[str, str], list[Mat]] = {}   # distinct values per edge
+        self._track = track_values
         self._lock = threading.Lock()
 
     def add(self, msg: object) -> None:
@@ -146,10 +151,12 @@ class StaticLinks:
             for t in msg.transforms:  # type: ignore[attr-defined]
                 edge = (t.header.frame_id, t.child_frame_id)
                 self.links.add(edge)
+                if not self._track:
+                    continue
                 T = to_matrix(t)
                 seen = self.values.setdefault(edge, [])
-                if not any(np.allclose(T, S, atol=1e-6) for S in seen):
-                    seen.append(T)
+                if len(seen) < 2 and not any(np.allclose(T, S, atol=1e-6) for S in seen):
+                    seen.append(T)               # two distinct values already prove a conflict
 
     def conflicting(self, parent: str, child: str) -> bool:
         """Two publishers announced different values for this static edge (a

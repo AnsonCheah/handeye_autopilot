@@ -60,6 +60,7 @@ from ..core.camera import CameraModel
 from ..core.capture import CaptureRecord, Frame, capture
 from ..core.quality import Calibration, calibrate
 from ..core.results import result_dict, transform_dict
+from ..core.solver import TOO_FEW_CAPTURES
 from . import params as P
 from . import tf_tools, viz
 from .camera_input import CameraInfoError, ImageBuffer, camera_model, same_info
@@ -127,7 +128,7 @@ class CalibrationNode(Node):
         # TF (§8-9)
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self, spin_thread=False)
-        self.static_links = tf_tools.StaticLinks()
+        self.static_links = tf_tools.StaticLinks(track_values=True)
         static_qos = QoSProfile(depth=100, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                                 reliability=ReliabilityPolicy.RELIABLE,
                                 history=HistoryPolicy.KEEP_LAST)
@@ -297,6 +298,7 @@ class CalibrationNode(Node):
                 return res
         t0, call_now = time.monotonic(), self.now()
         window, vmax, deadline, min_msgs = 0.5, 0.01, t0 + 3.0, 5
+        waiting = ''
         while time.monotonic() < deadline:
             with self._lock:
                 # fresh: arrived after the call AND stamped after it (not a replay)
@@ -329,10 +331,10 @@ class CalibrationNode(Node):
                 thin = [n for n in known | set(series) if n not in series or
                         len(series[n]) < min_msgs or
                         max(t for t, _ in series[n]) - min(t for t, _ in series[n]) < window]
-                if thin:
-                    res.success, res.message = False, (
-                        f'not enough fresh samples for joint(s) {", ".join(sorted(thin))}')
-                    return res
+                if thin:              # keep collecting until the deadline
+                    waiting = f'not enough fresh samples for joint(s) {", ".join(sorted(thin))}'
+                    time.sleep(0.05)
+                    continue
                 series = {n: [p for _, p in v] for n, v in series.items()}
                 span = max(float(np.ptp(v)) for v in series.values())  # type: ignore[arg-type]
                 if span > vmax * window:
@@ -344,9 +346,9 @@ class CalibrationNode(Node):
                 res.success, res.message = True, 'fault cleared'
                 return res
             time.sleep(0.05)
-        res.success, res.message = False, ('no fresh /joint_states (at least 5 messages over '
-                                           f'{window} s, stamped after the call): cannot '
-                                           'confirm the robot has stopped')
+        res.success, res.message = False, waiting or (
+            'no fresh /joint_states (at least 5 messages over '
+            f'{window} s, stamped after the call): cannot confirm the robot has stopped')
         return res
 
     # -- the run ------------------------------------------------------------------
@@ -479,7 +481,8 @@ class CalibrationNode(Node):
         except ValueError as e:
             return self._result(R.INVALID_GOAL, str(e))
         with self._lock:
-            run.min_captures = cfg.solver.min_captures
+            # ~/finish needs enough captures for every k-fold training split
+            run.min_captures = P.least_captures(cfg.solver.min_captures, cfg.solver.folds)
             run.target_captures = cfg.session.target_captures
         try:
             camera, info = self._preflight(goal_handle, run, cfg)
@@ -499,9 +502,12 @@ class CalibrationNode(Node):
         self._feedback(goal_handle, run, FB.PHASE_VERIFYING)
         path = self._write_results(goal.mode, cfg, records, cal, frames)
         if cal.solution is None:
-            msg = f'solve failed ({cal.failure.reason if cal.failure else "unknown"}): ' \
-                  f'{cal.failure}; observations saved for an offline re-solve'
-            return self._result(R.SOLVE_FAILED, msg, cal, frames, str(path))
+            reason = cal.failure.reason if cal.failure else 'unknown'
+            msg = f'solve failed ({reason}): {cal.failure}; observations saved for an ' \
+                  'offline re-solve'
+            # 02-features §E5: too_few_captures -> NOT_ENOUGH_SAMPLES, others SOLVE_FAILED
+            code = R.NOT_ENOUGH_SAMPLES if reason == TOO_FEW_CAPTURES else R.SOLVE_FAILED
+            return self._result(code, msg, cal, frames, str(path))
         msg = 'calibration passed all quality gates' if cal.passed else \
             'calibration finished but failed quality gates: ' + ', '.join(
                 g.name for g in cal.report.gates if g.gated and not g.passed)

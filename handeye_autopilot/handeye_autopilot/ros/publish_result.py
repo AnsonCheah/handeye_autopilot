@@ -65,7 +65,7 @@ class ResultPublisher(Node):
         self.moving = tf_tools.StaticLinks()          # edges seen on /tf
         self.create_subscription(TFMessage, '/tf', self.moving.add,
                                  QoSProfile(depth=100, reliability=ReliabilityPolicy.BEST_EFFORT))
-        self.static_values = tf_tools.StaticLinks()   # conflicting static values
+        self.static_values = tf_tools.StaticLinks(track_values=True)   # conflicting values
         self.create_subscription(
             TFMessage, '/tf_static', self.static_values.add,
             QoSProfile(depth=100, durability=DurabilityPolicy.TRANSIENT_LOCAL,

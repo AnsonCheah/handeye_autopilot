@@ -331,7 +331,7 @@ def test_clear_fault_needs_fresh_joint_states(world_factory):
 
 
 def test_profiles_override_and_validate(world_factory, tmp_path):
-    (tmp_path / 'small.yaml').write_text('session:\n  target_captures: 4\n'
+    (tmp_path / 'small.yaml').write_text('session:\n  target_captures: 5\n'
                                          'solver:\n  min_captures: 3\n')
     (tmp_path / 'broken.yaml').write_text('session:\n  step_safety: 0.0\n')
     (tmp_path / 'typo.yaml').write_text('sesion:\n  target_captures: 3\n')
@@ -343,9 +343,9 @@ def test_profiles_override_and_validate(world_factory, tmp_path):
     h = d.send(profile='small')
     assert h.accepted
     d.wait_phase(FB.PHASE_MANUAL_CAPTURE)
-    run_captures(w, len(w.poses), accepted_target=4)
-    res = w.result(h).result                       # solves after 4 (profile), not 10
-    assert res.quality.captures_accepted == 4
+    run_captures(w, len(w.poses), accepted_target=5)
+    res = w.result(h).result                       # solves after 5 (profile), not 10
+    assert res.quality.captures_accepted == 5
 
 
 def test_services_refuse_outside_their_phase(world_factory):
@@ -356,7 +356,7 @@ def test_services_refuse_outside_their_phase(world_factory):
     h = d.send()
     d.wait_phase(FB.PHASE_MANUAL_CAPTURE)
     r = d.call(d.finish)
-    assert not r.success and 'at least 8' in r.message
+    assert not r.success and 'at least 10' in r.message      # 8 per fold x 5 folds
     d.wait(h.cancel_goal_async())
     w.result(h)
 
@@ -437,17 +437,17 @@ def test_camera_switch_mid_run_aborts(world_factory):
 
 
 def test_capture_refused_once_the_run_is_finishing(world_factory, tmp_path):
-    (tmp_path / 'tiny.yaml').write_text('session:\n  target_captures: 4\nsolver:\n'
+    (tmp_path / 'tiny.yaml').write_text('session:\n  target_captures: 5\nsolver:\n'
                                         '  min_captures: 3\n')
     w = world_factory(node_over={'profiles_dir': str(tmp_path),
                                  'timing.settle_window': 0.3})
     d = w.driver
     h = d.send(profile='tiny')
     d.wait_phase(FB.PHASE_MANUAL_CAPTURE)
-    run_captures(w, len(w.poses), accepted_target=4)
+    run_captures(w, len(w.poses), accepted_target=5)
     r = d.call(d.capture)
     assert not r.success
-    assert w.result(h).result.quality.captures_accepted == 4
+    assert w.result(h).result.quality.captures_accepted == 5
 
 
 def test_profile_with_a_string_boolean_is_invalid(world_factory, tmp_path):
@@ -562,7 +562,7 @@ def test_string_boolean_anywhere_in_a_profile_is_invalid(world_factory, tmp_path
 
 def test_profile_is_read_at_admission(world_factory, tmp_path):
     f = tmp_path / 'p.yaml'
-    f.write_text('session:\n  target_captures: 4\nsolver:\n  min_captures: 3\n')
+    f.write_text('session:\n  target_captures: 5\nsolver:\n  min_captures: 3\n')
     w = world_factory(node_over={'profiles_dir': str(tmp_path)})
     h = w.driver.send(profile='p')
     f.write_text('session:\n  step_safety: 0.0\n')       # edited after acceptance
@@ -572,11 +572,11 @@ def test_profile_is_read_at_admission(world_factory, tmp_path):
 
 
 def test_capture_acknowledged_before_finish_is_taken(world_factory):
-    w = world_factory()
+    w = world_factory(node_over={'session.target_captures': 12})
     d = w.driver
     h = d.send()
     d.wait_phase(FB.PHASE_MANUAL_CAPTURE)
-    run_captures(w, len(w.poses), accepted_target=8)
+    run_captures(w, len(w.poses), accepted_target=10)      # finish needs 10 (5 folds x 8)
     n = len(w.node._run.records)
     w.robot.move_to(w.poses[-1])
     assert d.call(d.capture).success
@@ -880,7 +880,7 @@ def test_a_moving_joint_on_another_publisher_blocks_clearing(world_factory):
 def test_conflicting_static_values_are_refused():
     from handeye_autopilot.ros import tf_tools
     from tf2_msgs.msg import TFMessage
-    static = tf_tools.StaticLinks()
+    static = tf_tools.StaticLinks(track_values=True)
     static.add(TFMessage(transforms=[tf_tools.to_msg(np.eye(4), 'cam', 'opt')]))
     static.add(TFMessage(transforms=[tf_tools.to_msg(tf.make(np.eye(3), [0.25, 0, 0]),
                                                      'cam', 'opt')]))   # a URDF disagrees
@@ -918,3 +918,40 @@ def test_one_sample_of_a_moving_joint_is_not_enough(world_factory):
     r = d.call(d.clear_fault)
     stop.set()
     assert not r.success and 'rail' in r.message
+
+
+# -- review fixes (M3 xhigh pass 7) -------------------------------------------------
+
+def test_tf_trackers_stay_small_on_a_moving_robot():
+    from handeye_autopilot.ros import tf_tools
+    from tf2_msgs.msg import TFMessage
+    moving, static = tf_tools.StaticLinks(), tf_tools.StaticLinks(track_values=True)
+    t0 = time.monotonic()
+    for k in range(20000):                        # ~5 min of one link at 60 Hz
+        m = tf_tools.to_msg(tf.make(np.eye(3), [k * 1e-4, 0, 0]), 'base_link', 'tool0')
+        moving.add(TFMessage(transforms=[m]))
+        static.add(TFMessage(transforms=[m]))
+    assert time.monotonic() - t0 < 20.0
+    assert not moving.values and len(static.values[('base_link', 'tool0')]) <= 2
+
+
+def test_more_folds_than_captures_is_invalid(world_factory, tmp_path):
+    (tmp_path / 'folds.yaml').write_text('session:\n  target_captures: 12\n'
+                                         'solver:\n  folds: 15\n')
+    w = world_factory(node_over={'profiles_dir': str(tmp_path)})
+    res = w.result(w.driver.send(profile='folds')).result
+    assert res.error_code == R.INVALID_GOAL and 'target_captures' in res.message
+
+
+def test_too_few_inliers_maps_to_not_enough_samples(world_factory, monkeypatch):
+    from handeye_autopilot.core import quality
+    from handeye_autopilot.core.solver import TOO_FEW_CAPTURES, SolveError
+    import handeye_autopilot.ros.node as node_mod
+    w = world_factory()
+
+    def fail(mode, records, cfg):
+        return quality.Calibration(mode, None, quality.QualityReport(), [],
+                                   SolveError(TOO_FEW_CAPTURES, '5 captures left'))
+    monkeypatch.setattr(node_mod, 'calibrate', fail)
+    res = _finish_run(w)
+    assert res.error_code == R.NOT_ENOUGH_SAMPLES and not res.transform_valid
