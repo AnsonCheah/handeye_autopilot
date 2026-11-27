@@ -1221,3 +1221,53 @@ def test_new_resolution_image_before_its_camera_info(world_factory):
     stop.set()
     w.driver.wait(h.cancel_goal_async())
     w.result(h)
+
+
+def test_camera_info_change_during_the_preflight_tf_wait(world_factory):
+    """TF arrives 350 ms late; the camera switches resolution while preflight is
+    waiting for it. The old pair must not be pinned."""
+    from sensor_msgs.msg import Image
+    w = world_factory(cam_over={'stamp_from_clock': True})
+    w.camera.timer.cancel()
+    time.sleep(1.0)
+    w.robot.delay = 0.35
+    time.sleep(0.5)
+    old = w.node._info
+    new = w.camera.info(w.node.get_clock().now().to_msg())
+    new.width, new.height = 320, 240
+    new.k = [300.0, 0.0, 159.5, 0.0, 300.0, 119.5, 0.0, 0.0, 1.0]
+    new.p = [300.0, 0.0, 159.5, 0.0, 0.0, 300.0, 119.5, 0.0, 0.0, 0.0, 1.0, 0.0]
+    h = w.driver.send()
+    w.driver.wait_phase(FB.PHASE_PREFLIGHT)
+    stop = threading.Event()
+
+    def stream():
+        t0 = time.monotonic()
+        switched = False
+        while not stop.is_set():
+            size = (320, 240) if switched else (old.width, old.height)
+            img = Image(encoding='mono8', width=size[0], height=size[1], step=size[0],
+                        data=bytes(size[0] * size[1]))
+            img.header.frame_id = 'camera_optical_frame'
+            img.header.stamp = w.node.get_clock().now().to_msg()
+            w.node._on_image(img)
+            if not switched and time.monotonic() - t0 > 0.15:     # mid TF wait
+                w.node._on_info(new)
+                switched = True
+            time.sleep(0.05)
+    threading.Thread(target=stream, daemon=True).start()
+    w.driver.wait_phase(FB.PHASE_MANUAL_CAPTURE, timeout=15.0)
+    assert w.node._run.info.width == 320
+    stop.set()
+    w.driver.wait(h.cancel_goal_async())
+    w.result(h)
+
+
+def test_internal_error_keeps_the_capture_counts(world_factory, monkeypatch):
+    w = world_factory()
+
+    def readonly(*a, **k):
+        raise PermissionError('read-only output volume')
+    monkeypatch.setattr(w.node, '_write_results', readonly)
+    res = _finish_run(w)
+    assert res.error_code == R.INTERNAL and res.quality.captures_accepted >= 10

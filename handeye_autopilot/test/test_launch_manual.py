@@ -54,7 +54,10 @@ def _params_file():
             'session': {'target_captures': 10, 'frames_per_capture': 2},
             'capture': {'consensus_min_frames': 2},
             'solver': {'min_captures': 8},
-            'timing': {'settle_window': 0.3, 'settle_timeout': 3.0}}}}, f)
+            # end-to-end flow under full-suite CPU load: frames can wait seconds for
+            # processing; the clock-domain check has its own tests (offsets of 60 s)
+            'timing': {'settle_window': 0.3, 'settle_timeout': 3.0,
+                       'clock_tolerance': 10.0}}}}, f)
     return path
 
 

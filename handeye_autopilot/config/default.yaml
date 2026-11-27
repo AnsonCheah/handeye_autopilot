@@ -28,4 +28,5 @@ handeye_autopilot:
       settle_window: 0.5
       settle_timeout: 10.0
       tf_timeout: 0.5
-      clock_tolerance: 0.5
+      clock_tolerance: 0.5         # s; catches clock-domain mismatches (sim vs wall,
+      #                              device clocks); raise on a heavily loaded PC

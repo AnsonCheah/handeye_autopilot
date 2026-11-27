@@ -364,8 +364,8 @@ class CalibrationNode(Node):
             return result
         except Exception as e:  # noqa: BLE001 - any bug must still end the goal
             self.get_logger().error(f'run failed: {e!r}')
-            result = self._final_verdict(run, self._result(R.INTERNAL,
-                                                           f'internal error: {e!r}'))
+            result = self._final_verdict(run, self._result(
+                R.INTERNAL, f'internal error: {e!r}', counts=(run.accepted, run.rejected)))
             self._terminate(goal_handle, result)     # an accepted cancel is honoured here too
             return result
         finally:
