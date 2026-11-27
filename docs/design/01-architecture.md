@@ -234,7 +234,7 @@ one updates it):
 | Package | build / buildtool | exec | test |
 |---|---|---|---|
 | `handeye_autopilot_interfaces` | `ament_cmake`, `rosidl_default_generators`, `geometry_msgs`, `action_msgs`, `service_msgs` | `rosidl_default_runtime`, `geometry_msgs`, `action_msgs`, `service_msgs` | — |
-| `handeye_autopilot` | — | `python3-numpy`, `python3-scipy`, `python3-opencv`, `python3-yaml`, `rclpy`, `cv_bridge`, `image_geometry`, `tf2_ros`, `geometry_msgs`, `sensor_msgs`, `std_srvs`, `moveit_msgs`, `pymoveit2`, `handeye_autopilot_interfaces`; M3: `std_msgs`, `builtin_interfaces`, `tf2_msgs`, `visualization_msgs`, `ament_index_python`, `launch`, `launch_ros`, `ros2bag`, `tf2_ros_py` | `python3-pytest`; M3: `launch_testing`, `launch_testing_ros` |
+| `handeye_autopilot` | — | `python3-numpy`, `python3-scipy`, `python3-opencv`, `python3-yaml`, `rclpy`, `cv_bridge`, `image_geometry`, `tf2_ros`, `geometry_msgs`, `sensor_msgs`, `std_srvs`, `moveit_msgs`, `pymoveit2`, `handeye_autopilot_interfaces`; M3: `std_msgs`, `builtin_interfaces`, `tf2_msgs`, `visualization_msgs`, `ament_index_python`, `launch`, `launch_ros`, `ros2bag`, `tf2_ros_py`, `rosgraph_msgs` | `python3-pytest`; M3: `launch_testing`, `launch_testing_ros` |
 | `handeye_autopilot_demos` | — | `handeye_autopilot`, `handeye_autopilot_interfaces`, `launch`, `launch_ros`, `moveit_resources_panda_moveit_config`, `ur_moveit_config`, `ur_robot_driver` | `python3-pytest` |
 
 **Dependency gate (CI, every PR, every distro;

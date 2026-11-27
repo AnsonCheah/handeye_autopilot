@@ -43,6 +43,7 @@ from rclpy.qos import (
     ReliabilityPolicy,
     qos_profile_sensor_data,
 )
+from rosgraph_msgs.msg import Clock
 from sensor_msgs.msg import CameraInfo, Image, JointState
 from std_msgs.msg import Header
 from std_srvs.srv import Trigger
@@ -148,6 +149,14 @@ class CalibrationNode(Node):
         self._jump_handle = self.get_clock().create_jump_callback(
             JumpThreshold(min_forward=None, min_backward=RclDuration(nanoseconds=-1),
                           on_clock_change=True), post_callback=self._on_jump)
+        # the jump callback missed small sim rewinds on Lyrical in CI: under sim time
+        # also watch /clock itself and count any backwards step
+        self._last_clock = -1.0
+        if self.get_parameter('use_sim_time').value:
+            self.create_subscription(Clock, '/clock', self._on_clock,
+                                     QoSProfile(depth=10,
+                                                reliability=ReliabilityPolicy.BEST_EFFORT),
+                                     callback_group=self._sensors)
         self.last_run_records: list[CaptureRecord] = []
         self.last_result: Calibrate.Result | None = None
         self._solve_end: Any = None          # node time the last final solve finished
@@ -180,6 +189,13 @@ class CalibrationNode(Node):
     # -- small helpers ------------------------------------------------------------
     def now(self) -> float:
         return self.get_clock().now().nanoseconds * 1e-9
+
+    def _on_clock(self, msg: Clock) -> None:
+        t = msg.clock.sec + msg.clock.nanosec * 1e-9
+        back = t < self._last_clock
+        self._last_clock = t
+        if back:
+            self._on_jump(None)
 
     def _on_jump(self, jump: Any) -> None:
         with self._lock:

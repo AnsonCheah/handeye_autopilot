@@ -78,7 +78,8 @@ class SyntheticCamera(Node):
         d('noise_sigma', 2.0)
         d('stamp_offset', 0.0)
         d('stamp_from_clock', False)   # stamp with the node clock, not the pose's TF stamp
-        d('max_pose_age', 0.2)         # s; an older robot pose drops the frame
+        d('max_pose_age', 1.0)         # s; an older robot pose drops the frame
+        d('supersample', 1)            # anti-aliasing factor (2 is ~4x slower to render)
         d('seed', 0)
 
         g = self.get_parameter
@@ -106,7 +107,8 @@ class SyntheticCamera(Node):
         tex, H = board_texture(self.board, 60, 30)
         self.texture, self.tex_H = tex, H
         self.renderer = Renderer(self.camera, ImageEffects(
-            noise_sigma=float(g('noise_sigma').value)))
+            noise_sigma=float(g('noise_sigma').value),
+            supersample=int(g('supersample').value)))
         self.bridge = CvBridge()
 
         self.tf_buffer = tf2_ros.Buffer()
