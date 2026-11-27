@@ -511,14 +511,14 @@ class CalibrationNode(Node):
             self._feedback(goal_handle, run, FB.PHASE_SOLVING)
             frames = dict(cfg.frames, camera_frame=info.header.frame_id)
             t_solve = self.now()
-            cal = calibrate(goal.mode, records, cfg.solver)
+            cal = calibrate(goal.mode, records, cfg.solver, on_solved=lambda: self._feedback(
+                goal_handle, run, FB.PHASE_VERIFYING))
             self._solve_end = self.get_clock().now()
             # a cancel or a clock reset during the solve still wins (no result written)
             self._check_cancel(goal_handle, run)
             self._check_jump(t_solve)
         except RunAbort as e:
             return self._result(e.code, str(e), counts=(run.accepted, run.rejected))
-        self._feedback(goal_handle, run, FB.PHASE_VERIFYING)
         path = self._write_results(goal.mode, cfg, records, cal, frames)
         if cal.solution is None:
             reason = cal.failure.reason if cal.failure else 'unknown'
@@ -567,19 +567,28 @@ class CalibrationNode(Node):
                            f'CameraInfo frame {info.header.frame_id!r}')
         if img.gray.shape[1] != info.width or img.gray.shape[0] != info.height:
             raise RunAbort(R.NO_CAMERA_INFO, 'image size differs from CameraInfo')
-        self._check_clock(img.stamp, img.received, cfg)
         base, tool = cfg.frames['base_frame'], cfg.frames['tool_frame']
         # TF at an image's stamp, retried with the NEWEST image each time (an early
         # frame can predate this node's TF history), until the deadline
         tf_deadline = time.monotonic() + max(t.tf_timeout, t.camera_info_timeout)
         found = None
+        clock_error: RunAbort | None = None
         while found is None and time.monotonic() < tf_deadline:
             self._check_jump(start)          # a reset here is reported as such
             self._drop_future_tf(base, tool, cfg)
             img = self.images.latest() or img
-            self._check_clock(img.stamp, img.received, cfg)
+            try:
+                self._check_clock(img.stamp, img.received, cfg)
+            except RunAbort as e:            # an old-epoch frame right after a reset:
+                clock_error = e              # wait for newer frames until the deadline
+                time.sleep(0.05)
+                continue
+            clock_error = None
             found = self._lookup_cancellable(goal_handle, run, base, tool, img.stamp_ns,
                                              t.tf_timeout)      # full latency budget per frame
+        self._check_jump(start)              # a reset during the last lookup, too
+        if found is None and clock_error is not None:
+            raise clock_error
         if found is None:
             if tf_tools.latest(self.tf_buffer, base, tool) is None:
                 why = 'is the robot driver (robot_state_publisher) running?'

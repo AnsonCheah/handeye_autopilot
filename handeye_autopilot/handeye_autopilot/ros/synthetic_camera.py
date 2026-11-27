@@ -151,7 +151,7 @@ class SyntheticCamera(Node):
             return                                   # no robot yet: no image
         G, tf_stamp = got
         now_s = self.get_clock().now().nanoseconds * 1e-9
-        if tf_stamp > now_s + 1.0:      # TF from before a clock reset, still in flight
+        if tf_stamp > now_s + 0.05:     # TF from before a clock reset, still in flight
             self.tf_buffer.clear()
             return
         if not self.stamp_from_clock and now_s - tf_stamp > self.max_pose_age:

@@ -995,7 +995,7 @@ def test_too_few_inliers_maps_to_not_enough_samples(world_factory, monkeypatch):
     import handeye_autopilot.ros.node as node_mod
     w = world_factory()
 
-    def fail(mode, records, cfg):
+    def fail(mode, records, cfg, **kw):
         return quality.Calibration(mode, None, quality.QualityReport(), [],
                                    SolveError(TOO_FEW_CAPTURES, '5 captures left'))
     monkeypatch.setattr(node_mod, 'calibrate', fail)
@@ -1135,3 +1135,25 @@ def test_recalibration_after_a_mode_switch_is_accepted():
     sub = tf_tools.camera_subtree(tree, static, 'opt', 'tool0', '', None,
                                   {'base_link', 'tool0'})
     assert sub.error == '' and sub.root == 'camera_link'
+
+
+# -- review fixes (M3 xhigh pass 13) ------------------------------------------------
+
+def test_short_rewind_then_a_goal(world_factory):
+    """A sub-second sim rewind (0.95 s) shortly before a goal, TF in flight."""
+    w = world_factory(sim_time=True, node_over={'timing.clock_tolerance': 0.5})
+    w.robot.delay = 0.15
+    time.sleep(0.5)
+    w.clock.jump(-0.95)
+    time.sleep(0.25)
+    h = w.driver.send()
+    w.driver.wait_phase(FB.PHASE_MANUAL_CAPTURE, timeout=20.0)
+    w.driver.wait(h.cancel_goal_async())
+    w.result(h)
+
+
+def test_verifying_phase_comes_between_solve_and_result(world_factory):
+    w = world_factory()
+    _finish_run(w)
+    phases = [f.phase for f in w.driver.feedback]
+    assert phases.index(FB.PHASE_SOLVING) < phases.index(FB.PHASE_VERIFYING)

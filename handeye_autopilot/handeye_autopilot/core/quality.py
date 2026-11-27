@@ -7,6 +7,7 @@ every fold the same way and pass every gate (tests record their bias).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 import math
 from typing import Any
@@ -139,8 +140,11 @@ def k_folds(mode: str, recs: list[CaptureRecord], full: Solution, cfg: SolverCon
     return results, held_errors
 
 
-def calibrate(mode: str, records: list[CaptureRecord], cfg: SolverConfig) -> Calibration:
-    """Solve, verify and gate one run. Never raises SolveError: failures are reported."""
+def calibrate(mode: str, records: list[CaptureRecord], cfg: SolverConfig,
+              on_solved: Callable[[], None] | None = None) -> Calibration:
+    """Solve, verify and gate one run. Never raises SolveError: failures are reported.
+    ``on_solved`` is called after the final solve, before k-fold verification
+    (the node switches its progress phase there)."""
     accepted = [r for r in records if r.accepted]
     report = QualityReport(captures_accepted=len(accepted),
                            captures_rejected=len(records) - len(accepted))
@@ -148,6 +152,8 @@ def calibrate(mode: str, records: list[CaptureRecord], cfg: SolverConfig) -> Cal
         sol = solve(mode, accepted, cfg)
     except SolveError as e:
         return Calibration(mode, None, report, [], e)
+    if on_solved is not None:
+        on_solved()
 
     obs: Observability = sol.observability
     report.inliers, report.outliers = len(sol.inliers), len(sol.outliers)
