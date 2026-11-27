@@ -163,6 +163,10 @@ farm sync), which don't shrink with more effort. Re-estimate after M1a.
 - **Done when:** both demos run unattended in both modes and pass; the failure
   tests pass; one demo runs in CI on every distro where MoveIt + the robot
   config install.
+- **Added after M4 (maintainer request):** a mount sweep, ±200 mm and ±90° per
+  tool axis on the board / camera mount, both modes, core level and on both
+  robots (01-architecture §10); the demo stays up after an unattended run with
+  RViz so the result can be published to TF.
 
 ## M5 — Real hardware, fixtures, exposure (effort 2 wk; waits: hardware slot)
 

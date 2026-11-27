@@ -1,0 +1,209 @@
+"""Run the demo calibration for many board / camera mounts (config/mount_sweep.yaml).
+
+    ros2 run handeye_autopilot_demos sweep_mounts --robots panda ur --jobs 4
+
+For each robot it reads the tool pose at the seed joints from MoveIt (FK),
+builds one demo config per case and mode (mounts.case_config), runs
+``demo.launch.py`` headless for each, several at a time, and writes
+``results.yaml`` and ``results.md`` to ``--out``. Each run gets its own ROS
+domain, so parallel runs never see each other's topics
+(https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Domain-ID.html).
+
+Verdicts: ``passed`` (every quality gate and within the demo's 3 mm / 0.5 deg
+of the true mount), ``failed`` (the calibration ran and failed, or was off),
+``setup`` (the robot could not reach the seed: the moved board or camera
+collides there, so nobody could start a calibration with that mount).
+Exit code 0 when no case failed.
+"""
+
+from __future__ import annotations
+
+import argparse
+from concurrent.futures import ThreadPoolExecutor
+import os
+from pathlib import Path
+import queue
+import re
+import signal
+import subprocess
+import sys
+import threading
+import time
+from typing import Any
+
+from ament_index_python.packages import get_package_share_directory
+import yaml
+
+from handeye_autopilot_demos import mounts
+
+MODES = ('eye_to_hand', 'eye_in_hand')
+ERR = re.compile(r'error against the true camera mount: ([\d.]+) mm, ([\d.]+) deg')
+FINISHED = re.compile(r'finished: status (\d+), error_code (\d+): (.*)')
+CAPTURES = re.compile(r'captures accepted (\d+), rejected (\d+)')
+
+
+def seed_tool_pose(robot: str, cfg: dict[str, Any], domain: int) -> Any:
+    """base -> tool at the seed joints, from the robot's own MoveIt (compute_fk)."""
+    from handeye_autopilot.ros.moveit_client import MoveItClient
+    import rclpy
+    from rclpy.callback_groups import ReentrantCallbackGroup
+    from rclpy.executors import MultiThreadedExecutor
+
+    r = cfg['robot']
+    env = dict(os.environ, ROS_DOMAIN_ID=str(domain))
+    proc = subprocess.Popen(['ros2', 'launch', 'handeye_autopilot_demos', r['launch']],
+                            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            start_new_session=True)
+    ctx = rclpy.Context()
+    rclpy.init(context=ctx, domain_id=domain)
+    try:
+        node = rclpy.create_node('sweep_fk', context=ctx)
+        ex = MultiThreadedExecutor(num_threads=2, context=ctx)
+        ex.add_node(node)
+        threading.Thread(target=ex.spin, daemon=True).start()
+        client = MoveItClient(node, ReentrantCallbackGroup())
+        if client.missing(120.0):
+            raise RuntimeError(f'{robot}: MoveIt did not start')
+        out = None
+        for _ in range(10):          # right after start-up FK may not answer yet
+            out = client.fk_poses(r['joint_names'], [r['seed_joints']], r['tool_frame'],
+                                  r['base_frame'], 10.0)
+            if out:
+                break
+            time.sleep(2.0)
+        if not out:
+            raise RuntimeError(f'{robot}: compute_fk failed at the seed joints')
+        ex.shutdown(timeout_sec=2.0)
+        return out[0]
+    finally:
+        rclpy.shutdown(context=ctx)
+        _stop(proc)
+
+
+def _stop(proc: subprocess.Popen) -> None:
+    if proc.poll() is None:
+        os.killpg(proc.pid, signal.SIGINT)
+        try:
+            proc.wait(30)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+
+
+def run_case(job: dict[str, Any], domains: queue.Queue, timeout: float) -> dict[str, Any]:
+    domain = domains.get()
+    t0 = time.time()
+    try:
+        log = Path(job['dir']) / 'launch.log'
+        with open(log, 'w') as f:
+            proc = subprocess.Popen(
+                ['ros2', 'launch', 'handeye_autopilot_demos', 'demo.launch.py',
+                 f"robot:={job['robot']}", f"mode:={job['mode']}",
+                 f"config:={job['config']}", 'stay:=false'],
+                env=dict(os.environ, ROS_DOMAIN_ID=str(domain)), stdout=f,
+                stderr=subprocess.STDOUT, start_new_session=True)
+            try:
+                code = proc.wait(timeout)
+            except subprocess.TimeoutExpired:
+                code = None
+            _stop(proc)
+        return dict(job, **parse(log.read_text(), code), minutes=round((time.time() - t0) / 60, 1))
+    finally:
+        domains.put(domain)
+
+
+def parse(text: str, code: int | None) -> dict[str, Any]:
+    """The verdict and numbers from a demo launch's output."""
+    out: dict[str, Any] = {'exit_code': code}
+    if m := ERR.search(text):
+        out['error_mm'], out['error_deg'] = float(m.group(1)), float(m.group(2))
+    if m := CAPTURES.search(text):
+        out['accepted'], out['rejected'] = int(m.group(1)), int(m.group(2))
+    if m := FINISHED.search(text):
+        out['message'] = m.group(3).strip()
+    if code == 0 and 'DEMO PASSED' in text:
+        out['verdict'] = 'passed'
+    elif 'could not reach the seed' in text:
+        out['verdict'] = 'setup'
+        out['message'] = 'the robot cannot reach the seed with this mount (collision)'
+    else:
+        out['verdict'] = 'failed'
+        if code is None:
+            out['message'] = 'timed out'
+        out.setdefault('message', 'no result (see launch.log)')
+    return out
+
+
+def table(rows: list[dict[str, Any]]) -> str:
+    lines = ['| Robot | Mode | Case | Offset (mm; deg) | lever_max | Verdict | Error vs truth '
+             '| Captures | Minutes | Notes |',
+             '|---|---|---|---|---|---|---|---|---|---|']
+    for r in rows:
+        off = ', '.join(f'{1000 * v:.0f}' for v in r['translation_m']) + '; ' + ', '.join(
+            f'{v:.0f}' for v in r['rotation_deg'])
+        err = (f"{r['error_mm']:.2f} mm, {r['error_deg']:.3f}°" if 'error_mm' in r else '')
+        caps = f"{r['accepted']} / {r['rejected']}" if 'accepted' in r else ''
+        note = '; '.join(r['notes'] + ([r['message']] if r['verdict'] != 'passed' else []))
+        lines.append(f"| {r['robot']} | {r['mode']} | {r['name']} | {off} | "
+                     f"{r['lever_max']:.2f} | {r['verdict']} | {err} | {caps} | "
+                     f"{r['minutes']} | {note} |")
+    return '\n'.join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    share = Path(get_package_share_directory('handeye_autopilot_demos'))
+    ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
+    ap.add_argument('--robots', nargs='+', default=['panda', 'ur'])
+    ap.add_argument('--modes', nargs='+', default=list(MODES), choices=MODES)
+    ap.add_argument('--cases', nargs='*', help='case names (default: all)')
+    ap.add_argument('--spec', default=str(share / 'config' / 'mount_sweep.yaml'))
+    ap.add_argument('--jobs', type=int, default=3, help='runs at the same time')
+    ap.add_argument('--timeout', type=float, default=1800.0, help='per run, s')
+    ap.add_argument('--domain-base', type=int, default=120,
+                    help='first ROS domain ID used (one per parallel run)')
+    ap.add_argument('--out', default=os.path.expanduser(
+        '~/.ros/handeye_autopilot/mount_sweep/' + time.strftime('%Y%m%dT%H%M%S')))
+    a = ap.parse_args(argv)
+    spec = yaml.safe_load(Path(a.spec).read_text())
+    selected = [c for c in mounts.cases(spec) if not a.cases or c['name'] in a.cases]
+    out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    jobs = []
+    for robot in a.robots:
+        cfg = yaml.safe_load((share / 'config' / f'{robot}.yaml').read_text())
+        print(f'{robot}: reading the seed tool pose from MoveIt...', flush=True)
+        G = seed_tool_pose(robot, cfg, a.domain_base)
+        for mode in a.modes:
+            for case in selected:
+                d = out / f"{robot}_{mode}_{case['name']}"
+                d.mkdir(exist_ok=True)
+                c = mounts.case_config(cfg, mode, G, case)
+                c['calibration']['output_dir'] = str(d)
+                c['demo_timeout'] = a.timeout
+                (d / 'config.yaml').write_text(yaml.safe_dump(c, sort_keys=False))
+                jobs.append(dict(robot=robot, mode=mode, dir=str(d), config=str(d / 'config.yaml'),
+                                 lever_max=c['calibration']['session']['lever_max'],
+                                 notes=mounts.notes(c, mode), **case))
+    print(f'{len(jobs)} runs, {a.jobs} at a time; logs in {out}', flush=True)
+    domains: queue.Queue = queue.Queue()
+    for i in range(a.jobs):
+        domains.put(a.domain_base + 1 + i)
+    rows: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(a.jobs) as pool:
+        futures = [pool.submit(run_case, j, domains, a.timeout + 300) for j in jobs]
+        for f in futures:
+            row = f.result()
+            rows.append(row)
+            print(f"{row['robot']} {row['mode']} {row['name']}: {row['verdict']} "
+                  f"{row.get('error_mm', '')} {row.get('message', '')}", flush=True)
+            (out / 'results.yaml').write_text(yaml.safe_dump(rows, sort_keys=False))
+    md = table(rows)
+    (out / 'results.md').write_text(md + '\n')
+    print(md)
+    counts = {v: sum(r['verdict'] == v for r in rows) for v in ('passed', 'failed', 'setup')}
+    print(f"passed {counts['passed']}, failed {counts['failed']}, setup {counts['setup']}")
+    return 1 if counts['failed'] else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

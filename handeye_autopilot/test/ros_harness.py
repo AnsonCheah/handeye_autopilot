@@ -214,8 +214,11 @@ class FakeMoveIt(Node):
 
     - ``planning_only``: goals of the kinds in ``fault_kinds`` SUCCEED without
       moving the robot;
-    - ``plan_fails(joints) -> bool``: that MoveGroup goal ABORTS with FAILURE and an
-      empty planned trajectory, nothing moves;
+    - ``plan_fails(joints) -> bool | str``: True: that MoveGroup goal ABORTS with
+      FAILURE and an empty planned trajectory, nothing moves; ``'invalid'``: it
+      ABORTS with INVALID_MOTION_PLAN and the rejected plan filled in (MoveIt's
+      ValidateSolution adapter), nothing moves; ``'invalid_moved'``: the same
+      reply, but the robot moved to the goal first;
     - ``hang``: goals of the kinds in ``fault_kinds`` never reach a terminal state;
       cancels are accepted and ignored;
     - ``fault_kinds``: {'move', 'execute'} by default (MoveGroup / ExecuteTrajectory);
@@ -409,12 +412,23 @@ class FakeMoveIt(Node):
         res = MoveGroup.Result()
         c = req.goal_constraints[0].joint_constraints
         joints = [jc.position for jc in sorted(c, key=lambda jc: JOINTS.index(jc.joint_name))]
-        if self.plan_fails is not None and self.plan_fails(joints):
+        fail = self.plan_fails(joints) if self.plan_fails is not None else False
+        if fail is True:
             res.error_code.val = 99999                     # FAILURE, nothing planned
             goal_handle.abort(res)
             return res
         start = list(encode(self.robot.G))
         pts = [start, list(joints)]
+        if fail in ('invalid', 'invalid_moved'):
+            res.planned_trajectory.joint_trajectory.joint_names = list(JOINTS)
+            res.planned_trajectory.joint_trajectory.points = [
+                JointTrajectoryPoint(positions=[float(v) for v in p]) for p in pts]
+            if fail == 'invalid_moved':
+                self.robot.move_to(decode(joints))
+                time.sleep(0.3)
+            res.error_code.val = -2                        # INVALID_MOTION_PLAN
+            goal_handle.abort(res)
+            return res
         if goal_handle.request.planning_options.plan_only:
             self.plans += 1
             if self.detour is not None and self.detour(self.plans):

@@ -73,6 +73,7 @@ from . import params as P
 from . import tf_tools, viz
 from .camera_input import CameraInfoError, ImageBuffer, camera_model, same_info
 from .moveit_client import (
+    INVALID_MOTION_PLAN,
     SUCCESS,
     TERMINAL,
     GoalOutcome,
@@ -1057,8 +1058,13 @@ class CalibrationNode(Node):
         after = self._joints_now(mi.joint_names, time.monotonic(), 2.0, run)
         if not out.accepted:
             return self._failed(run, out.note, after)
+        # shortcut: INVALID_MOTION_PLAN with a plan filled in is trusted as a
+        # planning-pipeline rejection (MoveIt's ValidateSolution adapter, seen in
+        # the mount sweep), still only with joints measured unchanged; revisit if a
+        # MoveIt release returns it after execution started.
         if not a.cartesian and not check_path and out.status == GoalStatus.STATUS_ABORTED and \
-                out.planned_points == 0 and _same(before, after, mi.joint_tolerance):
+                (out.planned_points == 0 or out.error_code == INVALID_MOTION_PLAN) and \
+                _same(before, after, mi.joint_tolerance):
             return self._not_started(run, cfg, f'planning failed ({error_name(out.error_code)})',
                                      after)
         if out.status != GoalStatus.STATUS_SUCCEEDED or out.error_code != SUCCESS:

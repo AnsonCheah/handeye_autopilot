@@ -26,5 +26,6 @@ setup(
     entry_points={'console_scripts': [
         'scene = handeye_autopilot_demos.scene:main',
         'run_demo = handeye_autopilot_demos.run_demo:main',
+        'sweep_mounts = handeye_autopilot_demos.sweep_mounts:main',
     ]},
 )

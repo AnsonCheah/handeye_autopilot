@@ -16,8 +16,10 @@ camera). Real-hardware evidence comes in M5 (`docs/results/`).
 ## Run it
 
 Build once (README "Try it"), then each of these runs unattended and ends with
-`DEMO PASSED` and the error against the true mount; the launch exits 0 on a
-pass, 1 on a failure:
+`DEMO PASSED` and the error against the true mount. With RViz the demo then
+keeps running (Ctrl-C ends it) so you can look around and publish the result;
+with `rviz:=false` (or `stay:=false`) the launch stops and exits 0 on a pass,
+1 on a failure, which is what CI runs:
 
 ```bash
 ros2 launch handeye_autopilot_demos demo.launch.py robot:=panda mode:=eye_to_hand rviz:=true
@@ -37,16 +39,18 @@ What to look for in RViz:
   truth.
 
 Publish a result to TF and look at it. The publisher re-checks the camera
-driver's live TF subtree, so the camera must still be running: start the demo
-with `auto:=false`, send the goal yourself, then publish (README "Try it",
-step 4):
+driver's live TF subtree, so the camera must still be running: after an RViz
+demo it is (the runner prints the exact command), or start the demo with
+`auto:=false` and send the goal yourself (README "Try it", step 4):
 
 ```bash
-ros2 launch handeye_autopilot_demos demo.launch.py robot:=panda mode:=eye_to_hand auto:=false rviz:=true
-ros2 run handeye_autopilot calibrate --mode eye_to_hand --execution moveit
 ros2 launch handeye_autopilot result.launch.py result_file:=<the printed result.yaml>
 ros2 run tf2_ros tf2_echo panda_link0 camera_link
 ```
+
+On Ctrl-C, `move_group` (MoveIt itself, not this package) may print
+`process has died ... exit code -11`: it crashes while shutting down on Jazzy,
+after the run is over. It does not affect the result.
 
 In RViz the camera frames now hang off the robot's base at the calibrated
 pose. Stop a run from any terminal with
@@ -72,6 +76,13 @@ hardware (M5) will be dominated by robot accuracy and optics. Videos of the
 Panda eye-to-hand and UR5e eye-in-hand runs are kept outside the repository
 (4x speed: RViz on top, the camera and each capture as the calibration saw it
 below).
+
+## Different mounts
+
+The four demos use one mount each. [mount-sweep.md](mount-sweep.md) moves the
+board or camera mount by up to ±200 mm and ±90° per axis, on both robots and
+in both modes. 66 of 72 robot runs pass within 0.12 mm and 0.014°; the other 6
+are mounts that collide with the robot at the seed.
 
 ## What the tests prove
 

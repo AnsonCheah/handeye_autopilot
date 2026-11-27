@@ -44,8 +44,9 @@ class Runner(Node):
         self.robot = self.declare_parameter('robot', 'panda').value
         self.mode = self.declare_parameter('mode', 'eye_to_hand').value
         self.check_truth = self.declare_parameter('check_truth', True).value
-        self.timeout = float(self.declare_parameter('timeout', 900.0).value)
-        self.cfg = load(self.robot)
+        self.cfg = load(self.robot, self.declare_parameter('config', '').value)
+        self.timeout = float(self.declare_parameter(
+            'timeout', float(self.cfg.get('demo_timeout', 900.0))).value)
         cb = ReentrantCallbackGroup()
         self.moveit = MoveItClient(self, cb)
         self.action = ActionClient(self, Calibrate, '/handeye_autopilot/calibrate',
@@ -109,6 +110,10 @@ class Runner(Node):
         if ok and self.check_truth:
             ok = self._truth(r_)
         self.log('DEMO PASSED' if ok else 'DEMO FAILED')
+        if ok:
+            self.log('publish it to TF while the demo still runs (default with RViz):\n'
+                     '  ros2 launch handeye_autopilot result.launch.py '
+                     f'result_file:={r_.result_file}')
         return 0 if ok else 1
 
     def _fb(self, msg: object) -> None:

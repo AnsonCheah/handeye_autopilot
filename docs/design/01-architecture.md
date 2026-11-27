@@ -63,7 +63,7 @@ Solving uses OpenCV + SciPy. Interop (v1.1): export observations in
 | Manual capture trigger, finish, clear fault | `std_srvs/srv/Trigger` | Nothing |
 | Node parameters and profiles | rclpy parameters; YAML profile files | A loader mapping parameters and profiles onto the `core` config dataclasses (§5a) |
 | Camera subtree and TF tree queries | `tf2_ros` Buffer (`all_frames_as_yaml`), a `/tf_static` subscription | Subtree walk + ownership checks (§9) |
-| Robots for demos and CI | UR (`ur_robot_driver` mock hardware), Panda (`moveit_resources_panda`) | Demo launch files |
+| Robots for demos and CI | UR (`ur_robot_driver` mock hardware), Panda (`moveit_resources_panda`) | Demo launch files, scene, runner; the mount sweep (`mounts.py` case geometry, `sweep_mounts` runner) |
 | Camera simulation | Gazebo + `ros_gz` (optional, realistic) | Lightweight homography renderer for deterministic CI (§10) |
 
 Modules we write that have no ecosystem equivalent (the actual contribution);
@@ -140,7 +140,11 @@ MoveIt brand implicitly.
 - `not_started` vs `failed` is decided from evidence, not the error code: a
   planning failure comes back as `ABORTED` with the generic `FAILURE` code
   (probe). `not_started` needs all of: `ABORTED`, an **empty planned
-  trajectory** in the MoveGroup result (nothing existed to execute), and
+  trajectory** in the MoveGroup result (nothing existed to execute) **or**
+  `INVALID_MOTION_PLAN` (MoveIt's `ValidateSolution` planning adapter rejected
+  its own plan before execution; it returns that plan filled in. Seen in the
+  mount sweep, §10; `shortcut:` trusts the code as a planning-stage one, revisit
+  if a MoveIt release returns it after execution started), and
   measured joints unchanged from the start (within tolerance). Anything else,
   or joints unknown, = `failed` (a motion that moved and came back must not
   pass as a safe skip). The result's `executed_trajectory` is always empty on
@@ -629,6 +633,19 @@ snapshotted at admission; every capture's images must match the run's
   Used by `handeye_autopilot.core` tests and by a synthetic camera node for launch tests and
   demos. Limitations documented: no lens-shading realism, no 3D occlusion, no
   realistic motion blur.
+- **Mount sweep:** the robot-side mount (board for eye-to-hand, camera for
+  eye-in-hand) moved by up to ±200 mm and ±90° per tool axis from the demo's.
+  Two levels: the core session (`test/test_mount_sweep.py`, perfect motion,
+  fake IK; CI runs three cases, `HANDEYE_FULL_SWEEP=1` all) and the real
+  MoveIt demos on Panda and UR5e (`ros2 run handeye_autopilot_demos
+  sweep_mounts`, parallel runs in separate ROS domains). The robot sweep moves
+  the fixed object (camera tripod / board stand) so the camera sees the board
+  at the seed as in the demo, since a good seed is the operator's job, and sets
+  `lever_max` to the moved lever arm + 20 mm, as an operator would measure.
+  `shortcut:` no 3D occlusion and the carried object may overlap its
+  touch links (the attached box ignores them), so a few cases are physically
+  implausible mounts; the results table records them, upgrade if a real mount
+  fails.
 - **Gazebo (`ros_gz`)**: optional realistic demo later (v1.x), not a CI
   dependency.
 
@@ -654,6 +671,8 @@ snapshotted at admission; every capture's images must match the run's
   tests from §6, §8, §9.
 - MoveIt integration: Panda mock-hardware demo end to end in CI (Jazzy at
   least).
+- Mount sweep (§10): core level in CI; the robot-level sweep is run by hand
+  before a release (an hour or more), results in `docs/verification/`.
 - CI: GitHub Actions, matrix {Jazzy on `ubuntu:noble`, Lyrical on
   `ubuntu:resolute`, Rolling on `ubuntu:resolute` from the `ros2-testing`
   apt repository (its binaries had not synced to main as of 2026-11-26)}

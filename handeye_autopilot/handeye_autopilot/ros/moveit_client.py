@@ -59,6 +59,7 @@ Mat = NDArray[np.float64]
 ERROR_NAMES = {v: k for k, v in vars(MoveItErrorCodes).items()
                if k.isupper() and isinstance(v, int)}
 SUCCESS = MoveItErrorCodes.SUCCESS
+INVALID_MOTION_PLAN = MoveItErrorCodes.INVALID_MOTION_PLAN
 TERMINAL = (GoalStatus.STATUS_SUCCEEDED, GoalStatus.STATUS_ABORTED, GoalStatus.STATUS_CANCELED)
 GOAL_REPLY_TIMEOUT = 10.0   # s for the server to accept or reject a goal
 VALIDITY_WINDOW = 8         # check_state_validity requests in flight at once

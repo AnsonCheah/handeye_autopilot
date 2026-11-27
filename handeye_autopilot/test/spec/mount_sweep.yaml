@@ -1,0 +1,25 @@
+# Mount sweep, core level (test_mount_sweep.py): the robot-side mount (board
+# for eye-to-hand, camera for eye-in-hand) moved from spec/m1b.yaml's truth by
+# an offset in the tool frame: translation added (m), rotation applied about
+# the tool axes (deg, extrinsic xyz). Perfect motion and the fake IK of
+# m2_sim; the seed is m2.yaml's view of the board. lever_max = the moved lever
+# arm's largest component + 0.02 m (what an operator would enter).
+# CI runs the `ci: true` cases; HANDEYE_FULL_SWEEP=1 runs all (~20 s each).
+# The same offsets on real MoveIt robots: handeye_autopilot_demos sweep_mounts.
+lever_margin_m: 0.02
+cases:
+  - {name: tx+200, translation_m: [0.2, 0, 0]}
+  - {name: tx-200, translation_m: [-0.2, 0, 0]}
+  - {name: ty+200, translation_m: [0, 0.2, 0]}
+  - {name: ty-200, translation_m: [0, -0.2, 0]}
+  - {name: tz+200, translation_m: [0, 0, 0.2]}
+  - {name: tz-200, translation_m: [0, 0, -0.2]}
+  - {name: rx+90, rotation_deg: [90, 0, 0]}
+  - {name: rx-90, rotation_deg: [-90, 0, 0]}
+  - {name: ry+90, rotation_deg: [0, 90, 0]}
+  - {name: ry-90, rotation_deg: [0, -90, 0]}
+  - {name: rz+90, rotation_deg: [0, 0, 90], ci: true}
+  - {name: rz-90, rotation_deg: [0, 0, -90]}
+  - {name: all+, translation_m: [0.2, 0.2, 0.2], rotation_deg: [90, 90, 90], ci: true}
+  - {name: all-, translation_m: [-0.2, -0.2, -0.2], rotation_deg: [-90, -90, -90], ci: true}
+  - {name: mixed, translation_m: [-0.2, 0.2, -0.2], rotation_deg: [90, -90, 90]}
