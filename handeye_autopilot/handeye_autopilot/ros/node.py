@@ -538,6 +538,7 @@ class CalibrationNode(Node):
         self._feedback(goal_handle, run, FB.PHASE_PREFLIGHT)
         t = cfg.timing
         start = self.now()
+        start_count = self.images.count      # arrivals counted: works on a paused clock too
         deadline = time.monotonic() + t.camera_info_timeout
         while True:
             self._check_cancel(goal_handle, run)
@@ -546,7 +547,7 @@ class CalibrationNode(Node):
             img = self.images.latest()
             # an image that ARRIVED after this goal started: a stopped camera's
             # cached last frame must not pass the preflight
-            if info is not None and img is not None and img.received >= start:
+            if info is not None and img is not None and self.images.count > start_count:
                 break
             self._check_jump(start)          # a reset here is reported as such
             if time.monotonic() > deadline:
@@ -573,6 +574,7 @@ class CalibrationNode(Node):
         tf_deadline = time.monotonic() + max(t.tf_timeout, t.camera_info_timeout)
         found = None
         while found is None and time.monotonic() < tf_deadline:
+            self._check_jump(start)          # a reset here is reported as such
             self._drop_future_tf(base, tool, cfg)
             img = self.images.latest() or img
             self._check_clock(img.stamp, img.received, cfg)
@@ -774,7 +776,8 @@ class CalibrationNode(Node):
         tree = tf_tools.parents(self.tf_buffer)
         sub = tf_tools.camera_subtree(tree, self.static_links, optical, parent,
                                       cfg.frames.get('camera_root_frame', ''),
-                                      self.dynamic_links)
+                                      self.dynamic_links,
+                                      {cfg.frames['base_frame'], cfg.frames['tool_frame']})
         if sub.error:
             self.get_logger().warning(f'result not publishable: {sub.error}')
             return {'ok': False, 'reason': sub.error}

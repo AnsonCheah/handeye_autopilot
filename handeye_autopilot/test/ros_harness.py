@@ -162,8 +162,12 @@ class SimClock(Node):
     def jump(self, dt):
         self.offset += dt
 
+    def pause(self):
+        """Freeze sim time where it is (a paused simulator)."""
+        self.frozen = time.monotonic() + self.offset
+
     def _tick(self):
-        t = time.monotonic() + self.offset
+        t = getattr(self, 'frozen', None) or time.monotonic() + self.offset
         m = self._Clock()
         m.clock.sec = int(t)
         m.clock.nanosec = int((t - int(t)) * 1e9)

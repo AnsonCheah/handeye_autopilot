@@ -94,6 +94,7 @@ class ImageBuffer:
                  wall_clock: Callable[[], bool] = lambda: True) -> None:
         self._clock = clock
         self._wall = wall_clock          # node clock is wall time (not sim time)?
+        self.count = 0                   # images ever added (arrival counter)
         self._buf: deque[StampedImage] = deque(maxlen=size)
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)
@@ -113,6 +114,7 @@ class ImageBuffer:
         with self._cond:
             self._buf.append(StampedImage(ns * 1e-9, ns, msg.header.frame_id,
                                           np.asarray(gray), self._clock() - lag))
+            self.count += 1
             self._cond.notify_all()
 
     def latest(self) -> StampedImage | None:

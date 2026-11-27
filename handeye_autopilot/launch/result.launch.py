@@ -6,7 +6,9 @@ Runs ``publish_result``, which refuses a result whose ownership checks failed
 when the run finished, re-checks the live TF tree (the camera root must still
 have no parent, and no cycle), and only then publishes ``parent -> camera_root``
 (the camera subtree rule) as a static transform. A result that failed its
-quality gates is refused unless ``allow_failed:=true``.
+quality gates is refused unless ``allow_failed:=true``. A refusal is logged;
+``ros2 launch`` itself exits 0 either way, so automation should run
+``ros2 run handeye_autopilot publish_result <file>`` (exit code 1 on refusal).
 """
 
 from launch import LaunchDescription

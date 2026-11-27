@@ -44,6 +44,10 @@ class World:
             'session.frames_per_capture': 2, 'capture.consensus_min_frames': 2,
             'solver.min_captures': 8, 'testing.allow_fault_injection': True,
             'timing.settle_window': 0.3, 'timing.settle_timeout': 3.0,
+            # nine nodes share one Python process here: under full-suite load a
+            # callback can stall for seconds, which a deployment (separate
+            # processes) does not see; clock tests use offsets far beyond this
+            'timing.clock_tolerance': 10.0,
             **(node_over or {})}))
         self.camera = SyntheticCamera(parameter_overrides=params(
             dict(camera_params(mode, **(cam_over or {})), **sim)))
@@ -176,7 +180,7 @@ def test_tf_that_never_arrives_rejects_the_capture(world_factory):
 
 
 def test_mismatched_image_stamps_abort_at_preflight(world_factory):
-    w = world_factory(cam_over={'stamp_offset': 5.0})
+    w = world_factory(cam_over={'stamp_offset': 60.0})
     out = w.result(w.driver.send())
     res = out.result
     assert out.status == 6                               # GoalStatus ABORTED
@@ -1092,3 +1096,42 @@ def test_failed_gates_are_not_publishable_by_default(world_factory, tmp_path):
     node = ResultPublisher(res.result_file, listen=0.0, allow_failed=True)   # explicit
     node.destroy_node()
     assert yaml.safe_load(open(res.result_file))['passed'] is False
+
+
+# -- review fixes (M3 xhigh pass 12) ------------------------------------------------
+
+def test_sim_reset_with_the_default_synthetic_camera(world_factory):
+    """Default camera (images stamped from TF) and in-flight TF across a reset."""
+    w = world_factory(sim_time=True)
+    w.robot.delay = 0.15
+    time.sleep(0.5)
+    w.clock.jump(-100.0)
+    time.sleep(1.0)
+    h = w.driver.send()
+    w.driver.wait_phase(FB.PHASE_MANUAL_CAPTURE, timeout=20.0)
+    w.driver.capture_and_wait()
+    assert w.driver.feedback[-1].accepted == 1
+    w.driver.wait(h.cancel_goal_async())
+    w.result(h)
+
+
+def test_stopped_camera_on_a_paused_clock_fails_preflight(world_factory):
+    w = world_factory(sim_time=True, node_over={'timing.camera_info_timeout': 2.0})
+    w.camera.timer.cancel()                   # the stream stops ...
+    w.clock.pause()                           # ... and sim time stands still
+    time.sleep(0.3)
+    res = w.result(w.driver.send()).result
+    assert res.error_code == R.NO_CAMERA_INFO and 'fresh images' in res.message
+
+
+def test_recalibration_after_a_mode_switch_is_accepted():
+    """An earlier eye-to-hand result published base_link -> camera_link; an
+    eye-in-hand recalibration (parent tool0) treats it as the mount replaced."""
+    from handeye_autopilot.ros import tf_tools
+    from tf2_msgs.msg import TFMessage
+    static = tf_tools.StaticLinks()
+    static.add(TFMessage(transforms=[tf_tools.to_msg(np.eye(4), 'camera_link', 'opt')]))
+    tree = {'opt': 'camera_link', 'camera_link': 'base_link', 'tool0': 'base_link'}
+    sub = tf_tools.camera_subtree(tree, static, 'opt', 'tool0', '', None,
+                                  {'base_link', 'tool0'})
+    assert sub.error == '' and sub.root == 'camera_link'

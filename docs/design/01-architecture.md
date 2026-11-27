@@ -305,7 +305,8 @@ string last_rejection_detail   # human-readable, free text
   of the optical frame in the parent (`X`, checkpoint 2 §A).
   `target_transform`: `header.frame_id` = `tool_frame` (eye-to-hand) or
   `base_frame` (eye-in-hand), `child_frame_id` = the configured board frame
-  name (`Z`). `header.stamp` of both = node time when the final solve finished.
+  name (`Z`). `header.stamp` of both = node time when the final solve and its
+  k-fold verification finished (one core call, as built in M3).
   When `transform_valid` is false both are identity with empty frame ids.
 - `ABORTED`: a runtime failure; `error_code` says which.
 - `CANCELED`: cancel requested and completed (see §6).
