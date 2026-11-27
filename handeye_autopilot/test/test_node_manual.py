@@ -1073,7 +1073,7 @@ def test_mixed_outcomes_do_not_wedge_the_server(world_factory):
 def test_a_stopped_camera_fails_preflight(world_factory):
     w = world_factory(node_over={'timing.camera_info_timeout': 2.0})
     w.camera.timer.cancel()                             # the stream stops
-    time.sleep(0.3)
+    time.sleep(1.5)                                     # in-flight frames drain (slow CI)
     res = w.result(w.driver.send()).result
     assert res.error_code == R.NO_CAMERA_INFO and 'fresh images' in res.message
 
@@ -1173,7 +1173,7 @@ def test_a_queued_old_resolution_frame_does_not_abort_preflight(world_factory):
     old.header.frame_id = 'camera_optical_frame'
     old.header.stamp = w.node.get_clock().now().to_msg()
     w.camera.timer.cancel()                       # pause the stream ...
-    time.sleep(0.2)
+    time.sleep(1.5)                               # in-flight frames drain (slow CI)
     h = w.driver.send()
     w.driver.wait_phase(FB.PHASE_PREFLIGHT)
     w.node._on_image(old)                         # ... so preflight sees the stale frame
