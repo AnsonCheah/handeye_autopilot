@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import threading
 import time
+from typing import Any
 
 from builtin_interfaces.msg import Time
 from geometry_msgs.msg import TransformStamped
@@ -35,6 +36,15 @@ def to_matrix(t: TransformStamped) -> Mat:
     T = np.eye(4)
     T[:3, :3] = Rotation.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
     T[:3, 3] = [p.x, p.y, p.z]
+    return T
+
+
+def pose_to_matrix(p: Any) -> Mat:
+    """geometry_msgs/Pose -> 4x4."""
+    T = np.eye(4)
+    q = p.orientation
+    T[:3, :3] = Rotation.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
+    T[:3, 3] = [p.position.x, p.position.y, p.position.z]
     return T
 
 

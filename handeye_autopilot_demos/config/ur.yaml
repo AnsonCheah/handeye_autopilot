@@ -1,0 +1,45 @@
+# UR5e demo on mock hardware (handeye_autopilot_demos, 03-milestones M4).
+#
+# True mounts: what the calibration must find (the synthetic camera renders
+# with them; nothing publishes them as TF). Chosen so the seed pose below is a
+# good seed: board centred, tilted ~20 deg, at 0.65 m (eye-to-hand) / 0.5 m
+# (eye-in-hand). The robot stands on a pedestal 10 cm above the table.
+robot:
+  launch: ur_robot.launch.py
+  base_frame: base_link
+  tool_frame: tool0             # the IK link itself (no TCP conversion)
+  ik_link: tool0
+  group_name: ur_manipulator
+  joint_names: [shoulder_pan_joint, shoulder_lift_joint, elbow_joint, wrist_1_joint,
+                wrist_2_joint, wrist_3_joint]
+  seed_joints: [0.0, -1.5708, 1.5708, -1.5708, -1.5708, 0.0]   # tool down, in front
+  touch_links: [wrist_3_link, flange, tool0]
+  table: {xyz: [0.35, 0.0, -0.125], size: [1.6, 1.4, 0.05]}     # top at z = -0.10
+  boxes:
+    - {name: pedestal, xyz: [0.0, 0.0, -0.055], size: [0.2, 0.2, 0.09]}
+  obstacle: {xyz: [0.55, -0.45, 0.25], size: [0.08, 0.08, 0.7]} # point-cloud pillar
+
+board: {kind: charuco, squares_x: 7, squares_y: 5, square_length: 0.03,
+        marker_length: 0.022, dictionary: DICT_5X5_100}
+
+eye_to_hand:
+  true_camera_xyz_rpy: [1.19, -0.0348, 0.6147, -0.1812, 0.3367, 2.8638]   # base -> camera_link
+  true_board_xyz_rpy: [0.105, -0.1078, 0.0128, 1.5708, 0.0, -3.1416]     # tool0 -> board
+eye_in_hand:
+  true_camera_xyz_rpy: [0.0, 0.07, 0.03, 1.5708, -1.5708, 0.0]           # tool0 -> camera_link
+  true_board_xyz_rpy: [0.5007, 0.2217, 0.0098, -2.7925, 0.2618, -1.6581] # base -> board
+
+calibration:
+  session:
+    lever_max: 0.15
+    box_enabled: true
+    box_xyz: [0.5, 0.0, 0.45]
+    box_size: [1.0, 1.2, 0.9]
+  timing:
+    # MoveIt, ros2_control, the camera and the node share one machine here: on a
+    # loaded 2-core CI runner an image can arrive 0.6 s after the pose it shows.
+    # Still far below a real clock-domain mismatch (seconds or more).
+    clock_tolerance: 2.0
+  moveit:
+    velocity_scaling: 0.5
+    acceleration_scaling: 0.5

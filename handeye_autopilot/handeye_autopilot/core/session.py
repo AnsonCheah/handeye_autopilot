@@ -21,7 +21,7 @@ Internally the flow is a generator, so it reads top to bottom.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -52,6 +52,7 @@ Mat = NDArray[np.float64]
 # phases: same strings as Calibrate.Feedback PHASE_*
 SEED_CHECK, BOOTSTRAP, CENTRING, PLANNING = 'seed_check', 'bootstrap', 'centring', 'planning'
 MOVING, CAPTURING, SOLVING, DONE = 'moving', 'capturing', 'solving', 'done'
+VERIFYING = 'verifying'          # reported through on_phase during the final solve
 
 # motion outcomes reported by the driver
 MOTION_OK, MOTION_NOT_STARTED, MOTION_FAILED = 'ok', 'not_started', 'failed'
@@ -134,8 +135,14 @@ class _State:
 class Session:
     def __init__(self, mode: str, board: BoardSpec, camera: CameraModel, ik: IKFunction, *,
                  cfg: SessionConfig | None = None, capture_cfg: CaptureConfig | None = None,
-                 solver_cfg: SolverConfig | None = None, seed: int = 0) -> None:
+                 solver_cfg: SolverConfig | None = None, seed: int = 0,
+                 on_phase: Callable[[str], None] | None = None) -> None:
+        """``on_phase``: called with the new phase string whenever it changes
+        (also VERIFYING, after the final solve), so a driver can report progress
+        while the session computes (the final solve runs inside a reply call)."""
         handeye.moving(mode, np.eye(4))          # validates the mode
+        self._on_phase = on_phase
+        self._phase = ''
         self.mode, self.board, self.camera, self.ik = mode, board, camera, ik
         self.cfg = cfg or SessionConfig()
         self.capture_cfg = capture_cfg or CaptureConfig()
@@ -148,6 +155,30 @@ class Session:
         self._pending: Action = next(self._gen)
 
     # -- driver API ---------------------------------------------------------
+    @property
+    def phase(self) -> str:
+        return self._phase
+
+    @phase.setter
+    def phase(self, value: str) -> None:
+        changed = value != self._phase
+        self._phase = value
+        if changed and self._on_phase is not None:
+            self._on_phase(value)
+
+    @property
+    def records(self) -> list[CaptureRecord]:
+        """Captures so far (read-only use: the driver shows the newest one)."""
+        return list(self._st.records)
+
+    def check_pose(self, G: Mat) -> str | None:
+        """The limits a move is checked against (box incl. the carried object's
+        L_max ball, seed envelope, orientation), for a measured or planned tool
+        pose; None before the seed is known or when G is inside them."""
+        if self._st.seed_tool is None:
+            return None
+        return self._limit_reason(np.asarray(G, dtype=float))
+
     def next_action(self) -> Action:
         return self._pending
 
@@ -399,7 +430,8 @@ class Session:
                                plan=p, bootstrap_rounds=rounds,
                                plan_weak=p.weak or got < p.target)
             return
-        cal = calibrate(self.mode, self._st.records, self.solver_cfg)
+        cal = calibrate(self.mode, self._st.records, self.solver_cfg,
+                        on_solved=lambda: setattr(self, 'phase', VERIFYING))
         yield self._finish(None if cal.transform_valid else
                            (cal.failure.reason if cal.failure else 'solve_failed'), weak_msg,
                            calibration=cal, plan=p, bootstrap_rounds=rounds,
@@ -428,6 +460,7 @@ class Session:
         prev: Solution | None = None
         best: Solution | None = None
         rounds = 0
+        limited: dict[str, float] = {}     # largest step the visibility check allowed
         margin = cfg.image_margin_px + cfg.uncertainty_margin_px
         for round_index in range(1, cfg.max_bootstrap_rounds + 1):
             rounds = round_index
@@ -453,6 +486,7 @@ class Session:
                         v = bs.safe_step(check, step[kind], step[kind] / 8)
                         if v < step[kind]:
                             clean = False          # visibility already limits this step
+                            limited[kind] = max(limited.get(kind, 0.0), v)
                         if v == 0.0:
                             continue
                         for halving in range(cfg.max_halvings + 1):
@@ -503,8 +537,16 @@ class Session:
                     break
         if best is None:
             why = ', '.join(f'{k} x{n}' for k, n in self._st.skip_reasons.most_common(3))
+            cap_msg = ''
+            if 'rotation' in limited:
+                # before any estimate the worst case over L_max bounds every step; a
+                # board that fills the image leaves little room (measured in M4 tests)
+                cap_msg = (f'; the visibility check limited rotation steps to '
+                           f'{self._fmt("rotation", limited["rotation"])}: start from a seed '
+                           'with the board smaller and centred in the image, or a smaller '
+                           'L_max if the real lever arm allows')
             return self._finish(BOOTSTRAP_FAILED, f'no usable estimate after {rounds} '
-                                'bootstrap rounds; check L_max and the seed pose'
+                                'bootstrap rounds; check L_max and the seed pose' + cap_msg
                                 + (f' (skipped moves: {why})' if why else ''))
         return best, rounds
 

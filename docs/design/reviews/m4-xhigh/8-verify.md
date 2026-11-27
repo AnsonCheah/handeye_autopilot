@@ -1,0 +1,19 @@
+Reviewed `m4-moveit` at `529d8da`.
+
+### Pass 7 findings
+
+- **RESOLVED — Fresh joints on skipped moves.** A refused move without a fresh joint sample now fails the run before spare selection. [node.py:1190](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/ros/node.py:1190) · [session.py:271](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/core/session.py:271)
+- **RESOLVED — The CLI could cancel another operator’s run.** The fallback sends only the UUID assigned to its own goal. [calibrate_cli.py:62](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/ros/calibrate_cli.py:62) · [calibrate_cli.py:105](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/ros/calibrate_cli.py:105)
+- **PARTIAL — CLI interrupt handling.** Ctrl-C during discovery prevents submission. The fallback now requests a result, but the endpoint and stop-reporting defects below remain. [calibrate_cli.py:89](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/ros/calibrate_cli.py:89) · [calibrate_cli.py:103](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/ros/calibrate_cli.py:103) · [calibrate_cli.py:69](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/ros/calibrate_cli.py:69)
+- **RESOLVED — `~/finish` during MoveIt capture.** The service requires manual execution. [node.py:331](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/ros/node.py:331)
+- **RESOLVED — UR planning scene in RViz.** The launch enables semantic-description publication from `move_group`. [ur_robot.launch.py:33](/home/anson/workspaces/handeye_autopilot/handeye_autopilot_demos/launch/ur_robot.launch.py:33)
+
+### Remaining M4 findings
+
+- **BLOCKER — The CLI cannot cancel a remapped action while its acceptance reply is pending.** I verified on Jazzy that an exact action-name remap moves the action client and server to the new name while the fallback still calls `cancel_goal` and `get_result` under the original name. After a lost goal reply, the CLI can exit and leave an accepted calibration moving. The earlier Jazzy test log shows goal-reply loss during ordinary discovery. [calibrate_cli.py:55](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/ros/calibrate_cli.py:55) · [calibrate_cli.py:88](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/ros/calibrate_cli.py:88) · [Jazzy test log:64](/home/anson/workspaces/log/test_2026-11-27_16-29-47/handeye_autopilot/stdout_stderr.log:64)
+- **SHOULD-FIX — The fallback reports an unconfirmed stop as `stopped`.** An in-memory check reproduced this with `ABORTED / MOTION_FAULT`. The CLI prints `stopped` for any result response without checking its status or error code. [calibrate_cli.py:72](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/ros/calibrate_cli.py:72) · [node.py:1179](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/ros/node.py:1179)
+- **SHOULD-FIX — The two-operator regression misses the original trigger.** It waits for a normal busy rejection and never interrupts the second CLI while the reply is pending. [test_node_moveit.py:678](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/test/test_node_moveit.py:678)
+
+**Notes.** The scene-recheck docstring still says “tens of ms” even though batches run sequentially against the service deadline. 102 targeted tests passed and 39 integration tests collected. The sandbox prevented full ROS launches. No files changed. [moveit_client.py:357](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/handeye_autopilot/ros/moveit_client.py:357)
+
+M4 merge: BLOCKED

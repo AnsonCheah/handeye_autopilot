@@ -19,7 +19,9 @@ import math
 from pathlib import Path
 from typing import Any
 
+from rclpy.exceptions import ParameterUninitializedException
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 import yaml
 
 from ..core.boards import BoardSpec
@@ -52,6 +54,63 @@ class Timing:
                 raise ValueError(f'timing.{f.name} must be a finite number > 0')
 
 
+@dataclass(frozen=True)
+class MoveItSettings:
+    """MoveIt execution (01-architecture §3). Service and action names are the
+    relative defaults ``compute_ik``, ``move_action``, ``compute_cartesian_path``,
+    ``execute_trajectory``; remap them like any ROS name."""
+
+    group_name: str = ''                # SRDF planning group (required for moveit)
+    ik_link: str = ''                   # IK link (group tip); empty = tool_frame
+    joint_names: tuple[str, ...] = ()   # the group's active joints, in goal order
+    carried_links: tuple[str, ...] = ()  # URDF links modelling the carried board/camera
+    ik_timeout: int = 0                 # whole s; 0 = the server's default (§3.1)
+    planning_time: float = 5.0          # s per MoveGroup plan
+    velocity_scaling: float = 0.2       # (0, 1]; 0 would mean full speed in MoveIt
+    acceleration_scaling: float = 0.2
+    motion_timeout: float = 60.0        # s for one motion to reach a terminal state
+    cancel_timeout: float = 5.0         # s for a cancelled motion to confirm its stop
+    service_timeout: float = 10.0       # s to find the MoveIt services at preflight
+    joint_tolerance: float = 0.01       # rad, measured vs goal joints (joint goals)
+    pose_tolerance_translation: float = 0.002   # m, measured vs target tool pose
+    pose_tolerance_rotation: float = math.radians(0.3)
+    cartesian_max_step: float = 0.005   # m, MoveIt's interpolation step on our waypoints
+    revolute_jump_threshold: float = 0.5   # rad between Cartesian path points (0 = off)
+    box_path_constraint: bool = True    # the box as a MoveGroup path constraint (§3.2)
+
+    def __post_init__(self) -> None:
+        for name in ('velocity_scaling', 'acceleration_scaling'):
+            v = getattr(self, name)
+            if not (isinstance(v, (int, float)) and not isinstance(v, bool) and 0 < v <= 1):
+                raise ValueError(f'moveit.{name} must be in (0, 1]')
+        for name in ('planning_time', 'motion_timeout', 'cancel_timeout', 'service_timeout',
+                     'joint_tolerance', 'pose_tolerance_translation',
+                     'pose_tolerance_rotation', 'cartesian_max_step'):
+            v = getattr(self, name)
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or \
+                    not math.isfinite(v) or v <= 0:
+                raise ValueError(f'moveit.{name} must be a finite number > 0')
+        v = self.revolute_jump_threshold
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or \
+                not math.isfinite(v) or v < 0:
+            raise ValueError('moveit.revolute_jump_threshold must be a finite number >= 0')
+        if isinstance(self.ik_timeout, bool) or not isinstance(self.ik_timeout, int) or \
+                self.ik_timeout < 0:
+            # whole seconds: Jazzy's compute_ik drops the nanoseconds (probe finding 6)
+            raise ValueError('moveit.ik_timeout must be a whole number of seconds >= 0')
+        if not all(isinstance(j, str) and j for j in self.joint_names + self.carried_links):
+            raise ValueError('moveit.joint_names and moveit.carried_links must be non-empty '
+                             'strings')
+        if len(set(self.joint_names)) != len(self.joint_names):
+            raise ValueError('moveit.joint_names has duplicates')
+
+    def missing(self) -> str:
+        """What MoveIt execution still needs, or ''."""
+        need = [n for n, v in (('moveit.group_name', self.group_name),
+                               ('moveit.joint_names', self.joint_names)) if not v]
+        return ', '.join(need)
+
+
 FRAME_DEFAULTS = {'base_frame': 'base_link', 'tool_frame': 'tool0',
                   'board_frame': 'calibration_board', 'camera_root_frame': ''}
 
@@ -66,6 +125,7 @@ class RunConfig:
     session: SessionConfig
     timing: Timing
     frames: dict[str, str]
+    moveit: MoveItSettings = field(default_factory=MoveItSettings)
     image_is_rectified: bool = False
     output_dir: str = ''
     profile: str = ''
@@ -88,6 +148,12 @@ def declare(node: Node) -> None:
         node.declare_parameter(f'board.{k}', v)
     for f in fields(Timing):
         node.declare_parameter(f'timing.{f.name}', getattr(Timing(), f.name))
+    for f in fields(MoveItSettings):
+        d = getattr(MoveItSettings(), f.name)
+        if d == ():                      # an empty list has no type for rclpy
+            node.declare_parameter(f'moveit.{f.name}', Parameter.Type.STRING_ARRAY)
+        else:
+            node.declare_parameter(f'moveit.{f.name}', d)
     for k, v in FRAME_DEFAULTS.items():
         node.declare_parameter(k, v)
     node.declare_parameter('image_is_rectified', False)
@@ -99,7 +165,12 @@ def declare(node: Node) -> None:
 def _group_values(node: Node, prefix: str, names: list[str]) -> dict[str, Any]:
     out = {}
     for n in names:
-        v = node.get_parameter(f'{prefix}.{n}').value
+        try:
+            v = node.get_parameter(f'{prefix}.{n}').value
+        except ParameterUninitializedException:     # declared by type only, never set
+            v = ()
+        if v is None:
+            v = ()
         out[n] = tuple(v) if isinstance(v, (list, tuple)) else v
     return out
 
@@ -111,6 +182,7 @@ def node_values(node: Node) -> dict[str, Any]:
         doc[group] = _group_values(node, group, [f.name for f in fields(cls)])
     doc['board'] = _group_values(node, 'board', list(BOARD_DEFAULTS))
     doc['timing'] = _group_values(node, 'timing', [f.name for f in fields(Timing)])
+    doc['moveit'] = _group_values(node, 'moveit', [f.name for f in fields(MoveItSettings)])
     for k in FRAME_DEFAULTS:
         doc[k] = node.get_parameter(k).value
     doc['image_is_rectified'] = node.get_parameter('image_is_rectified').value
@@ -175,6 +247,10 @@ def check_types(group: str, cls: type, values: dict[str, Any]) -> None:
             ok = isinstance(v, int) and not isinstance(v, bool)
         elif isinstance(d, float):
             ok = isinstance(v, (int, float)) and not isinstance(v, bool)
+        elif isinstance(d, str):
+            ok = isinstance(v, str)
+        elif isinstance(d, tuple) and k in ('joint_names', 'carried_links'):
+            ok = isinstance(v, (tuple, list)) and all(isinstance(x, str) for x in v)
         elif isinstance(d, tuple):
             ok = isinstance(v, (tuple, list)) and all(
                 isinstance(x, (int, float)) and not isinstance(x, bool) for x in v)
@@ -198,13 +274,14 @@ def build(doc: dict[str, Any], profile: str = '') -> RunConfig:
             raise ValueError(f'{k} must be true or false, got {doc.get(k)!r}')
     if not isinstance(doc.get('output_dir'), str):
         raise ValueError('output_dir must be a string')
-    for group in ('board', 'capture', 'solver', 'session', 'timing'):
+    for group in ('board', 'capture', 'solver', 'session', 'timing', 'moveit'):
         if not isinstance(doc.get(group), dict):
             raise ValueError(f'{group} must be a mapping')
     if doc['base_frame'] == doc['tool_frame']:
         raise ValueError('base_frame and tool_frame must differ')
     for group, cls in (('capture', CaptureConfig), ('solver', SolverConfig),
-                       ('session', SessionConfig), ('timing', Timing)):
+                       ('session', SessionConfig), ('timing', Timing),
+                       ('moveit', MoveItSettings)):
         check_types(group, cls, doc[group])
     for k, v in doc['board'].items():
         d = BOARD_DEFAULTS.get(k)
@@ -230,6 +307,8 @@ def build(doc: dict[str, Any], profile: str = '') -> RunConfig:
         solver=SolverConfig.from_dict(dict(doc['solver'])),
         session=SessionConfig(**dict(doc['session'])),
         timing=Timing(**dict(doc['timing'])),
+        moveit=MoveItSettings(**{k: tuple(v) if isinstance(v, list) else v
+                                 for k, v in doc['moveit'].items()}),
         frames={k: str(doc[k]) for k in FRAME_DEFAULTS},
         image_is_rectified=doc['image_is_rectified'],
         output_dir=doc['output_dir'],

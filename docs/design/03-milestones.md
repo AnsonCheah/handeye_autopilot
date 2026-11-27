@@ -143,8 +143,10 @@ farm sync), which don't shrink with more effort. Re-estimate after M1a.
 
 ## M4 — MoveIt mode + Panda and UR demos (effort 3–4 wk)
 
-- `compute_ik` client (IK contract), pymoveit2 motion with result checks,
-  box as path constraint, cancel during motion.
+- `compute_ik` client (IK contract), motion through MoveIt's actions with
+  result checks, box as path constraint, cancel during motion. As built:
+  direct rclpy clients on `MoveGroup`, `compute_cartesian_path` and
+  `ExecuteTrajectory` (pymoveit2 dropped, 01-architecture §2).
 - `handeye_autopilot_demos`: Panda and UR (mock hardware), both modes, synthetic camera, a
   table collision object and a point-cloud obstacle. Both demos are in 1.0 by
   the maintainer's decision (review suggested deferring UR; declined).
@@ -157,7 +159,7 @@ farm sync), which don't shrink with more effort. Re-estimate after M1a.
   `~/clear_fault` succeeds; real `compute_ik` contract test (timeout
   behaviour) on all three distros.
 - *Learn:* MoveIt 2 concepts (groups, SRDF, planning scene, move_group),
-  pymoveit2.
+  its action and service interfaces.
 - **Done when:** both demos run unattended in both modes and pass; the failure
   tests pass; one demo runs in CI on every distro where MoveIt + the robot
   config install.

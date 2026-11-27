@@ -183,6 +183,9 @@ class SessionConfig:
     box_rpy: tuple[float, float, float] = (0.0, 0.0, 0.0)
     box_size: tuple[float, float, float] = (2.0, 2.0, 2.0)
     box_check_moving_object: bool = False    # also the board corners (e2h) / camera (eih)
+    # the frame box_xyz/rpy are given in ('' = the base frame); the ROS node
+    # resolves it through TF at goal start, the core only sees base-frame values
+    box_frame: str = ''
     envelope_radius: float = 0.4                  # tool origin from the seed, m
     max_orientation_change: float = math.radians(60.0)   # tool rotation from the seed
     # selection (§C6-7)

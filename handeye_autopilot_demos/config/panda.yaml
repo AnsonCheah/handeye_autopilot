@@ -1,0 +1,49 @@
+# Panda demo on mock hardware (handeye_autopilot_demos, 03-milestones M4).
+#
+# The true mounts below are what the calibration must find: the synthetic
+# camera renders with them, nothing publishes them as TF. They were chosen so
+# that the Panda's ready pose (seed_joints) is a good seed: board centred and
+# tilted ~20 deg in the image at 0.65 m (eye-to-hand) / 0.5 m (eye-in-hand).
+robot:
+  launch: panda_robot.launch.py
+  base_frame: panda_link0
+  tool_frame: panda_hand        # a URDF link outside the planning group: the node
+  ik_link: panda_link8          # converts tool poses to the IK link (01-architecture §3.1)
+  group_name: panda_arm
+  joint_names: [panda_joint1, panda_joint2, panda_joint3, panda_joint4, panda_joint5,
+                panda_joint6, panda_joint7]
+  seed_joints: [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785]
+  # links the carried board / camera may touch (it is bolted to them)
+  touch_links: [panda_link7, panda_link8, panda_hand, panda_leftfinger, panda_rightfinger]
+  table: {xyz: [0.35, 0.0, -0.035], size: [1.5, 1.4, 0.05]}     # top at z = -0.01
+  obstacle: {xyz: [0.5, -0.5, 0.35], size: [0.08, 0.08, 0.7]}  # point-cloud pillar
+
+board: {kind: charuco, squares_x: 7, squares_y: 5, square_length: 0.03,
+        marker_length: 0.022, dictionary: DICT_5X5_100}
+
+eye_to_hand:
+  # base -> camera_link (a camera on a tripod in front of the robot)
+  true_camera_xyz_rpy: [0.99, -0.1682, 0.6647, -0.1812, 0.3367, 2.8638]
+  # tool (panda_hand) -> board (on a bracket below the hand, facing forward)
+  true_board_xyz_rpy: [0.093, 0.105, 0.065, 1.5708, 0.0, -1.5708]
+eye_in_hand:
+  # tool (panda_hand) -> camera_link (beside the hand, looking along the fingers)
+  true_camera_xyz_rpy: [0.07, 0.0, 0.02, 3.1416, -1.5708, 0.0]
+  # base -> board (on a small stand on the table)
+  true_board_xyz_rpy: [0.4555, 0.0883, 0.122, -2.7925, 0.2618, -1.6581]
+
+# extra calibration-node parameters (01-architecture §5a)
+calibration:
+  session:
+    lever_max: 0.15             # m: the demo's mounts are within 0.15 m per tool axis
+    box_enabled: true           # safety box around the work area, shown in RViz
+    box_xyz: [0.45, 0.0, 0.45]
+    box_size: [0.9, 1.1, 0.8]
+  timing:
+    # MoveIt, ros2_control, the camera and the node share one machine here: on a
+    # loaded 2-core CI runner an image can arrive 0.6 s after the pose it shows.
+    # Still far below a real clock-domain mismatch (seconds or more).
+    clock_tolerance: 2.0
+  moveit:
+    velocity_scaling: 0.5       # mock hardware: no reason to crawl
+    acceleration_scaling: 0.5

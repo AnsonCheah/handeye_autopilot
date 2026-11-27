@@ -39,7 +39,7 @@ jobs:
       - working-directory: handeye_autopilot
         run: >
           PYTHONPATH=. python -m pytest -q test
-          --ignore=test/test_interfaces.py --ignore=test/test_pymoveit2_smoke.py
+          --ignore=test/test_interfaces.py --ignore=test/test_moveit_interfaces.py
 
   build-and-test:
     name: ${{ matrix.ros_distribution }}
@@ -91,6 +91,10 @@ jobs:
           no-symlink-install: true
           skip-rosdep-install: true
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          # one package's tests at a time: the node's timing tests and the demos'
+          # real move_group must not compete for the runner's two cores
+          colcon-defaults: |
+            {"test": {"executor": "sequential"}}
       # M0 done-when: a separate downstream package uses the installed interfaces.
       - name: Downstream consumer (CI only)
         shell: bash

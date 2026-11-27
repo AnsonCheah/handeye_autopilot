@@ -1,0 +1,14 @@
+# MoveIt's octomap updater (moveit_ros_perception): the demo's point-cloud
+# obstacle (scene node, topic /demo/obstacle_points) becomes occupied space in
+# the planning scene, so compute_ik and planning avoid it.
+sensors:
+  - obstacle_cloud
+obstacle_cloud:
+  sensor_plugin: occupancy_map_monitor/PointCloudOctomapUpdater
+  point_cloud_topic: /demo/obstacle_points
+  max_range: 3.0
+  point_subsample: 1
+  padding_offset: 0.02
+  padding_scale: 1.0
+  max_update_rate: 2.0
+  filtered_cloud_topic: /demo/obstacle_points_filtered
