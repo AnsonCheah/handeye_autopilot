@@ -63,6 +63,7 @@ class MoveItSettings:
     group_name: str = ''                # SRDF planning group (required for moveit)
     ik_link: str = ''                   # IK link (group tip); empty = tool_frame
     joint_names: tuple[str, ...] = ()   # the group's active joints, in goal order
+    carried_links: tuple[str, ...] = ()  # URDF links modelling the carried board/camera
     ik_timeout: int = 0                 # whole s; 0 = the server's default (§3.1)
     planning_time: float = 5.0          # s per MoveGroup plan
     velocity_scaling: float = 0.2       # (0, 1]; 0 would mean full speed in MoveIt
@@ -97,8 +98,9 @@ class MoveItSettings:
                 self.ik_timeout < 0:
             # whole seconds: Jazzy's compute_ik drops the nanoseconds (probe finding 6)
             raise ValueError('moveit.ik_timeout must be a whole number of seconds >= 0')
-        if not all(isinstance(j, str) and j for j in self.joint_names):
-            raise ValueError('moveit.joint_names must be non-empty strings')
+        if not all(isinstance(j, str) and j for j in self.joint_names + self.carried_links):
+            raise ValueError('moveit.joint_names and moveit.carried_links must be non-empty '
+                             'strings')
         if len(set(self.joint_names)) != len(self.joint_names):
             raise ValueError('moveit.joint_names has duplicates')
 
@@ -247,7 +249,7 @@ def check_types(group: str, cls: type, values: dict[str, Any]) -> None:
             ok = isinstance(v, (int, float)) and not isinstance(v, bool)
         elif isinstance(d, str):
             ok = isinstance(v, str)
-        elif isinstance(d, tuple) and k == 'joint_names':
+        elif isinstance(d, tuple) and k in ('joint_names', 'carried_links'):
             ok = isinstance(v, (tuple, list)) and all(isinstance(x, str) for x in v)
         elif isinstance(d, tuple):
             ok = isinstance(v, (tuple, list)) and all(

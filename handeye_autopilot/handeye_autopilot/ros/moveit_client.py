@@ -347,17 +347,21 @@ class MoveItClient:
                       cancelled: threading.Event | None = None) -> str:
         """Every trajectory point against the CURRENT planning scene (attached
         bodies included), right before execution: ExecuteTrajectory, unlike a
-        MoveGroup goal, does not re-check a trajectory planned earlier. '' if all
-        are valid, else why."""
+        MoveGroup goal, does not re-check a trajectory planned earlier. All
+        requests go out at once, so the check spans one scene snapshot as far as
+        possible (a few ms). '' if all are valid, else why."""
         jt = traj.joint_trajectory
-        for k, p in enumerate(jt.points):
+        futs = []
+        for p in jt.points:
             req = GetStateValidity.Request()
             req.group_name = group
             req.robot_state.is_diff = True
             req.robot_state.joint_state.name = list(jt.joint_names)
             req.robot_state.joint_state.position = [float(v) for v in p.positions]
-            fut = self.validity.call_async(req)
-            if not wait_future(fut, timeout, cancelled):
+            futs.append(self.validity.call_async(req))
+        deadline = time.monotonic() + timeout
+        for k, fut in enumerate(futs):
+            if not wait_future(fut, max(0.0, deadline - time.monotonic()), cancelled):
                 return 'check_state_validity did not reply'
             if not fut.result().valid:
                 return f'trajectory point {k} is no longer valid in the current planning scene'

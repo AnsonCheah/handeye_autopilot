@@ -201,11 +201,14 @@ MoveIt brand implicitly.
   the threshold field but does not apply it), and, because MoveIt returns the
   path re-timed and resampled (a branch flip can be spread over small steps),
   the tool path itself: FK of the trajectory (joints interpolated at ≤ 0.01
-  rad) must stay within the end-pose tolerances of the straight waypoint path
-  (M4 review). A failed check is `not_started`.
+  rad) must stay within the end-pose tolerances of the straight waypoint path,
+  and with the box enabled every FK sample is box-checked as well (the core
+  checked the nominal waypoints; the planned path may deviate within the
+  tolerance) (M4 review). A failed check is `not_started`.
 - Before any `ExecuteTrajectory` goal (Cartesian moves, box-checked planned
   moves) every trajectory point is re-checked against the current planning
-  scene (`check_state_validity`): unlike a `MoveGroup` goal, an
+  scene (`check_state_validity`, all requests sent at once so the check
+  spans one scene snapshot as far as possible): unlike a `MoveGroup` goal, an
   `ExecuteTrajectory` goal does not re-check a path planned earlier.
   `shortcut:` MoveIt does not monitor scene changes during an
   `ExecuteTrajectory` execution either; obstacles that appear mid-motion are
@@ -245,10 +248,13 @@ it (else `seed_rejected`), and checked short moves are limit-checked at every
 waypoint (§3.2).
 
 The collision warning checks both representations of the carried board or
-camera: URDF collision geometry on links fixed (through fixed joints) below
-the tool frame or the IK link, and attached collision objects on those links
-in the planning scene (`get_planning_scene`). Warn only if neither exists (as
-built in M4: a log warning at the start of a MoveIt-mode run).
+camera: attached collision objects in the planning scene
+(`get_planning_scene`) on a link rigid with the tool (the tool frame, the IK
+link and links fixed below them), and URDF collision geometry on the links
+named in `moveit.carried_links` (the robot's own hand geometry is not the
+carried object, so URDF geometry counts only when named). Warn only if
+neither exists (as built in M4: a log warning at the start of a MoveIt-mode
+run).
 
 ## 4. Packages and installation
 
@@ -409,8 +415,8 @@ acceptance):
   `velocity_scaling` and `acceleration_scaling` (in (0, 1]), `motion_timeout`,
   `cancel_timeout`, `service_timeout`, end-state tolerances
   (`joint_tolerance`, `pose_tolerance_translation`, `pose_tolerance_rotation`),
-  `cartesian_max_step`, `revolute_jump_threshold`, `box_path_constraint`;
-  `session.box_frame` (§3.4).
+  `cartesian_max_step`, `revolute_jump_threshold`, `box_path_constraint`,
+  `carried_links` (§3.4); `session.box_frame` (§3.4).
   The MoveIt names (`compute_ik`, `compute_fk`, `move_action`,
   `compute_cartesian_path`, `execute_trajectory`) are relative: remap them;
 - `testing.allow_fault_injection` (default false): adds `~/inject_fault`,

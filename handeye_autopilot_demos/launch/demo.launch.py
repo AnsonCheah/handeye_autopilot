@@ -8,10 +8,9 @@ Arguments:
 - ``robot``: ``panda`` or ``ur`` (a UR5e);
 - ``mode``: ``eye_to_hand`` or ``eye_in_hand``;
 - ``auto`` (default true): ``run_demo`` moves to the seed, calibrates unattended,
-  prints DEMO PASSED or DEMO FAILED, and the whole launch then stops (its own
-  exit code is 0 either way: read the verdict, or run ``run_demo`` yourself,
-  which exits 0 or 1); false leaves everything running for you to send goals
-  (README "try it");
+  prints DEMO PASSED or DEMO FAILED, and the whole launch then stops with the
+  runner's verdict as its exit code (0 passed, 1 failed); false leaves
+  everything running for you to send goals (README "try it");
 - ``rviz`` (default false): RViz with the robot, the planning scene, the
   safety box and the annotated camera image;
 - ``record`` (default false): ``ros2 bag record`` of the run (calibrate.launch.py).
@@ -40,6 +39,14 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 import yaml
+
+
+def _verdict(event, context):
+    """Stop everything when the runner ends. A failed demo raises here: launch
+    turns an exception in an event handler into exit code 1 (and shuts down)."""
+    if event.returncode != 0:
+        raise RuntimeError(f'demo failed (run_demo exit code {event.returncode})')
+    return [EmitEvent(event=Shutdown(reason='demo passed'))]
 
 
 def _setup(context, *args, **kwargs):
@@ -87,7 +94,7 @@ def _setup(context, *args, **kwargs):
                            '-f', r['base_frame']],
                 condition=IfCondition(LaunchConfiguration('rviz')))
     stop_with_runner = RegisterEventHandler(OnProcessExit(
-        target_action=runner, on_exit=[EmitEvent(event=Shutdown(reason='demo finished'))]))
+        target_action=runner, on_exit=_verdict))
     return [robot_launch, camera, calibrate, scene, runner, rviz, stop_with_runner]
 
 

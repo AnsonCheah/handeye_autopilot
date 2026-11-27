@@ -218,8 +218,27 @@ def test_panda_demo_eye_to_hand_end_to_end(tmp_path):
     text = log_path.read_text()
     lines = '\n'.join([ln for ln in text.splitlines() if 'demo_runner' in ln][-30:])
     assert not timed_out, 'the demo did not finish in time:\n' + lines
-    # the verdict AND a clean exit of the runner (exit code 0); the launch itself
-    # always exits 0 when the runner ends it
+    # the verdict, the runner's own clean exit, and the launch's exit code (the
+    # demo launch exits 1 when the runner fails)
+    import re
     assert 'DEMO PASSED' in text, lines or text[-3000:]
-    assert '[run_demo-' in text and 'process has finished cleanly' in text.split(
-        'DEMO PASSED')[-1], lines
+    assert re.search(r'\[run_demo-\d+\]: process has finished cleanly', text), lines
+    assert proc.returncode == 0, f'launch exit code {proc.returncode}'
+
+
+def test_demo_launch_exit_code_follows_the_runner():
+    """A failed demo makes the launch exit 1 (an exception in the exit handler,
+    which launch turns into its return code); a passed one shuts down cleanly."""
+    import importlib.util
+
+    from ament_index_python.packages import get_package_share_directory
+    path = os.path.join(get_package_share_directory('handeye_autopilot_demos'), 'launch',
+                        'demo.launch.py')
+    spec = importlib.util.spec_from_file_location('demo_launch', path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    ev = type('E', (), {'returncode': 1})()
+    with pytest.raises(RuntimeError):
+        mod._verdict(ev, None)
+    ev.returncode = 0
+    assert mod._verdict(ev, None)

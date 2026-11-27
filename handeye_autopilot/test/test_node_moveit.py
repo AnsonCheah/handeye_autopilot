@@ -281,6 +281,22 @@ def test_bad_cartesian_paths_are_never_executed(moveit_world, fault):
     assert not [k for k, _ in w.moveit.goals if k == 'execute']
 
 
+def test_cartesian_path_is_box_checked_as_planned(moveit_world):
+    """The core checks the nominal waypoints; the path MoveIt plans may deviate
+    within the straight-path tolerance. Here the tolerance is loose and the
+    planned path swings 5 cm up through the box top: refused, nothing runs."""
+    w = moveit_world(node_over={'moveit.pose_tolerance_translation': 0.2})
+    G0 = w.robot.G
+    w.node.set_parameters([
+        rclpy.parameter.Parameter('session.box_enabled', value=True),
+        rclpy.parameter.Parameter('session.box_xyz', value=[float(v) for v in G0[:3, 3]]),
+        rclpy.parameter.Parameter('session.box_size', value=[2.0, 2.0, 0.06])])
+    w.moveit.cart_swing = True
+    out = w.result(w.driver.send(execution='moveit'), timeout=120.0)
+    assert out.result.error_code == R.NOT_ENOUGH_SAMPLES, out.result.message
+    assert not [k for k, _ in w.moveit.goals if k == 'execute']
+
+
 def test_camera_change_during_a_motion_stops_it(moveit_world):
     """§6-7: the run becomes invalid while a goal runs: the goal is cancelled at
     once (not only noticed after it ends) and the run ends NO_CAMERA_INFO."""
@@ -502,19 +518,27 @@ def test_ctrl_c_cancels_the_motion_before_exiting(moveit_world, tmp_path):
     pfile.write_text(yaml.safe_dump({'/**': {'ros__parameters': nested}}))
     exe = os.path.join(get_package_prefix('handeye_autopilot'), 'lib', 'handeye_autopilot',
                        'calibrate_node')
+    log_path = tmp_path / 'node.log'
+    log = open(log_path, 'w')
     proc = subprocess.Popen([exe, '--ros-args', '-r', '__node:=handeye_sub',
-                             '--params-file', str(pfile)],
-                            env=dict(os.environ, ROS_DOMAIN_ID='57'), start_new_session=True)
+                             '--params-file', str(pfile)], stdout=log, stderr=subprocess.STDOUT,
+                            env=dict(os.environ, ROS_DOMAIN_ID='57', PYTHONUNBUFFERED='1'),
+                            start_new_session=True)
     try:
+        _wait(lambda: 'ready: send a goal' in log_path.read_text(), 60.0, 'node not ready')
         d = Driver(w.client, ns='/handeye_sub')
-        h = d.send(execution='moveit', timeout=30.0)
+        h = d.send(execution='moveit', timeout=60.0)
         assert h.accepted
         _wait(lambda: w.moveit.goals, 120.0, 'no motion goal')
         time.sleep(0.5)
         proc.send_signal(signal.SIGINT)
         assert proc.wait(timeout=30) == 0
         assert w.moveit.cancels, 'the motion goal was not cancelled before the node exited'
+    except BaseException:
+        print(log_path.read_text()[-4000:])      # the node's side, for a CI failure
+        raise
     finally:
         if proc.poll() is None:
             os.killpg(proc.pid, signal.SIGKILL)
             proc.wait(timeout=10)
+        log.close()

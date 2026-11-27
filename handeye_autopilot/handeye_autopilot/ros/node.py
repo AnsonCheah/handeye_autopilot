@@ -859,21 +859,26 @@ class CalibrationNode(Node):
         return replace(cfg, session=box)
 
     def _warn_carried_geometry(self, cfg: P.RunConfig, ik_link: str) -> None:
-        """§3.4: warn when neither an attached collision object nor URDF collision
-        geometry on a link fixed below the tool represents the carried board or
-        camera (MoveIt then can't keep it out of collisions)."""
+        """§3.4: warn when the carried board or camera has no collision geometry:
+        neither an attached collision object on a link rigid with the tool, nor
+        a URDF link named in ``moveit.carried_links`` that has collision
+        geometry (the robot's own hand geometry is not the carried object, so
+        URDF geometry counts only when named). MoveIt then can't keep it out of
+        collisions."""
         tool = cfg.frames['tool_frame']
-        fixed = _fixed_descendants(self._robot_description, {tool, ik_link})
+        urdf = self._robot_description
+        rigid = _fixed_descendants(urdf, {tool, ik_link}) | {tool, ik_link}
         attached = self.moveit.attached_links(cfg.moveit.service_timeout)
-        rigid = fixed | {tool, ik_link}
         if attached is not None and attached & rigid:
             return
-        if any(_has_collision(self._robot_description, link) for link in fixed):
+        named = [link for link in cfg.moveit.carried_links if _has_collision(urdf, link)]
+        if named:
             return
         self.get_logger().warning(
-            'no collision geometry found for the carried board or camera (no attached '
-            f'collision object on {sorted(rigid)}, no URDF collision link fixed below the '
-            'tool): MoveIt cannot keep it out of collisions. Attach it to the planning scene.')
+            'no collision geometry for the carried board or camera: no attached collision '
+            f'object on {sorted(rigid)} and no moveit.carried_links with URDF collision '
+            'geometry. MoveIt cannot keep it out of collisions; attach it to the planning '
+            'scene (or name its URDF link in moveit.carried_links).')
 
     def _fixed_offset(self, goal_handle: Any, run: RunState, ik_link: str, tool: str,
                       cfg: P.RunConfig) -> Any:
@@ -963,7 +968,7 @@ class CalibrationNode(Node):
             # points is not enough: the measured tool path must be the straight one
             # the core checked (01-architecture §3.2)
             why = plan.note if not plan.ok else self._off_straight_path(
-                plan.trajectory, a.waypoints, a.tool_pose, cfg, ik_link, tool_T_ik, run) or \
+                plan.trajectory, a.waypoints, a.tool_pose, cfg, ik_link, tool_T_ik, run, mode) or \
                 self.moveit.invalid_state(plan.trajectory, mi.group_name, mi.service_timeout,
                                           run.cancelled)
             self._check_cancel(goal_handle, run)
@@ -1053,7 +1058,7 @@ class CalibrationNode(Node):
 
     def _off_straight_path(self, traj: Any, waypoints: list[Any], target: Any,
                            cfg: P.RunConfig, ik_link: str, tool_T_ik: Any,
-                           run: RunState) -> str:
+                           run: RunState, mode: str) -> str:
         """A checked short move must follow the straight tool path the core
         checked: through FK of the planned trajectory (joints interpolated at
         <= 0.01 rad), every tool position within ``pose_tolerance_translation``
@@ -1091,6 +1096,11 @@ class CalibrationNode(Node):
                 return (f'the Cartesian path leaves the straight tool path by '
                         f'{d * 1000:.1f} mm / {math.degrees(max(0.0, r - half)):.2f} deg '
                         '(a joint-space jump)')
+            # the core checked the nominal waypoints; the path really driven may
+            # deviate within the tolerance, so the box is checked on it too
+            why = _box_violation(G, cfg, mode, 0.0)
+            if why:
+                return f'the Cartesian path as planned {why}'
         return ''
 
     def _path_outside_box(self, traj: Any, cfg: P.RunConfig, ik_link: str, tool_T_ik: Any,
@@ -1115,14 +1125,11 @@ class CalibrationNode(Node):
             return 'compute_fk failed while checking the planned path'
         ik_T_tool = tf.inv(tool_T_ik)
         for P_ik in poses:
-            G = P_ik @ ik_T_tool
-            pts = lever_ball_points(mode, G, cfg.session, cfg.board)
             # the controller follows splines between the points, not straight
             # joint lines: a margin covers that (shortcut: fixed 1 cm, not a bound)
-            if not box_contains(G[:3, 3][None], cfg.session, PATH_MARGIN) or \
-                    not box_contains(pts, cfg.session, PATH_MARGIN):
-                return 'the planned path takes the carried object (within L_max) out of ' \
-                       'the safety box'
+            why = _box_violation(P_ik @ ik_T_tool, cfg, mode, PATH_MARGIN)
+            if why:
+                return f'the planned path {why}'
         return ''
 
     def _stopped(self, out: GoalOutcome, run: RunState) -> None:
@@ -1354,6 +1361,21 @@ class CalibrationNode(Node):
 
 
 PATH_MARGIN = 0.01        # m inside the box for sampled planned paths
+
+
+def _box_violation(G: Any, cfg: P.RunConfig, mode: str, margin: float) -> str:
+    """'' if tool pose G keeps the tool origin (and, with box_check_moving_object,
+    the carried object's L_max ball) inside the enabled box, ``margin`` m inside
+    its faces; else why."""
+    sc = cfg.session
+    if not sc.box_enabled:
+        return ''
+    if not box_contains(G[:3, 3][None], sc, margin):
+        return 'takes the tool out of the safety box'
+    if sc.box_check_moving_object and \
+            not box_contains(lever_ball_points(mode, G, sc, cfg.board), sc, margin):
+        return 'takes the carried object (within L_max) out of the safety box'
+    return ''
 
 
 def _urdf_joints(urdf: str) -> list[tuple[str, str, str]]:
