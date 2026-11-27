@@ -143,11 +143,14 @@ MoveIt brand implicitly.
   trajectory** in the MoveGroup result (nothing existed to execute) **or**
   `INVALID_MOTION_PLAN` (MoveIt's `ValidateSolution` planning adapter rejected
   its own plan; it returns that plan filled in; seen in the mount sweep, §10)
-  with the joints **watched the whole time the goal was active**: every
-  `/joint_states` sample within tolerance of the start, at most 0.25 s between
-  samples (`shortcut:` sampled; tighten if a robot can leave and return within
-  that), and measured joints unchanged from the start (within tolerance). A
-  plan that moved the robot and brought it back is therefore `failed`. Anything else,
+  with the joints **watched from the goal until the reply's fresh joints**:
+  every watched value in every `/joint_states` message stamped after the start
+  (partial messages included) within tolerance of the start, full messages at
+  most 0.25 s apart, start and end included (`shortcut:` sampled; tighten if a
+  robot can leave and return within that), and measured joints unchanged from
+  the start (within tolerance). A plan that moved the robot and brought it back
+  is therefore `failed`. The watch guards only this skip; the empty-plan and
+  plan-only rules are as before. Anything else,
   or joints unknown, = `failed` (a motion that moved and came back must not
   pass as a safe skip). The result's `executed_trajectory` is always empty on
   Jazzy (probe), so it is not used.
@@ -647,7 +650,7 @@ snapshotted at admission; every capture's images must match the run's
   operator would measure (tool → board centre in eye-to-hand, tool → camera
   in eye-in-hand: the references of the bootstrap bound, 02-features §B). A
   run is `setup`, not a failure, only when MoveIt reports the start or seed
-  state in collision with the moved mount.
+  state in collision and its contact list includes the board or the camera.
   `shortcut:` no 3D occlusion and the carried object may overlap its
   touch links (the attached box ignores them), so a few cases are physically
   implausible mounts; the results table records them, upgrade if a real mount

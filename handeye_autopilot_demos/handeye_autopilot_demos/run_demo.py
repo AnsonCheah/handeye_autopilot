@@ -24,6 +24,7 @@ from action_msgs.msg import GoalStatus
 from handeye_autopilot.core import transforms as tf
 from handeye_autopilot.ros.moveit_client import MoveItClient, error_name, wait_future
 from handeye_autopilot.ros.synthetic_camera import OPTICAL_RPY, pose
+from moveit_msgs.srv import GetStateValidity
 import numpy as np
 import rclpy
 from rclpy.action import ActionClient
@@ -86,6 +87,7 @@ class Runner(Node):
         if out.status != GoalStatus.STATUS_SUCCEEDED:
             self.get_logger().error(f'could not reach the seed: status {out.status}, '
                                     f'{error_name(out.error_code)} {out.note}')
+            self._log_contacts(r)
             return 1
         time.sleep(2.0)                     # let TF and the camera catch up
         self.log(f'calibrating ({self.mode}, execution: moveit)')
@@ -96,7 +98,9 @@ class Runner(Node):
             return 1
         res_fut = send.result().get_result_async()
         if not wait_future(res_fut, self.timeout):
-            self.get_logger().error('the calibration did not finish in time')
+            self.get_logger().error('the calibration did not finish in time; cancelling it')
+            wait_future(send.result().cancel_goal_async(), 10.0)
+            wait_future(res_fut, 60.0)           # the node stops the robot first
             return 1
         res = res_fut.result()
         r_ = res.result
@@ -115,6 +119,25 @@ class Runner(Node):
                      '  ros2 launch handeye_autopilot result.launch.py '
                      f'result_file:={r_.result_file}')
         return 0 if ok else 1
+
+    def _log_contacts(self, r: dict) -> None:
+        """Which bodies collide, at the current state and at the seed (MoveIt's
+        check_state_validity): the sweep counts a seed failure as a mount problem
+        only if the board or the camera is one of them."""
+        for label, joints in (('current state', None), ('seed', r['seed_joints'])):
+            req = GetStateValidity.Request()
+            req.group_name = r['group_name']
+            req.robot_state.is_diff = True
+            if joints is not None:
+                req.robot_state.joint_state.name = list(r['joint_names'])
+                req.robot_state.joint_state.position = [float(v) for v in joints]
+            fut = self.moveit.validity.call_async(req)
+            if not wait_future(fut, 10.0):
+                self.get_logger().error(f'contacts at the {label}: no reply')
+                continue
+            pairs = sorted({' | '.join(sorted((c.contact_body_1, c.contact_body_2)))
+                            for c in fut.result().contacts})
+            self.get_logger().error(f'contacts at the {label}: {"; ".join(pairs) or "none"}')
 
     def _fb(self, msg: object) -> None:
         f = msg.feedback  # type: ignore[attr-defined]

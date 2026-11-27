@@ -271,8 +271,9 @@ class CalibrationNode(Node):
                 self._joints = [(t, m) for t, m in self._joints if t >= now - 5.0]
             self._joints = self._joints[-10000:]
             self._joint_names_seen.update(msg.name)
+            stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
             for w in self._still_watches:
-                w.sample(now, msg)
+                w.sample(now, stamp, msg)
 
     # -- admission (§5): rejected goals get no result -----------------------------
     def _admit(self, goal: Calibrate.Goal) -> GoalResponse:
@@ -971,9 +972,17 @@ class CalibrationNode(Node):
                 return None
             time.sleep(0.02)
 
-    def _motion(self, goal_handle: Any, run: RunState, cfg: P.RunConfig, a: S.Move,
-                ik_link: str, tool_T_ik: Any, path: Any, mode: str,
-                check_pose: Any = None) -> tuple[str, Any, Any]:
+    def _motion(self, *args: Any, **kwargs: Any) -> tuple[str, Any, Any]:
+        """_motion_body, and no joint watch outlives it (exceptions included)."""
+        try:
+            return self._motion_body(*args, **kwargs)
+        finally:
+            with self._lock:
+                self._still_watches.clear()
+
+    def _motion_body(self, goal_handle: Any, run: RunState, cfg: P.RunConfig, a: S.Move,
+                     ik_link: str, tool_T_ik: Any, path: Any, mode: str,
+                     check_pose: Any = None) -> tuple[str, Any, Any]:
         """One Move (§3.2) -> (outcome, measured joints, measured tool pose).
 
         ok: goal accepted, SUCCEEDED with SUCCESS, and the measured TF tool pose
@@ -1053,20 +1062,16 @@ class CalibrationNode(Node):
                                       invalid)
             else:
                 self._still_valid(goal_handle, run, t_start)
-                if before is not None:            # evidence for a safe skip (§3.2)
-                    watch = StillWatch(list(mi.joint_names), np.asarray(before, float),
-                                       mi.joint_tolerance, time.monotonic())
+                if before is not None:   # evidence for a safe skip (§3.2), kept
+                    # until the reply's fresh joints are in (_not_started)
+                    watch = StillWatch(dict(zip(mi.joint_names, map(float, before),
+                                                strict=True)),
+                                       mi.joint_tolerance, time.monotonic(), self.now())
                     with self._lock:
                         self._still_watches.append(watch)
-                try:
-                    out = self.moveit.run(self.moveit.move, goal,
-                                          mi.planning_time + mi.motion_timeout,
-                                          mi.cancel_timeout, run.cancelled, invalid)
-                finally:
-                    if watch is not None:
-                        with self._lock:
-                            self._still_watches.remove(watch)
-                            watch.end(time.monotonic())
+                out = self.moveit.run(self.moveit.move, goal,
+                                      mi.planning_time + mi.motion_timeout,
+                                      mi.cancel_timeout, run.cancelled, invalid)
         self._stopped(out, run)                   # raises on a cancel or an unconfirmed stop
         if out.stopped == 'invalid':              # stopped because the run became invalid
             self._still_valid(goal_handle, run, t_start)      # raises with the reason
@@ -1075,16 +1080,16 @@ class CalibrationNode(Node):
             return self._failed(run, out.note, after)
         # INVALID_MOTION_PLAN comes with the rejected plan filled in (MoveIt's
         # ValidateSolution adapter; seen in the mount sweep): a safe skip only if
-        # the joints were watched the whole time the goal was active and never
-        # left the start (§3.2). shortcut: sampled at the driver's rate, a gap of
-        # at most STILL_MAX_GAP s is trusted; tighten if a robot can leave and
-        # return within that.
-        unplanned = out.planned_points == 0 or (
-            out.error_code == INVALID_MOTION_PLAN and watch is not None and watch.still())
+        # the joints were watched from the goal until the reply's fresh joints and
+        # never left the start (§3.2, checked in _not_started). shortcut: sampled
+        # at the driver's rate, a gap of at most STILL_MAX_GAP s is trusted;
+        # tighten if a robot can leave and return within that.
+        rejected = out.error_code == INVALID_MOTION_PLAN and watch is not None
         if not a.cartesian and not check_path and out.status == GoalStatus.STATUS_ABORTED and \
-                unplanned and _same(before, after, mi.joint_tolerance):
+                (out.planned_points == 0 or rejected) and \
+                _same(before, after, mi.joint_tolerance):
             return self._not_started(run, cfg, f'planning failed ({error_name(out.error_code)})',
-                                     after)
+                                     after, watch if out.planned_points != 0 else None)
         if out.status != GoalStatus.STATUS_SUCCEEDED or out.error_code != SUCCESS:
             return self._failed(run, f'MoveIt ended the goal with status {out.status}, '
                                 f'{error_name(out.error_code)}', after)
@@ -1213,14 +1218,25 @@ class CalibrationNode(Node):
             run.motion_note = 'the motion did not finish in moveit.motion_timeout; stopped'
         raise RunAbort(R.MOTION_FAILED, run.motion_note)
 
-    def _not_started(self, run: RunState, cfg: P.RunConfig, why: str, joints: Any
-                     ) -> tuple[str, Any, Any]:
+    def _not_started(self, run: RunState, cfg: P.RunConfig, why: str, joints: Any,
+                     watch: StillWatch | None = None) -> tuple[str, Any, Any]:
         """Fresh joints with the reply (the session orders spares from them,
-        §3.2); the earlier sample only if none arrive."""
-        self.get_logger().info(f'motion not started: {why}')
+        §3.2); the earlier sample only if none arrive. With ``watch``, the skip
+        also needs the joints to have stayed at the start from the goal until
+        these fresh joints."""
         fresh = self._joints_now(cfg.moveit.joint_names, time.monotonic(), 2.0, run)
         if fresh is None:            # every reply carries fresh joints (§3.2)
             return self._failed(run, f'{why}; and no fresh /joint_states after it', None)
+        if watch is not None:
+            with self._lock:
+                if watch in self._still_watches:
+                    self._still_watches.remove(watch)
+                watch.end(time.monotonic())
+            if not watch.still() or not _same(fresh, watch.ref_vector(cfg.moveit.joint_names),
+                                              cfg.moveit.joint_tolerance):
+                return self._failed(run, f'{why}, but the joints were not seen to stay at the '
+                                    f'start while the goal was active ({watch.why()})', fresh)
+        self.get_logger().info(f'motion not started: {why}')
         joints = fresh
         got = tf_tools.latest(self.tf_buffer, cfg.frames['base_frame'], cfg.frames['tool_frame'])
         return S.MOTION_NOT_STARTED, joints, None if got is None else got[0]
@@ -1492,32 +1508,49 @@ STILL_MAX_GAP = 0.25     # s, the largest joint-sample gap a StillWatch accepts
 
 @dataclass
 class StillWatch:
-    """Did the joints stay at ``ref`` the whole time a goal was active?
-    Updated from /joint_states (under the node's lock)."""
-    names: list[str]
-    ref: Any
+    """Did the joints stay at ``ref`` from the goal's start until the watch
+    ended? Fed from /joint_states under the node's lock. Messages stamped before
+    the start are ignored (a replayed or queued old message is not evidence);
+    every watched value in any message, partial or full, must be at ``ref``;
+    full messages must arrive at most STILL_MAX_GAP s apart (receive time),
+    from the start to the end."""
+    ref: dict[str, float]
     tol: float
     last: float                 # monotonic time of the last full sample (or the start)
+    start_stamp: float          # node time at the start
     max_gap: float = 0.0
     moved: bool = False
     samples: int = 0
 
-    def sample(self, now: float, msg: Any) -> None:
-        pos = dict(zip(msg.name, msg.position, strict=False))
-        if not all(n in pos for n in self.names):
+    def sample(self, now: float, stamp: float, msg: Any) -> None:
+        if stamp < self.start_stamp:
             return
-        q = np.array([pos[n] for n in self.names], dtype=float)
-        if not _same(q, self.ref, self.tol):
+        pos = {n: float(v) for n, v in zip(msg.name, msg.position, strict=False)
+               if n in self.ref}
+        if not pos:
+            return
+        if any(not math.isfinite(v) or abs(v - self.ref[n]) > self.tol for n, v in pos.items()):
             self.moved = True
-        self.max_gap = max(self.max_gap, now - self.last)
-        self.last = now
-        self.samples += 1
+        if len(pos) == len(self.ref):
+            self.max_gap = max(self.max_gap, now - self.last)
+            self.last = now
+            self.samples += 1
 
     def end(self, now: float) -> None:
         self.max_gap = max(self.max_gap, now - self.last)
 
+    def ref_vector(self, names: Any) -> Any:
+        return np.array([self.ref[n] for n in names], dtype=float)
+
     def still(self) -> bool:
         return self.samples > 0 and not self.moved and self.max_gap <= STILL_MAX_GAP
+
+    def why(self) -> str:
+        if self.moved:
+            return 'a sample left the start'
+        if not self.samples:
+            return 'no joint samples'
+        return f'a {self.max_gap:.2f} s gap between joint samples'
 
 
 def _same(a: Any, b: Any, tol: float) -> bool:

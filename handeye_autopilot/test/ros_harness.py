@@ -424,13 +424,15 @@ class FakeMoveIt(Node):
             res.planned_trajectory.joint_trajectory.joint_names = list(JOINTS)
             res.planned_trajectory.joint_trajectory.points = [
                 JointTrajectoryPoint(positions=[float(v) for v in p]) for p in pts]
+            # timing: joint_states come every 20 ms, so each phase below spans
+            # several samples and no gap reaches the node's 0.25 s limit
             if fail in ('invalid_moved', 'invalid_roundtrip'):
                 G0 = self.robot.G.copy()
                 self.robot.move_to(decode(joints))
-                time.sleep(0.3)
+                time.sleep(0.1)
                 if fail == 'invalid_roundtrip':     # back exactly where it started
                     self.robot.move_to(G0)
-                    time.sleep(0.3)
+            time.sleep(0.1)                         # planning time: samples arrive
             res.error_code.val = -2                        # INVALID_MOTION_PLAN
             goal_handle.abort(res)
             return res

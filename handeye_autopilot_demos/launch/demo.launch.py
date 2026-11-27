@@ -63,9 +63,9 @@ def _stay(event, context):
         return [LogInfo(msg='demo PASSED; everything keeps running (RViz, the camera, '
                             'MoveIt) so you can publish the result to TF (the runner '
                             'printed the command). Ctrl-C to stop.')]
-    return [LogInfo(msg=f'demo FAILED (run_demo exit code {event.returncode}): there is '
-                        'no result to publish. Everything keeps running so you can look '
-                        'at the robot and the scene in RViz. Ctrl-C to stop.')]
+    return [LogInfo(msg=f'demo FAILED (run_demo exit code {event.returncode}; the runner '
+                        'said why above). Everything keeps running so you can look at the '
+                        'robot and the scene in RViz. Ctrl-C to stop.')]
 
 
 def _truthy(value: str) -> bool:

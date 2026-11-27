@@ -43,6 +43,8 @@ CAPTURES = re.compile(r'captures accepted (\d+), rejected (\d+)')
 # the runner's seed-move failure with collision evidence from MoveIt
 SEED_COLLISION = re.compile(r'could not reach the seed: status \d+, '
                             r'(START_STATE_IN_COLLISION|GOAL_IN_COLLISION)')
+CONTACTS = re.compile(r'contacts at the (current state|seed): (.*)')
+MOUNTED = ('calibration_board', 'camera')   # scene.py's ids for the board and the camera
 STOP = threading.Event()                 # Ctrl-C: launch nothing more
 _running: set[subprocess.Popen] = set()  # launches to stop on Ctrl-C
 _running_lock = threading.Lock()
@@ -90,13 +92,17 @@ def seed_tool_pose(robot: str, cfg: dict[str, Any], domain: int) -> Any:
 
 
 def _stop(proc: subprocess.Popen) -> None:
-    if proc.poll() is None:
-        os.killpg(proc.pid, signal.SIGINT)
-        try:
-            proc.wait(30)
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
+    """Stop a launch and everything it started (its process group)."""
+    try:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGINT)
+            try:
+                proc.wait(30)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+    except ProcessLookupError:          # it ended on its own meanwhile
+        proc.wait()
 
 
 def run_case(job: dict[str, Any], domains: queue.Queue, timeout: float) -> dict[str, Any]:
@@ -139,11 +145,15 @@ def parse(text: str, code: int | None) -> dict[str, Any]:
         out['message'] = m.group(3).strip()
     if code == 0 and 'DEMO PASSED' in text:
         out['verdict'] = 'passed'
-    elif code is not None and (m := SEED_COLLISION.search(text)):
-        # MoveIt's collision verdict on the robot's start or seed state with this
-        # mount: nobody could start a calibration like that
+    elif code is not None and (m := SEED_COLLISION.search(text)) and (
+            pairs := [p for c in CONTACTS.finditer(text) for p in c.group(2).split('; ')
+                      if any(o in p.split(' | ') for o in MOUNTED)]):
+        # MoveIt's collision verdict on the robot's start or seed state, with the
+        # board or the camera as one of the colliding bodies: nobody could start a
+        # calibration with this mount
         out['verdict'] = 'setup'
-        out['message'] = f'the mount collides with the robot before calibrating ({m.group(1)})'
+        out['message'] = (f'the mount collides before calibrating ({m.group(1)}: '
+                          f'{"; ".join(sorted(set(pairs)))})')
     else:
         out['verdict'] = 'failed'
         if code is None:
@@ -209,8 +219,10 @@ def main(argv: list[str] | None = None) -> int:
         domains.put(a.domain_base + 1 + i)
     rows: list[dict[str, Any]] = []
     pool = ThreadPoolExecutor(a.jobs)
-    futures = [pool.submit(run_case, j, domains, a.timeout + 300) for j in jobs]
     try:
+        # the runner's own deadline is --timeout for the calibration; start-up,
+        # discovery and the seed move come on top
+        futures = [pool.submit(run_case, j, domains, a.timeout + 900) for j in jobs]
         for f in futures:
             row = f.result()
             rows.append(row)
