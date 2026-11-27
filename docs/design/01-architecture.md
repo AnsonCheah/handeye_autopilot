@@ -59,7 +59,7 @@ Solving uses OpenCV + SciPy. Interop (v1.1): export observations in
 | Publish result | `tf2_ros` `StaticTransformBroadcaster` | `publish_result`: a small node that re-checks ownership on the live TF tree, then broadcasts; `result.launch.py` runs it |
 | Visualisation | RViz2, `MarkerArray`, OpenCV drawing | Marker builders |
 | Run recording | `ros2 bag record` (launch option) | Observations YAML for offline re-solve (`core/observations.py`); result YAML (`core/results.py`); `resolve` CLI (`cli/resolve.py`) |
-| Start / cancel / progress | ROS 2 action | One action definition |
+| Start / cancel / progress | ROS 2 action | One action definition; M4: `ros/calibrate_cli.py`, a small action client (`ros2 run handeye_autopilot calibrate`), because `ros2 action send_goal` waits forever when the goal reply is lost and then cannot cancel |
 | Manual capture trigger, finish, clear fault | `std_srvs/srv/Trigger` | Nothing |
 | Node parameters and profiles | rclpy parameters; YAML profile files | A loader mapping parameters and profiles onto the `core` config dataclasses (§5a) |
 | Camera subtree and TF tree queries | `tf2_ros` Buffer (`all_frames_as_yaml`), a `/tf_static` subscription | Subtree walk + ownership checks (§9) |
@@ -475,6 +475,13 @@ the pose given by the true mounts (parameters, never published as TF) and the
 latest `base → tool` TF; publishes its own driver subtree
 `camera_link → camera_optical_frame` on `/tf_static`, like a real driver, so
 the subtree rule (§9) is exercised.
+
+**Operator CLI (M4):** `ros2 run handeye_autopilot calibrate --mode … --execution …`
+sends the goal and prints progress and the result. If no goal reply arrives
+within `--accept-timeout` it calls `~/cancel` (the run may have started) and
+exits 2; Ctrl-C cancels the goal and waits for the result (else `~/cancel`),
+exit 130; exit 0 only for SUCCEEDED with every gate passed, 1 otherwise, 3 if
+rejected.
 
 **Launch files:** `calibrate.launch.py` (node + parameters, `record:=true`
 adds `ros2 bag record` of the camera, TF, joint-state and annotated-image

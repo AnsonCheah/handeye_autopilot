@@ -1187,7 +1187,11 @@ class CalibrationNode(Node):
 
     def _not_started(self, run: RunState, cfg: P.RunConfig, why: str, joints: Any
                      ) -> tuple[str, Any, Any]:
+        """Fresh joints with the reply (the session orders spares from them,
+        §3.2); the earlier sample only if none arrive."""
         self.get_logger().info(f'motion not started: {why}')
+        fresh = self._joints_now(cfg.moveit.joint_names, time.monotonic(), 2.0, run)
+        joints = fresh if fresh is not None else joints
         got = tf_tools.latest(self.tf_buffer, cfg.frames['base_frame'], cfg.frames['tool_frame'])
         return S.MOTION_NOT_STARTED, joints, None if got is None else got[0]
 

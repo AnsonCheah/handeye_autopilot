@@ -52,8 +52,7 @@ the board is fully visible and tilted; the Panda starts there already (its
 ready pose is the demo's seed). In a second terminal:
 
 ```bash
-ros2 action send_goal --feedback /handeye_autopilot/calibrate \
-  handeye_autopilot_interfaces/action/Calibrate "{mode: eye_to_hand, execution: moveit}"
+ros2 run handeye_autopilot calibrate --mode eye_to_hand --execution moveit
 ```
 
 When it finishes, publish the calibrated camera mount (the camera driver, here
@@ -65,9 +64,15 @@ ros2 launch handeye_autopilot result.launch.py result_file:=<path to result.yaml
 ros2 run tf2_ros tf2_echo panda_link0 camera_link
 ```
 
-It refuses a result whose quality gates failed, or one whose camera frames
-are already owned by something else in TF. To stop a run from any terminal:
+`calibrate` prints progress and the result, and Ctrl-C cancels the run
+(waiting until MoveIt confirms the robot stopped). It is
+`ros2 action send_goal` plus what an operator needs: if the node's
+goal-accepted reply is lost (DDS can drop it under load) it cancels the run
+itself instead of waiting forever. From any other terminal a run stops with
 `ros2 service call /handeye_autopilot/cancel std_srvs/srv/Trigger`.
+
+`result.launch.py` refuses a result whose quality gates failed, or one whose
+camera frames are already owned by something else in TF.
 `execution: manual` instead lets you jog the robot yourself and call
 `ros2 service call /handeye_autopilot/capture std_srvs/srv/Trigger` at each
 pose.

@@ -43,9 +43,8 @@ step 4):
 
 ```bash
 ros2 launch handeye_autopilot_demos demo.launch.py robot:=panda mode:=eye_to_hand auto:=false rviz:=true
-ros2 action send_goal --feedback /handeye_autopilot/calibrate \
-  handeye_autopilot_interfaces/action/Calibrate "{mode: eye_to_hand, execution: moveit}"
-ros2 launch handeye_autopilot result.launch.py result_file:=<result.yaml from the goal's result>
+ros2 run handeye_autopilot calibrate --mode eye_to_hand --execution moveit
+ros2 launch handeye_autopilot result.launch.py result_file:=<the printed result.yaml>
 ros2 run tf2_ros tf2_echo panda_link0 camera_link
 ```
 

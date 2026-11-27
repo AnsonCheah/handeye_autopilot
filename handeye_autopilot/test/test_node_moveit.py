@@ -607,3 +607,64 @@ def test_ctrl_c_cancels_the_motion_before_exiting(moveit_world, tmp_path):
             os.killpg(proc.pid, signal.SIGKILL)
             proc.wait(timeout=10)
         log.close()
+
+
+def _cli(args, log_path):
+    import subprocess
+
+    from ament_index_python.packages import get_package_prefix
+    exe = os.path.join(get_package_prefix('handeye_autopilot'), 'lib', 'handeye_autopilot',
+                       'calibrate')
+    return subprocess.Popen([exe] + args, stdout=open(log_path, 'w'),
+                            stderr=subprocess.STDOUT,
+                            env=dict(os.environ, ROS_DOMAIN_ID='57', PYTHONUNBUFFERED='1'),
+                            start_new_session=True)
+
+
+def test_cli_ctrl_c_cancels_the_goal(moveit_world, tmp_path):
+    """`ros2 run handeye_autopilot calibrate`: Ctrl-C cancels the goal and waits
+    for the stop (exit 130)."""
+    import signal
+    w = moveit_world()
+    w.moveit.motion_time = 30.0
+    time.sleep(2.0)                     # DDS discovery (see the Ctrl-C node test)
+    log = tmp_path / 'cli.log'
+    proc = _cli(['--mode', 'eye_to_hand', '--execution', 'moveit'], log)
+    try:
+        _wait(lambda: w.moveit.goals, 120.0, 'no motion goal')
+        assert 'goal accepted' in log.read_text()
+        proc.send_signal(signal.SIGINT)
+        assert proc.wait(timeout=60) == 130, log.read_text()
+        assert w.moveit.cancels
+        assert 'CANCELED' in log.read_text()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+def test_cli_without_a_goal_reply_cancels_the_run(moveit_world, tmp_path):
+    """The goal reply never arrives (here: a server slower than the accept
+    timeout): the CLI calls the node's ~/cancel itself and exits 2."""
+    from rclpy.action import ActionServer, GoalResponse
+    from std_srvs.srv import Trigger
+    w = moveit_world()
+    calls = []
+
+    def slow_admit(_goal):
+        time.sleep(6.0)
+        return GoalResponse.REJECT
+    from rclpy.callback_groups import ReentrantCallbackGroup
+    cb = ReentrantCallbackGroup()
+    ActionServer(w.client, Calibrate, '/dummy/calibrate', lambda h: Calibrate.Result(),
+                 goal_callback=slow_admit, callback_group=cb)
+
+    def cancel(req, res):
+        calls.append(1)
+        res.success, res.message = True, 'cancelling the active run'
+        return res
+    w.client.create_service(Trigger, '/dummy/cancel', cancel, callback_group=cb)
+    time.sleep(2.0)
+    log = tmp_path / 'cli.log'
+    proc = _cli(['--mode', 'eye_to_hand', '--node', '/dummy', '--accept-timeout', '1'], log)
+    assert proc.wait(timeout=60) == 2, log.read_text()
+    assert calls, log.read_text()
