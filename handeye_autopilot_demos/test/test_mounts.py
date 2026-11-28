@@ -103,4 +103,7 @@ def test_parse_reads_the_runner_output():
     assert parse(seed.replace('START_STATE_IN_COLLISION', 'CONTROL_FAILED'), 1)[
         'verdict'] == 'failed'
     assert parse(seed, None)['verdict'] == 'failed'
+    late = ('the calibration did not finish in time; cancelling it\n'
+            'the run ended: status 6, error_code 9: motion_fault: stop not confirmed\n')
+    assert parse(late, 1)['message'] == 'motion_fault: stop not confirmed'
     assert parse('', None) == {'exit_code': None, 'verdict': 'failed', 'message': 'timed out'}

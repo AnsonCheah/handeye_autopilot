@@ -1,7 +1,9 @@
 # Mount sweep Codex reviews (`xhigh`)
 
 One full review (`1-review`) and verification passes (`2-` … `n-verify`), each
-with its prompt. The change: a mount sweep (core and robot level), the demo
+with its prompt. Pass 7 resolved every open item and found only narrower
+variants of the accepted sampling limits; they are documented in §3.2 and
+below, and the reviews stop there (each `xhigh` pass narrows further). The change: a mount sweep (core and robot level), the demo
 staying up with RViz, and `INVALID_MOTION_PLAN` as a safe skip.
 
 Fixed, with tests:
@@ -19,8 +21,10 @@ Fixed, with tests:
   checking the board transform.
 
 Accepted (documented in code or docs):
-- motion between joint samples within 0.25 s, and publishers forging new
-  stamped joint states (§3.2);
+- motion between joint samples within 0.25 s; joint states delayed beyond
+  that while `/clock` is stalled; publishers forging new stamped joint states
+  (§3.2). A `/joint_states` publisher on another clock can fail a stationary
+  skip, which errs safe;
 - the contact probe runs right after MoveIt refuses the start state; nothing
   was executed, so the robot is still in that state (`run_demo._log_contacts`);
 - the runner's `~/cancel` fallback cancels whichever run is active; the demo's

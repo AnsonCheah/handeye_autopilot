@@ -154,9 +154,13 @@ MoveIt brand implicitly.
   increasing stamps and gaps within 0.25 s in both stamp and receive time (the
   end measured against the node's clock or the newest `/joint_states` stamp,
   whichever is later), so duplicated, queued or replayed messages can't stand
-  in for missing ones. A
-  publisher forging new stamped joint states is out of scope: it would defeat
-  every measured-joint check here. Anything else,
+  in for missing ones. Assumed (`shortcut:`): joint states arrive within that
+  bound of their stamps and the node's clock advances; with `/clock` stalled
+  and joint messages delayed longer, motion still in transit could be missed.
+  Errs safe the other way: a stamp from another `/joint_states` publisher on a
+  different clock can fail a stationary skip (`MOTION_FAILED`, the operator
+  re-runs). A publisher forging new stamped joint states is out of scope: it
+  would defeat every measured-joint check here. Anything else,
   or joints unknown, = `failed` (a motion that moved and came back must not
   pass as a safe skip). The result's `executed_trajectory` is always empty on
   Jazzy (probe), so it is not used.

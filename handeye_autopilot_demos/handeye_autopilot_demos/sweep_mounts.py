@@ -39,6 +39,7 @@ from handeye_autopilot_demos import mounts
 MODES = ('eye_to_hand', 'eye_in_hand')
 ERR = re.compile(r'error against the true camera mount: ([\d.]+) mm, ([\d.]+) deg')
 FINISHED = re.compile(r'finished: status (\d+), error_code (\d+): (.*)')
+ENDED = re.compile(r'the run ended: status (\d+), error_code (\d+): (.*)')  # after a cancel
 CAPTURES = re.compile(r'captures accepted (\d+), rejected (\d+)')
 # the runner's seed-move failure with collision evidence from MoveIt
 SEED_COLLISION = re.compile(r'could not reach the seed: status \d+, '
@@ -153,8 +154,8 @@ def parse(text: str, code: int | None) -> dict[str, Any]:
         out['error_mm'], out['error_deg'] = float(m.group(1)), float(m.group(2))
     if m := CAPTURES.search(text):
         out['accepted'], out['rejected'] = int(m.group(1)), int(m.group(2))
-    if m := FINISHED.search(text):
-        out['message'] = m.group(3).strip()
+    if m := FINISHED.search(text) or ENDED.search(text):
+        out['message'] = m.group(m.lastindex).strip()
     if code == 0 and 'DEMO PASSED' in text:
         out['verdict'] = 'passed'
     elif code is not None and (m := SEED_COLLISION.search(text)) and (
