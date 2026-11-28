@@ -69,7 +69,8 @@ def seed_tool_pose(robot: str, cfg: dict[str, Any], domain: int) -> Any:
         try:
             proc = subprocess.Popen(['ros2', 'launch', 'handeye_autopilot_demos', r['launch']],
                                     env=env, stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL, start_new_session=True)
+                                    stderr=subprocess.DEVNULL, start_new_session=True,
+                                    preexec_fn=_unblock_sigint)   # the mask is inherited
         finally:
             signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
         rclpy.init(context=ctx, domain_id=domain)
@@ -96,6 +97,10 @@ def seed_tool_pose(robot: str, cfg: dict[str, Any], domain: int) -> Any:
             rclpy.shutdown(context=ctx)
         if proc is not None:
             _stop(proc)
+
+
+def _unblock_sigint() -> None:
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
 
 
 def _stop(proc: subprocess.Popen) -> None:

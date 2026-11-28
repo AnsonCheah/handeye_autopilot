@@ -19,6 +19,7 @@ import math
 import sys
 import threading
 import time
+from typing import Any
 
 from action_msgs.msg import GoalStatus
 from handeye_autopilot.core import transforms as tf
@@ -110,7 +111,7 @@ class Runner(Node):
             self.get_logger().error('the calibration did not finish in time; cancelling it')
             wait_future(send.result().cancel_goal_async(), 10.0)
             if not wait_future(res_fut, 60.0):   # the node stops the robot first
-                self._cancel_any()
+                self._cancel_any(res_fut)
             return 1
         res = res_fut.result()
         r_ = res.result
@@ -130,8 +131,11 @@ class Runner(Node):
                      f'result_file:={r_.result_file}')
         return 0 if ok else 1
 
-    def _cancel_any(self) -> None:
-        """~/cancel: the node cancels its active run and stops the robot."""
+    def _cancel_any(self, res_fut: Any = None) -> None:
+        """~/cancel: the node cancels its active run and stops the robot. It
+        cancels whichever run is active: in the demo that is the runner's own
+        (the demo's node serves nobody else). The reply comes before the robot
+        has stopped, so wait for the run's result when there is one."""
         if not self.cancel_any.wait_for_service(timeout_sec=10.0):
             self.get_logger().error('~/cancel is not available: stop the robot yourself')
             return
@@ -140,11 +144,16 @@ class Runner(Node):
             self.get_logger().error('~/cancel did not reply: stop the robot yourself')
         else:
             self.get_logger().info(f'~/cancel: {fut.result().message}')
+        if res_fut is not None and not wait_future(res_fut, 120.0):
+            self.get_logger().error('the run did not confirm the stop: check the robot')
 
     def _log_contacts(self, r: dict) -> None:
         """Which bodies collide, at the current state and at the seed (MoveIt's
         check_state_validity): the sweep counts a seed failure as a mount problem
         only if the board or the camera is one of them."""
+        # 'current state': the state MoveIt just refused to start from; nothing
+        # was executed, so the robot is still there (the sweep reads these
+        # contacts for START_STATE_IN_COLLISION)
         for label, joints in (('current state', None), ('seed', r['seed_joints'])):
             req = GetStateValidity.Request()
             req.group_name = r['group_name']

@@ -429,7 +429,7 @@ class FakeMoveIt(Node):
             if fail in ('invalid_moved', 'invalid_roundtrip'):
                 G0 = self.robot.G.copy()
                 self.robot.move_to(decode(joints))
-                time.sleep(0.1)
+                time.sleep(0.3)                     # ~15 samples away from the start
                 if fail == 'invalid_roundtrip':     # back exactly where it started
                     self.robot.move_to(G0)
             time.sleep(0.1)                         # planning time: samples arrive

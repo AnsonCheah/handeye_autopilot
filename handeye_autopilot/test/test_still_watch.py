@@ -28,40 +28,56 @@ def _feed(w, samples):
 def test_still_with_steady_full_samples():
     w = _watch()
     _feed(w, [(0.02 * i, 100.0 + 0.02 * i, REF) for i in range(1, 20)])
-    w.end(0.4)
+    w.end(0.4, 100.0 + 0.4)
     assert w.still(), w.why()
 
 
 def test_a_partial_message_that_moved_counts():
     w = _watch()
     _feed(w, [(0.02, 100.02, REF), (0.04, 100.04, {'a': 0.3}), (0.06, 100.06, REF)])
-    w.end(0.08)
+    w.end(0.08, 100.0 + 0.08)
     assert not w.still() and 'left the start' in w.why()
 
 
 def test_a_round_trip_between_full_samples_counts():
     w = _watch()
     _feed(w, [(0.02, 100.02, REF), (0.04, 100.04, {'a': 0.3, 'b': 1.0}), (0.06, 100.06, REF)])
-    w.end(0.08)
+    w.end(0.08, 100.0 + 0.08)
     assert not w.still()
 
 
 def test_messages_stamped_before_the_start_are_not_evidence():
     w = _watch()
     _feed(w, [(0.02, 99.0, REF), (0.04, 99.5, {'a': 0.3, 'b': 1.0})])
-    w.end(0.06)
+    w.end(0.06, 100.0 + 0.06)
     assert not w.still() and w.why() == 'no joint samples'      # ignored, both ways
 
 
 def test_a_gap_between_samples_or_at_the_end_is_not_evidence():
     w = _watch()
     _feed(w, [(0.02, 100.02, REF), (0.02 + STILL_MAX_GAP + 0.05, 100.3, REF)])
-    w.end(0.4)
+    w.end(0.4, 100.0 + 0.4)
     assert not w.still() and 'gap' in w.why()
     w = _watch()
     _feed(w, [(0.02, 100.02, REF)])
-    w.end(0.02 + STILL_MAX_GAP + 0.05)          # nothing since: the end counts too
+    end = 0.02 + STILL_MAX_GAP + 0.05          # nothing since: the end counts too
+    w.end(end, 100.0 + end)
     assert not w.still()
+
+
+def test_re_sent_messages_are_not_new_samples():
+    w = _watch()
+    _feed(w, [(0.02 * i, 100.02, REF) for i in range(1, 10)])     # one message, nine times
+    assert w.samples == 1 and w.last == 0.02
+
+
+def test_the_end_gap_counts_in_stamps_too():
+    """Receive time looks dense (late partial messages keep the callback busy)
+    but the last full sample is old in the stamps' clock (e.g. sim time 4x)."""
+    w = _watch()
+    _feed(w, [(0.02, 100.02, REF)])
+    w.end(0.1, 100.7)
+    assert not w.still() and 'gap' in w.why()
 
 
 def test_a_re_sent_message_does_not_bridge_a_gap():
@@ -70,21 +86,21 @@ def test_a_re_sent_message_does_not_bridge_a_gap():
     w = _watch()
     _feed(w, [(0.02, 100.02, REF)] + [(0.02 + 0.1 * i, 100.02, REF) for i in range(1, 8)]
           + [(0.8, 100.8, REF)])
-    w.end(0.82)
+    w.end(0.82, 100.0 + 0.82)
     assert not w.still() and 'gap' in w.why()
 
 
 def test_stamps_must_also_be_dense():
     w = _watch()
     _feed(w, [(0.02, 100.02, REF), (0.04, 100.6, REF), (0.06, 100.62, REF)])
-    w.end(0.08)
+    w.end(0.08, 100.0 + 0.08)
     assert not w.still()
 
 
 def test_partial_messages_alone_do_not_cover_the_time():
     w = _watch()
     _feed(w, [(0.02 * i, 100.0 + 0.02 * i, {'a': 0.0}) for i in range(1, 20)])
-    w.end(0.4)
+    w.end(0.4, 100.0 + 0.4)
     assert not w.still()
 
 

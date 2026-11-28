@@ -1231,7 +1231,7 @@ class CalibrationNode(Node):
             with self._lock:
                 if watch in self._still_watches:
                     self._still_watches.remove(watch)
-                watch.end(time.monotonic())
+                watch.end(time.monotonic(), self.now())
             if not watch.still() or not _same(fresh, watch.ref_vector(cfg.moveit.joint_names),
                                               cfg.moveit.joint_tolerance):
                 return self._failed(run, f'{why}, but the joints were not seen to stay at the '
@@ -1539,8 +1539,11 @@ class StillWatch:
             self.last, self.last_stamp = now, stamp
             self.samples += 1
 
-    def end(self, now: float) -> None:
-        self.max_gap = max(self.max_gap, now - self.last)
+    def end(self, now: float, now_stamp: float) -> None:
+        """Close the watch: the time since the last full sample counts too, in
+        receive time and in node time (the clock the stamps use)."""
+        last_stamp = self.start_stamp if self.samples == 0 else self.last_stamp
+        self.max_gap = max(self.max_gap, now - self.last, now_stamp - last_stamp)
 
     def ref_vector(self, names: Any) -> Any:
         return np.array([self.ref[n] for n in names], dtype=float)
