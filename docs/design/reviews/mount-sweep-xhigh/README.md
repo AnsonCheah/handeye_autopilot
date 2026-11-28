@@ -1,9 +1,12 @@
 # Mount sweep Codex reviews (`xhigh`)
 
 One full review (`1-review`) and verification passes (`2-` … `n-verify`), each
-with its prompt. Pass 7 resolved every open item and found only narrower
-variants of the accepted sampling limits; they are documented in §3.2 and
-below, and the reviews stop there (each `xhigh` pass narrows further). The change: a mount sweep (core and robot level), the demo
+with its prompt. From pass 5 on, each pass resolved the open items and found
+narrower variants of the joint-sampling limits; they are documented in §3.2
+and below. Pass 8 also found a CI break (a ROS import in a ROS-free job), an
+unchecked board transform in the robot sweep (the 66 passing runs' saved
+results were checked: worst 0.11 mm, 0.068°), a silent `--cases` typo and a
+test using the helper it checks; all fixed. The reviews stop there. The change: a mount sweep (core and robot level), the demo
 staying up with RViz, and `INVALID_MOTION_PLAN` as a safe skip.
 
 Fixed, with tests:
@@ -29,6 +32,7 @@ Accepted (documented in code or docs):
   was executed, so the robot is still in that state (`run_demo._log_contacts`);
 - the runner's `~/cancel` fallback cancels whichever run is active; the demo's
   node serves only the runner (`run_demo._cancel_any`);
+- in-order arrival of joint states (§3.2);
 - in the round-trip integration test, the fake's 0.3 s dwell relies on normal
   executor scheduling; the direct `StillWatch` tests cover the rules
   deterministically;

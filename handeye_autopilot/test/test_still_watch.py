@@ -1,8 +1,11 @@
 """StillWatch (node.py): the joint evidence an INVALID_MOTION_PLAN skip needs
 (01-architecture §3.2). Driven directly with JointState messages."""
 
-from handeye_autopilot.ros.node import STILL_MAX_GAP, StillWatch
-from sensor_msgs.msg import JointState
+import pytest
+
+pytest.importorskip('rclpy')                   # ROS-free CI jobs collect this file too
+from handeye_autopilot.ros.node import STILL_MAX_GAP, StillWatch  # noqa: E402
+from sensor_msgs.msg import JointState  # noqa: E402
 
 REF = {'a': 0.0, 'b': 1.0}
 TOL = 0.01

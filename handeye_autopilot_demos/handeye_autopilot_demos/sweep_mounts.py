@@ -211,7 +211,12 @@ def main(argv: list[str] | None = None) -> int:
         '~/.ros/handeye_autopilot/mount_sweep/' + time.strftime('%Y%m%dT%H%M%S')))
     a = ap.parse_args(argv)
     spec = yaml.safe_load(Path(a.spec).read_text())
-    selected = [c for c in mounts.cases(spec) if not a.cases or c['name'] in a.cases]
+    known = mounts.cases(spec)
+    unknown = sorted(set(a.cases or []) - {c['name'] for c in known})
+    if unknown:
+        ap.error(f"unknown case(s) {', '.join(unknown)}; known: "
+                 f"{', '.join(c['name'] for c in known)}")
+    selected = [c for c in known if not a.cases or c['name'] in a.cases]
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     jobs = []

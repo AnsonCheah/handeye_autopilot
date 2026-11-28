@@ -199,7 +199,14 @@ class Runner(Node):
         dt = tf.translation_distance(got, X) * 1000
         dr = math.degrees(tf.rotation_angle(got, X))
         self.log(f'error against the true camera mount: {dt:.2f} mm, {dr:.3f} deg')
-        return dt < 3.0 and dr < 0.5
+        # the other transform: the board on the tool (eye-to-hand) or on its stand
+        Z = pose(truth['true_board_xyz_rpy'])
+        t, q = r_.target_transform.transform.translation, r_.target_transform.transform.rotation
+        got_z = tf.make(Rotation.from_quat([q.x, q.y, q.z, q.w]), np.array([t.x, t.y, t.z]))
+        bt = tf.translation_distance(got_z, Z) * 1000
+        br = math.degrees(tf.rotation_angle(got_z, Z))
+        self.log(f'error against the true board mount: {bt:.2f} mm, {br:.3f} deg')
+        return dt < 3.0 and dr < 0.5 and bt < 3.0 and br < 0.5
 
 
 def main(args: list[str] | None = None) -> None:

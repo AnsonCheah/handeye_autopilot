@@ -154,8 +154,9 @@ MoveIt brand implicitly.
   increasing stamps and gaps within 0.25 s in both stamp and receive time (the
   end measured against the node's clock or the newest `/joint_states` stamp,
   whichever is later), so duplicated, queued or replayed messages can't stand
-  in for missing ones. Assumed (`shortcut:`): joint states arrive within that
-  bound of their stamps and the node's clock advances; with `/clock` stalled
+  in for missing ones. Assumed (`shortcut:`): joint states arrive in order (one
+  driver publishing on one topic) and within that bound of their stamps, and
+  the node's clock advances; with `/clock` stalled
   and joint messages delayed longer, motion still in transit could be missed.
   Errs safe the other way: a stamp from another `/joint_states` publisher on a
   different clock can fail a stationary skip (`MOTION_FAILED`, the operator

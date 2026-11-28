@@ -51,7 +51,9 @@ def test_case_moves_the_robot_side_mount_and_keeps_the_seed_view(robot, mode):
     R = mounts.pose([0, 0, 0] + [math.radians(v) for v in case['rotation_deg']])[:3, :3]
     np.testing.assert_allclose(after[:3, :3], R @ before[:3, :3], atol=1e-9)
     np.testing.assert_allclose(_view(out, mode, SEED), _view(cfg, mode, SEED), atol=1e-9)
-    ref = mounts.board_centre(cfg['board']) if mode == 'eye_to_hand' else np.zeros(3)
+    b = cfg['board']                     # the centre, written out (not the helper under test)
+    ref = (np.array([b['squares_x'], b['squares_y'], 0.0]) * b['square_length'] / 2
+           if mode == 'eye_to_hand' else np.zeros(3))
     lever = (after @ np.r_[ref, 1.0])[:3]            # tool -> board centre / camera origin
     assert out['calibration']['session']['lever_max'] == pytest.approx(
         np.abs(lever).max() + 0.02, abs=1e-3)

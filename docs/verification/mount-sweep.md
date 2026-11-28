@@ -41,8 +41,8 @@ How a case is built (`handeye_autopilot_demos/mounts.py`):
   which is what an operator would measure and enter. The lever arm runs from
   the tool to the board centre (eye-to-hand) or to the camera (eye-in-hand),
   the points the bootstrap bound uses (02-features §B);
-- the pass criteria are the demo's: every quality gate, and within 3 mm / 0.5°
-  of the true mount.
+- the pass criteria: every quality gate, and both calibrated transforms (the
+  camera and the board) within 3 mm / 0.5° of the true mounts.
 
 ## Results (Jazzy, 2026-11-28)
 
@@ -52,7 +52,9 @@ the camera and the board transform match the truth. Worst: camera 1.35 mm /
 robot pose noise, so its errors are larger than the robot runs'.
 
 **Robots:** 66 of 72 pass, every one within **0.11 mm and 0.014°** of the true
-mount. The other 6 are `setup`: MoveIt reports `START_STATE_IN_COLLISION`, and
+camera mount, and within 0.11 mm and 0.068° of the true board mount. (The
+runner checks the board too since review pass 8; the 66 runs' saved results
+were checked against it afterwards.) The other 6 are `setup`: MoveIt reports `START_STATE_IN_COLLISION`, and
 its contact list for that state names the board or the camera against a robot
 link, so the robot can't start with that arrangement. In four of them the
 mounted object (board or camera on the tool) hits the arm. In two eye-in-hand
