@@ -80,6 +80,23 @@ def test_the_end_gap_counts_in_stamps_too():
     assert not w.still() and 'gap' in w.why()
 
 
+def test_a_stale_clock_does_not_hide_the_end_gap():
+    """The node's clock stalls at the last full sample, but later (partial)
+    messages carry newer stamps: those show the gap."""
+    w = _watch()
+    _feed(w, [(0.02, 100.02, REF), (0.05, 100.7, {'a': 0.0})])
+    w.end(0.06, 100.02)
+    assert not w.still() and 'gap' in w.why()
+
+
+def test_an_out_of_order_sample_does_not_bridge_a_gap():
+    w = _watch()
+    _feed(w, [(0.02, 100.10, REF), (0.4, 100.05, REF), (0.42, 100.12, REF)])
+    assert w.samples == 2                       # the older stamp is not a new sample
+    w.end(0.44, 100.14)
+    assert not w.still() and 'gap' in w.why()   # 0.38 s receive gap stays
+
+
 def test_a_re_sent_message_does_not_bridge_a_gap():
     """The same stationary message delivered again and again (stamp unchanged)
     while the real samples stop: the stamps show the gap."""

@@ -144,8 +144,13 @@ class Runner(Node):
             self.get_logger().error('~/cancel did not reply: stop the robot yourself')
         else:
             self.get_logger().info(f'~/cancel: {fut.result().message}')
-        if res_fut is not None and not wait_future(res_fut, 120.0):
-            self.get_logger().error('the run did not confirm the stop: check the robot')
+        if res_fut is not None:
+            if not wait_future(res_fut, 120.0):
+                self.get_logger().error('the run did not confirm the stop: check the robot')
+            else:
+                res = res_fut.result()
+                self.get_logger().error(f'the run ended: status {res.status}, error_code '
+                                        f'{res.result.error_code}: {res.result.message}')
 
     def _log_contacts(self, r: dict) -> None:
         """Which bodies collide, at the current state and at the seed (MoveIt's

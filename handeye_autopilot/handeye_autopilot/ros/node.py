@@ -1523,6 +1523,7 @@ class StillWatch:
     moved: bool = False
     samples: int = 0
     last_stamp: float = -math.inf    # stamp of the last full sample
+    newest_stamp: float = -math.inf  # newest stamp in any watched message
 
     def sample(self, now: float, stamp: float, msg: Any) -> None:
         if stamp < self.start_stamp:
@@ -1531,6 +1532,7 @@ class StillWatch:
                if n in self.ref}
         if not pos:
             return
+        self.newest_stamp = max(self.newest_stamp, stamp)
         if any(not math.isfinite(v) or abs(v - self.ref[n]) > self.tol for n, v in pos.items()):
             self.moved = True
         if len(pos) == len(self.ref) and stamp > self.last_stamp:
@@ -1541,9 +1543,11 @@ class StillWatch:
 
     def end(self, now: float, now_stamp: float) -> None:
         """Close the watch: the time since the last full sample counts too, in
-        receive time and in node time (the clock the stamps use)."""
+        receive time and in the stamps' clock (the node's clock, or the newest
+        stamp seen if that is later, e.g. while /clock lags)."""
         last_stamp = self.start_stamp if self.samples == 0 else self.last_stamp
-        self.max_gap = max(self.max_gap, now - self.last, now_stamp - last_stamp)
+        self.max_gap = max(self.max_gap, now - self.last,
+                           max(now_stamp, self.newest_stamp) - last_stamp)
 
     def ref_vector(self, names: Any) -> Any:
         return np.array([self.ref[n] for n in names], dtype=float)

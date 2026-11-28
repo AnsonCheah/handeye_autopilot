@@ -236,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         # the runner's own deadline is --timeout for the calibration; start-up,
         # discovery and the seed move come on top
-        futures = [pool.submit(run_case, j, domains, a.timeout + 900) for j in jobs]
+        futures = [pool.submit(run_case, j, domains, a.timeout + 1500) for j in jobs]
         for f in futures:
             row = f.result()
             rows.append(row)
