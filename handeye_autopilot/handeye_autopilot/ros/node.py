@@ -1523,16 +1523,16 @@ class StillWatch:
     moved: bool = False
     samples: int = 0
     last_stamp: float = -math.inf    # stamp of the last full sample
-    newest_stamp: float = -math.inf  # newest stamp in any watched message
+    newest_stamp: float = -math.inf  # newest stamp on /joint_states (any joints)
 
     def sample(self, now: float, stamp: float, msg: Any) -> None:
         if stamp < self.start_stamp:
             return
+        self.newest_stamp = max(self.newest_stamp, stamp)   # e.g. a gripper-only message
         pos = {n: float(v) for n, v in zip(msg.name, msg.position, strict=False)
                if n in self.ref}
         if not pos:
             return
-        self.newest_stamp = max(self.newest_stamp, stamp)
         if any(not math.isfinite(v) or abs(v - self.ref[n]) > self.tol for n, v in pos.items()):
             self.moved = True
         if len(pos) == len(self.ref) and stamp > self.last_stamp:

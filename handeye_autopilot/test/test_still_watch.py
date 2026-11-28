@@ -89,6 +89,13 @@ def test_a_stale_clock_does_not_hide_the_end_gap():
     assert not w.still() and 'gap' in w.why()
 
 
+def test_a_newer_message_about_other_joints_shows_the_end_gap():
+    w = _watch()
+    _feed(w, [(0.02, 100.02, REF), (0.05, 100.7, {'gripper': 0.04})])
+    w.end(0.06, 100.02)                         # node clock stalled
+    assert not w.still() and 'gap' in w.why()
+
+
 def test_an_out_of_order_sample_does_not_bridge_a_gap():
     w = _watch()
     _feed(w, [(0.02, 100.10, REF), (0.4, 100.05, REF), (0.42, 100.12, REF)])

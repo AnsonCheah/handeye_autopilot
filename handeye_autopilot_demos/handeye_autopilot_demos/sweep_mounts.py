@@ -200,7 +200,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument('--cases', nargs='*', help='case names (default: all)')
     ap.add_argument('--spec', default=str(share / 'config' / 'mount_sweep.yaml'))
     ap.add_argument('--jobs', type=int, default=3, help='runs at the same time')
-    ap.add_argument('--timeout', type=float, default=1800.0, help='per run, s')
+    ap.add_argument('--timeout', type=float, default=1800.0,
+                    help='s the runner waits for the calibration result; each launch '
+                         'also gets 1500 s for start-up, the seed move and stopping')
     ap.add_argument('--domain-base', type=int, default=120,
                     help='first ROS domain ID used (one per parallel run, plus one for '
                          'FK); two sweeps at once need ranges that do not overlap')

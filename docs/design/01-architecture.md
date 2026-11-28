@@ -151,8 +151,10 @@ MoveIt brand implicitly.
   the start (within tolerance). A plan that moved the robot and brought it back
   is therefore `failed`. The watch guards only this skip; the empty-plan and
   plan-only rules are as before. Full samples count only with strictly
-  increasing stamps and gaps within 0.25 s in both stamp and receive time, so
-  duplicated, queued or replayed messages can't stand in for missing ones. A
+  increasing stamps and gaps within 0.25 s in both stamp and receive time (the
+  end measured against the node's clock or the newest `/joint_states` stamp,
+  whichever is later), so duplicated, queued or replayed messages can't stand
+  in for missing ones. A
   publisher forging new stamped joint states is out of scope: it would defeat
   every measured-joint check here. Anything else,
   or joints unknown, = `failed` (a motion that moved and came back must not

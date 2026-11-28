@@ -112,6 +112,8 @@ class Runner(Node):
             wait_future(send.result().cancel_goal_async(), 10.0)
             if not wait_future(res_fut, 60.0):   # the node stops the robot first
                 self._cancel_any(res_fut)
+            else:
+                self._log_end(res_fut.result())
             return 1
         res = res_fut.result()
         r_ = res.result
@@ -148,9 +150,16 @@ class Runner(Node):
             if not wait_future(res_fut, 120.0):
                 self.get_logger().error('the run did not confirm the stop: check the robot')
             else:
-                res = res_fut.result()
-                self.get_logger().error(f'the run ended: status {res.status}, error_code '
-                                        f'{res.result.error_code}: {res.result.message}')
+                self._log_end(res_fut.result())
+
+    def _log_end(self, res: Any) -> None:
+        """How a cancelled run ended; an unknown goal status confirms nothing."""
+        if res.status == GoalStatus.STATUS_UNKNOWN:
+            self.get_logger().error('the node does not know the run (status unknown): '
+                                    'the stop is not confirmed, check the robot')
+            return
+        self.get_logger().error(f'the run ended: status {res.status}, error_code '
+                                f'{res.result.error_code}: {res.result.message}')
 
     def _log_contacts(self, r: dict) -> None:
         """Which bodies collide, at the current state and at the seed (MoveIt's
