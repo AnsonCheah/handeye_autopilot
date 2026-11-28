@@ -131,7 +131,9 @@ def test_ik_contract_whole_seconds(panda):
     res = _ik(client, _hand_down(3.0, 0.0, 0.5), timeout=1)
     took = time.monotonic() - t0
     assert res.joints is None and res.reason == 'NO_IK_SOLUTION'
-    assert 0.8 < took < 5.0, took
+    # honoured, not dropped to 0 (that returns in milliseconds); KDL's search loop
+    # can stop a few hundred ms early (0.68 s seen on a loaded machine)
+    assert 0.5 < took < 5.0, took
     # recorded, not asserted: whether this distro honours nanoseconds (Jazzy drops
     # them, probe finding 6); the node only ever sends whole seconds
     print(f'compute_ik unreachable with timeout 1 s took {took:.2f} s')

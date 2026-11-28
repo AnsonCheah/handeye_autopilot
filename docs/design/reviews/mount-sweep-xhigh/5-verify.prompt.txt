@@ -1,0 +1,3 @@
+Verification pass on branch mount-sweep at HEAD (diff against main) in this repository. Previous reviews: docs/design/reviews/mount-sweep-xhigh/{1-review,2-verify,3-verify,4-verify}.md (prompts alongside); the fixes for pass 4 are in the last commit (git show HEAD).
+For each pass-4 finding, say RESOLVED / ACCEPTED (with the documented reason in code or docs) / OPEN, with file:line. Then look for new problems the fixes introduced (StillWatch.end with the node clock, test_still_watch.py, ros_harness timing, sweep_mounts preexec_fn, run_demo _cancel_any waiting for the result, docs).
+Output: findings as BLOCKER / SHOULD-FIX / NIT with file:line and a concrete failure scenario. End with 'Merge: CLEAR' or 'Merge: BLOCKED'. Be concise. Read-only; do not modify files.

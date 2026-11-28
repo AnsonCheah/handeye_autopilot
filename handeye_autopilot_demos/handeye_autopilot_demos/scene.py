@@ -41,9 +41,10 @@ import yaml
 CAMERA_BODY = (0.09, 0.03, 0.03)       # m, a small camera's housing (x along its view)
 
 
-def load(robot: str) -> dict[str, Any]:
-    path = os.path.join(get_package_share_directory('handeye_autopilot_demos'), 'config',
-                        f'{robot}.yaml')
+def load(robot: str, path: str = '') -> dict[str, Any]:
+    """The robot's demo config: ``path`` if given, else ``config/<robot>.yaml``."""
+    path = path or os.path.join(get_package_share_directory('handeye_autopilot_demos'),
+                                'config', f'{robot}.yaml')
     with open(path) as f:
         return yaml.safe_load(f)
 
@@ -91,7 +92,7 @@ class Scene(Node):
         super().__init__('demo_scene')
         robot = self.declare_parameter('robot', 'panda').value
         self.mode = self.declare_parameter('mode', 'eye_to_hand').value
-        cfg = load(robot)
+        cfg = load(robot, self.declare_parameter('config', '').value)
         r = cfg['robot']
         self.base = r['base_frame']
         truth = cfg[self.mode]

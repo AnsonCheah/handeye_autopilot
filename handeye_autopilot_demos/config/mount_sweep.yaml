@@ -1,0 +1,20 @@
+# Mount sweep (sweep_mounts): how the board (eye-to-hand) or the camera
+# (eye-in-hand) is bolted to the robot, as offsets from the demo's mount in the
+# tool frame. Translation added (m), rotation applied about the tool axes (deg,
+# extrinsic xyz). The fixed object is moved so the seed view stays the demo's.
+cases:
+  - {name: tx+200, translation_m: [0.2, 0, 0]}
+  - {name: tx-200, translation_m: [-0.2, 0, 0]}
+  - {name: ty+200, translation_m: [0, 0.2, 0]}
+  - {name: ty-200, translation_m: [0, -0.2, 0]}
+  - {name: tz+200, translation_m: [0, 0, 0.2]}
+  - {name: tz-200, translation_m: [0, 0, -0.2]}
+  - {name: rx+90, rotation_deg: [90, 0, 0]}
+  - {name: rx-90, rotation_deg: [-90, 0, 0]}
+  - {name: ry+90, rotation_deg: [0, 90, 0]}
+  - {name: ry-90, rotation_deg: [0, -90, 0]}
+  - {name: rz+90, rotation_deg: [0, 0, 90]}
+  - {name: rz-90, rotation_deg: [0, 0, -90]}
+  - {name: all+, translation_m: [0.2, 0.2, 0.2], rotation_deg: [90, 90, 90]}
+  - {name: all-, translation_m: [-0.2, -0.2, -0.2], rotation_deg: [-90, -90, -90]}
+random: {count: 4, seed: 11, translation_m: 0.2, rotation_deg: 90}

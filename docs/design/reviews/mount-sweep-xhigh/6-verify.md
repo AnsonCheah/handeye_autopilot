@@ -1,0 +1,24 @@
+Reviewed `mount-sweep` at `51d311b` against `main`. All 28 focused Jazzy tests passed. ROS integration and the robot sweep were reviewed statically.
+
+### Pass 5 dispositions
+
+- **RESOLVED** — With `/clock` stalled, a newer watched partial sample now exposes the 680 ms end gap. The new test fails when the fix is reverted. [node.py:1544](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/ros/node.py:1544) · [test_still_watch.py:83](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/test/test_still_watch.py:83)
+- **RESOLVED** — The FK child starts with SIGINT unblocked. [sweep_mounts.py:70](/home/anson/workspaces/handeye_autopilot/handeye_autopilot_demos/handeye_autopilot_demos/sweep_mounts.py:70)
+- **RESOLVED** — The duplicate-stamp test verifies that nine deliveries count as one sample. [test_still_watch.py:68](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/test/test_still_watch.py:68)
+- **ACCEPTED** — Collision attribution uses a follow-up snapshot under the documented assumption that the robot stays in the rejected start state. [Review README.md:24](/home/anson/workspaces/handeye_autopilot/docs/design/reviews/mount-sweep-xhigh/README.md:24)
+- **ACCEPTED** — The cancellation fallback targets the active run under the documented single-client assumption. **OPEN · SHOULD-FIX** — After a lost goal reply, `~/cancel` can acknowledge while motion is still stopping. The runner exits and RViz stay mode leaves the stack up. [run_demo.py:102](/home/anson/workspaces/handeye_autopilot/handeye_autopilot_demos/handeye_autopilot_demos/run_demo.py:102) · [run_demo.py:134](/home/anson/workspaces/handeye_autopilot/handeye_autopilot_demos/handeye_autopilot_demos/run_demo.py:134)
+- **ACCEPTED** — The 300 ms dwell relies on normal executor scheduling. **OPEN · SHOULD-FIX** — The round-trip test still passes if the watch closes at the action result, since the fake has already returned to the start. [Review README.md:28](/home/anson/workspaces/handeye_autopilot/docs/design/reviews/mount-sweep-xhigh/README.md:28) · [ros_harness.py:429](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/test/ros_harness.py:429)
+- **RESOLVED** — The M4 summary matches the four tool-mounted and two relocated fixed-board collisions. [m4-simulation.md:84](/home/anson/workspaces/handeye_autopilot/docs/verification/m4-simulation.md:84)
+- **ACCEPTED** — §3.2 documents the 250 ms sampling limit and excludes forged fresh stamps. [01-architecture.md:146](/home/anson/workspaces/handeye_autopilot/docs/design/01-architecture.md:146)
+- **RESOLVED** — `_cancel_any` now logs the `MOTION_FAULT` result and its stop warning. [run_demo.py:147](/home/anson/workspaces/handeye_autopilot/handeye_autopilot_demos/handeye_autopilot_demos/run_demo.py:147)
+- **RESOLVED** — The 1,500 s outer allowance covers roughly 980 s of bounded runner overhead, including the fallback wait. [sweep_mounts.py:239](/home/anson/workspaces/handeye_autopilot/handeye_autopilot_demos/handeye_autopilot_demos/sweep_mounts.py:239)
+- **ACCEPTED** — The FK fork and Ctrl-C risks are documented under the assumption that FK launches before sweep worker threads start. [Review README.md:31](/home/anson/workspaces/handeye_autopilot/docs/design/reviews/mount-sweep-xhigh/README.md:31)
+- **RESOLVED** — The decreasing-stamp test fails when `>` is changed to `!=`. [test_still_watch.py:92](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/test/test_still_watch.py:92)
+
+### Findings at HEAD
+
+- **BLOCKER — A newer unwatched joint can expose a gap the watch ignores.** I reproduced `not_started` with `/clock` stalled, a gripper-only sample stamped 680 ms after the last full arm sample, and repeated arm readings satisfying both post-result reads. An arm round trip in that gap can go unseen and calibration can send a spare. [node.py:962](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/ros/node.py:962) · [node.py:1533](/home/anson/workspaces/handeye_autopilot/handeye_autopilot/ros/node.py:1533)
+- **SHOULD-FIX — Timeout logging can still obscure an unconfirmed stop.** A `MOTION_FAULT` result during the first 60 s cancel wait is discarded. In the fallback, `STATUS_UNKNOWN` produces `the run ended` even though the server could not identify the goal. [run_demo.py:110](/home/anson/workspaces/handeye_autopilot/handeye_autopilot_demos/handeye_autopilot_demos/run_demo.py:110) · [run_demo.py:148](/home/anson/workspaces/handeye_autopilot/handeye_autopilot_demos/handeye_autopilot_demos/run_demo.py:148)
+- **NIT — The timeout help reads like a per-case deadline.** `--timeout 30` gives the launch up to 1,530 s. The help should identify 30 s as the calibration result wait. [sweep_mounts.py:203](/home/anson/workspaces/handeye_autopilot/handeye_autopilot_demos/handeye_autopilot_demos/sweep_mounts.py:203)
+
+Merge: BLOCKED

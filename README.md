@@ -42,6 +42,11 @@ carried board or camera, the point-cloud pillar MoveIt must avoid), the safety
 box, and the camera image with the detected corners. With `rviz:=false` the
 same run works headless (this is what CI runs).
 
+With RViz the demo keeps running after `DEMO PASSED` (Ctrl-C ends it) and
+prints the command that publishes the result to TF (step 4). A
+`move_group ... exit code -11` line on Ctrl-C is MoveIt crashing during its
+own shutdown, after the run; it is harmless.
+
 **3. Look at the result.** The run writes `result.yaml` (transforms, every
 quality gate, the configuration) and `observations.yaml` to
 `~/.ros/handeye_autopilot/demo_<robot>_<mode>/<time>/`.

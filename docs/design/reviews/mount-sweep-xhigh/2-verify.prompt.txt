@@ -1,0 +1,7 @@
+Verification pass on branch mount-sweep at HEAD (diff against main) in this repository. The previous review is docs/design/reviews/mount-sweep-xhigh/1-review.md (prompt alongside); the fixes are in the last commit (git show HEAD).
+For each previous finding, say RESOLVED / ACCEPTED (with the documented reason) / OPEN, with file:line. Then look for new problems the fixes introduced, in particular:
+- node.py StillWatch: thread safety (joint callback vs. motion thread, the watch list under the node lock), watch lifetime on exceptions and cancels, the gap rule at the start and end of the goal, interaction with the other not_started paths and the MOTION_FAULT / cancel logic; whether the tests (invalid, invalid_moved, invalid_roundtrip) really exercise each branch;
+- mounts.py board_centre and lever_max vs 02-features §B and the core sweep test;
+- sweep_mounts.py: Ctrl-C handling (lock use, futures, a launch started during shutdown), the setup regex vs. run_demo's log line, timeouts;
+- demo.launch.py stay message; docs (docs/verification/mount-sweep.md, 01-architecture §3.2 and §10) vs. code and the result table.
+Output: findings as BLOCKER / SHOULD-FIX / NIT with file:line and a concrete failure scenario. End with 'Merge: CLEAR' or 'Merge: BLOCKED'. Be concise. Read-only; do not modify files.

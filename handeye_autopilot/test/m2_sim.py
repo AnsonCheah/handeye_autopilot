@@ -67,13 +67,14 @@ def seed_pose(mode, X, Z, s=None):
 
 
 def run(mode, *, seed=0, session_cfg=None, ik=None, true_lever_scale=1.0, seed_spec=None,
-        frames=1, lose=(), fail_move=None, log=None):
+        frames=1, lose=(), fail_move=None, log=None, mounts=None):
     """One full session. ``lose``: capture indices rendered without the board
     (board lost); ``fail_move(index, purpose)``: True makes that motion fail;
     ``log``: list that receives every action. Motion goes through fake FK from the
     Move's joints (so a wrong joint goal moves the robot to the wrong place).
-    ``fail_move`` may return True (not started) or a session.MOTION_* outcome."""
-    X, Z = truth(mode)
+    ``fail_move`` may return True (not started) or a session.MOTION_* outcome.
+    ``mounts``: (X, Z) instead of the spec's truth (the mount sweep)."""
+    X, Z = mounts if mounts is not None else truth(mode)
     if true_lever_scale != 1.0:          # make the real lever arm longer than assumed
         if mode == 'eye_to_hand':
             Z = tf.make(Z[:3, :3], Z[:3, 3] * true_lever_scale)

@@ -123,11 +123,14 @@ def _wait(pred, timeout, what):
 def test_moveit_calibration_recovers_the_true_mount(moveit_world, mode, tcp):
     w = moveit_world(mode, tcp_offset=tcp)
     fails = {'n': 0}
+    # eye-in-hand: MoveIt's own ValidateSolution rejects the plan (INVALID_MOTION_PLAN,
+    # plan filled in, nothing moved; seen in the mount sweep), also a safe skip
+    kind = True if mode == 'eye_to_hand' else 'invalid'
 
     def plan_fails(joints):               # the first two planned moves cannot be planned:
         if fails['n'] < 2:                # safe skips, spares take their place
             fails['n'] += 1
-            return True
+            return kind
         return False
     w.moveit.plan_fails = plan_fails
     h = w.driver.send(mode=mode, execution='moveit')
@@ -167,6 +170,24 @@ def test_planning_only_success_is_caught_by_the_tf_check(moveit_world, kind):
     assert out.result.error_code == R.MOTION_FAILED, out.result.message
     assert 'measured tool pose' in out.result.message
     assert w.moveit.goals[-1][0] == kind                      # the faulty action was hit
+
+
+@pytest.mark.parametrize('kind', ['invalid_moved', 'invalid_roundtrip'])
+def test_invalid_plan_after_moving_is_a_failure_not_a_skip(moveit_world, kind):
+    """INVALID_MOTION_PLAN is a safe skip only if the joints were watched and
+    never left the start while the goal was active: the same reply after the
+    robot moved, even if it came back exactly, ends the run (MOTION_FAILED)."""
+    w = moveit_world()
+    w.moveit.plan_fails = lambda joints: kind
+    h = w.driver.send(execution='moveit')
+    assert h.accepted
+    out = w.result(h, timeout=300.0)
+    assert out.status == 6                                    # ABORTED
+    assert out.result.error_code == R.MOTION_FAILED, out.result.message
+    assert 'INVALID_MOTION_PLAN' in out.result.message
+    if kind == 'invalid_roundtrip':      # caught by the watch seeing the motion, not a gap
+        assert 'a sample left the start' in out.result.message, out.result.message
+    assert w.moveit.goals[-1][0] == 'move'
 
 
 @pytest.mark.parametrize('kind', ['execute', 'move'])

@@ -73,6 +73,7 @@ from . import params as P
 from . import tf_tools, viz
 from .camera_input import CameraInfoError, ImageBuffer, camera_model, same_info
 from .moveit_client import (
+    INVALID_MOTION_PLAN,
     SUCCESS,
     TERMINAL,
     GoalOutcome,
@@ -186,6 +187,7 @@ class CalibrationNode(Node):
         self.last_result: Calibrate.Result | None = None
         self._solve_end: Any = None          # node time the last final solve finished
         self._joints: list[tuple[float, JointState]] = []
+        self._still_watches: list[StillWatch] = []   # joints watched during a goal
         self._joint_names_seen: set[str] = set()   # every joint ever reported
         self.create_subscription(JointState, '/joint_states', self._on_joints, 10,
                                  callback_group=self._sensors)
@@ -269,6 +271,9 @@ class CalibrationNode(Node):
                 self._joints = [(t, m) for t, m in self._joints if t >= now - 5.0]
             self._joints = self._joints[-10000:]
             self._joint_names_seen.update(msg.name)
+            stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+            for w in self._still_watches:
+                w.sample(now, stamp, msg)
 
     # -- admission (§5): rejected goals get no result -----------------------------
     def _admit(self, goal: Calibrate.Goal) -> GoalResponse:
@@ -967,9 +972,17 @@ class CalibrationNode(Node):
                 return None
             time.sleep(0.02)
 
-    def _motion(self, goal_handle: Any, run: RunState, cfg: P.RunConfig, a: S.Move,
-                ik_link: str, tool_T_ik: Any, path: Any, mode: str,
-                check_pose: Any = None) -> tuple[str, Any, Any]:
+    def _motion(self, *args: Any, **kwargs: Any) -> tuple[str, Any, Any]:
+        """_motion_body, and no joint watch outlives it (exceptions included)."""
+        try:
+            return self._motion_body(*args, **kwargs)
+        finally:
+            with self._lock:
+                self._still_watches.clear()
+
+    def _motion_body(self, goal_handle: Any, run: RunState, cfg: P.RunConfig, a: S.Move,
+                     ik_link: str, tool_T_ik: Any, path: Any, mode: str,
+                     check_pose: Any = None) -> tuple[str, Any, Any]:
         """One Move (§3.2) -> (outcome, measured joints, measured tool pose).
 
         ok: goal accepted, SUCCEEDED with SUCCESS, and the measured TF tool pose
@@ -990,6 +1003,7 @@ class CalibrationNode(Node):
         t_start = self.now()
         before = self._joints_now(mi.joint_names, time.monotonic(), 2.0, run)
         check_path = cfg.session.box_enabled and cfg.session.box_check_moving_object
+        watch: StillWatch | None = None
 
         def invalid() -> bool:                # the run stopped being valid (§6-8)
             return run.info_changed or self._jumps != run.jumps
@@ -1048,6 +1062,13 @@ class CalibrationNode(Node):
                                       invalid)
             else:
                 self._still_valid(goal_handle, run, t_start)
+                if before is not None:   # evidence for a safe skip (§3.2), kept
+                    # until the reply's fresh joints are in (_not_started)
+                    watch = StillWatch(dict(zip(mi.joint_names, map(float, before),
+                                                strict=True)),
+                                       mi.joint_tolerance, time.monotonic(), self.now())
+                    with self._lock:
+                        self._still_watches.append(watch)
                 out = self.moveit.run(self.moveit.move, goal,
                                       mi.planning_time + mi.motion_timeout,
                                       mi.cancel_timeout, run.cancelled, invalid)
@@ -1057,10 +1078,18 @@ class CalibrationNode(Node):
         after = self._joints_now(mi.joint_names, time.monotonic(), 2.0, run)
         if not out.accepted:
             return self._failed(run, out.note, after)
+        # INVALID_MOTION_PLAN comes with the rejected plan filled in (MoveIt's
+        # ValidateSolution adapter; seen in the mount sweep): a safe skip only if
+        # the joints were watched from the goal until the reply's fresh joints and
+        # never left the start (§3.2, checked in _not_started). shortcut: sampled
+        # at the driver's rate, a gap of at most STILL_MAX_GAP s is trusted;
+        # tighten if a robot can leave and return within that.
+        rejected = out.error_code == INVALID_MOTION_PLAN and watch is not None
         if not a.cartesian and not check_path and out.status == GoalStatus.STATUS_ABORTED and \
-                out.planned_points == 0 and _same(before, after, mi.joint_tolerance):
+                (out.planned_points == 0 or rejected) and \
+                _same(before, after, mi.joint_tolerance):
             return self._not_started(run, cfg, f'planning failed ({error_name(out.error_code)})',
-                                     after)
+                                     after, watch if out.planned_points != 0 else None)
         if out.status != GoalStatus.STATUS_SUCCEEDED or out.error_code != SUCCESS:
             return self._failed(run, f'MoveIt ended the goal with status {out.status}, '
                                 f'{error_name(out.error_code)}', after)
@@ -1189,14 +1218,25 @@ class CalibrationNode(Node):
             run.motion_note = 'the motion did not finish in moveit.motion_timeout; stopped'
         raise RunAbort(R.MOTION_FAILED, run.motion_note)
 
-    def _not_started(self, run: RunState, cfg: P.RunConfig, why: str, joints: Any
-                     ) -> tuple[str, Any, Any]:
+    def _not_started(self, run: RunState, cfg: P.RunConfig, why: str, joints: Any,
+                     watch: StillWatch | None = None) -> tuple[str, Any, Any]:
         """Fresh joints with the reply (the session orders spares from them,
-        §3.2); the earlier sample only if none arrive."""
-        self.get_logger().info(f'motion not started: {why}')
+        §3.2); the earlier sample only if none arrive. With ``watch``, the skip
+        also needs the joints to have stayed at the start from the goal until
+        these fresh joints."""
         fresh = self._joints_now(cfg.moveit.joint_names, time.monotonic(), 2.0, run)
         if fresh is None:            # every reply carries fresh joints (§3.2)
             return self._failed(run, f'{why}; and no fresh /joint_states after it', None)
+        if watch is not None:
+            with self._lock:
+                if watch in self._still_watches:
+                    self._still_watches.remove(watch)
+                watch.end(time.monotonic(), self.now())
+            if not watch.still() or not _same(fresh, watch.ref_vector(cfg.moveit.joint_names),
+                                              cfg.moveit.joint_tolerance):
+                return self._failed(run, f'{why}, but the joints were not seen to stay at the '
+                                    f'start while the goal was active ({watch.why()})', fresh)
+        self.get_logger().info(f'motion not started: {why}')
         joints = fresh
         got = tf_tools.latest(self.tf_buffer, cfg.frames['base_frame'], cfg.frames['tool_frame'])
         return S.MOTION_NOT_STARTED, joints, None if got is None else got[0]
@@ -1461,6 +1501,66 @@ def _segment_distance(p: Any, a: Any, b: Any) -> float:
     ab = b - a
     t = 0.0 if float(ab @ ab) < 1e-18 else float(np.clip((p - a) @ ab / (ab @ ab), 0.0, 1.0))
     return float(np.linalg.norm(p - (a + t * ab)))
+
+
+STILL_MAX_GAP = 0.25     # s, the largest joint-sample gap a StillWatch accepts
+
+
+@dataclass
+class StillWatch:
+    """Did the joints stay at ``ref`` from the goal's start until the watch
+    ended? Fed from /joint_states under the node's lock. Messages stamped before
+    the start are ignored (a replayed or queued old message is not evidence);
+    every watched value in any message, partial or full, must be at ``ref``;
+    full messages must carry strictly increasing stamps (a re-sent message
+    does not count twice) and arrive at most STILL_MAX_GAP s apart in both
+    receive time and stamp, from the start to the end."""
+    ref: dict[str, float]
+    tol: float
+    last: float                 # monotonic time of the last full sample (or the start)
+    start_stamp: float          # node time at the start
+    max_gap: float = 0.0
+    moved: bool = False
+    samples: int = 0
+    last_stamp: float = -math.inf    # stamp of the last full sample
+    newest_stamp: float = -math.inf  # newest stamp on /joint_states (any joints)
+
+    def sample(self, now: float, stamp: float, msg: Any) -> None:
+        if stamp < self.start_stamp:
+            return
+        self.newest_stamp = max(self.newest_stamp, stamp)   # e.g. a gripper-only message
+        pos = {n: float(v) for n, v in zip(msg.name, msg.position, strict=False)
+               if n in self.ref}
+        if not pos:
+            return
+        if any(not math.isfinite(v) or abs(v - self.ref[n]) > self.tol for n, v in pos.items()):
+            self.moved = True
+        if len(pos) == len(self.ref) and stamp > self.last_stamp:
+            prev = self.start_stamp if self.samples == 0 else self.last_stamp
+            self.max_gap = max(self.max_gap, now - self.last, stamp - prev)
+            self.last, self.last_stamp = now, stamp
+            self.samples += 1
+
+    def end(self, now: float, now_stamp: float) -> None:
+        """Close the watch: the time since the last full sample counts too, in
+        receive time and in the stamps' clock (the node's clock, or the newest
+        stamp seen if that is later, e.g. while /clock lags)."""
+        last_stamp = self.start_stamp if self.samples == 0 else self.last_stamp
+        self.max_gap = max(self.max_gap, now - self.last,
+                           max(now_stamp, self.newest_stamp) - last_stamp)
+
+    def ref_vector(self, names: Any) -> Any:
+        return np.array([self.ref[n] for n in names], dtype=float)
+
+    def still(self) -> bool:
+        return self.samples > 0 and not self.moved and self.max_gap <= STILL_MAX_GAP
+
+    def why(self) -> str:
+        if self.moved:
+            return 'a sample left the start'
+        if not self.samples:
+            return 'no joint samples'
+        return f'a {self.max_gap:.2f} s gap between joint samples'
 
 
 def _same(a: Any, b: Any, tol: float) -> bool:
